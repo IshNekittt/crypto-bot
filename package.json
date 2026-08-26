@@ -1,0 +1,31 @@
+{
+  "name": "crypto-bot-smc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bybit V5 Smart Money Concepts (SMC) autonomous trading bot",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "bybit-api": "^4.7.4",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^17.4.2",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.2.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.12",
+    "typescript": "^5.9.3"
+  }
+}

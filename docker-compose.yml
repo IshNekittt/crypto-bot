@@ -1,0 +1,12 @@
+services:
+  smc-bot:
+    build: .
+    container_name: smc-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot-data:/app/data
+    stop_grace_period: 30s
+
+volumes:
+  bot-data:

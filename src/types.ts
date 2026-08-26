@@ -1,0 +1,112 @@
+import { Decimal } from 'decimal.js';
+
+export type Direction = 'BULLISH' | 'BEARISH';
+export type StructureBreakKind = 'BOS' | 'CHOCH';
+export type SwingType = 'HIGH' | 'LOW';
+export type Timeframe = '15' | '240';
+export type TradeSide = 'Buy' | 'Sell';
+export type TradeStatus = 'OPEN' | 'CLOSED';
+
+export enum Trend {
+  UP = 'UP',
+  DOWN = 'DOWN',
+}
+
+export enum StrategyState {
+  SCANNING = 'SCANNING',
+  WAITING = 'WAITING',
+  CONFIRMATION = 'CONFIRMATION',
+  ENTRY_STAGED = 'ENTRY_STAGED',
+  IN_TRADE = 'IN_TRADE',
+}
+
+export interface Candle {
+  readonly timestamp: number;
+  readonly open: string;
+  readonly high: string;
+  readonly low: string;
+  readonly close: string;
+  readonly volume: string;
+}
+
+export interface SwingPoint {
+  readonly type: SwingType;
+  readonly index: number;
+  readonly timestamp: number;
+  readonly price: Decimal;
+}
+
+export interface FVG {
+  readonly direction: Direction;
+  readonly index: number;
+  readonly timestamp: number;
+  readonly top: Decimal;
+  readonly bottom: Decimal;
+}
+
+export interface StructureBreak {
+  readonly kind: StructureBreakKind;
+  readonly direction: Direction;
+  readonly brokenSwing: SwingPoint;
+  readonly candleIndex: number;
+  readonly impulseFactor: Decimal;
+}
+
+export interface OrderBlock {
+  readonly direction: Direction;
+  readonly index: number;
+  readonly timestamp: number;
+  readonly top: Decimal;
+  readonly bottom: Decimal;
+  readonly breakEvent: StructureBreak;
+  readonly invalidated: boolean;
+}
+
+export interface InstrumentInfo {
+  readonly symbol: string;
+  readonly tickSize: string;
+  readonly qtyStep: string;
+  readonly minOrderQty: string;
+  readonly maxOrderQty: string;
+}
+
+export interface SymbolRuntimeState {
+  readonly symbol: string;
+  readonly state: StrategyState;
+  readonly updatedAt: number;
+}
+
+export interface TradeRecord {
+  readonly id: number;
+  readonly symbol: string;
+  readonly side: TradeSide;
+  readonly entryPrice: string;
+  readonly stopLoss: string;
+  readonly takeProfit: string;
+  readonly qty: string;
+  readonly status: TradeStatus;
+  readonly pnl: string | null;
+  readonly exitPrice: string | null;
+  readonly openedAt: number;
+  readonly closedAt: number | null;
+  readonly orderId: string | null;
+}
+
+export interface NewTradeInput {
+  readonly symbol: string;
+  readonly side: TradeSide;
+  readonly entryPrice: string;
+  readonly stopLoss: string;
+  readonly takeProfit: string;
+  readonly qty: string;
+  readonly openedAt: number;
+  readonly orderId?: string | null;
+}
+
+export interface MarketOrderRequest {
+  readonly symbol: string;
+  readonly side: TradeSide;
+  readonly qty: string;
+  readonly stopLoss: string;
+  readonly takeProfit: string;
+}
