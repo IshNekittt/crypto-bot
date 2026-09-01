@@ -1,65 +1,115 @@
+import { Telegraf, Markup } from 'telegraf';
 import { Decimal } from 'decimal.js';
 import { logger } from '../utils/logger';
 
-const TELEGRAM_REQUEST_TIMEOUT_MS = 10000;
-const TELEGRAM_API_BASE = 'https://api.telegram.org';
-
 export class TelegramNotifier {
-  private readonly botToken: string | null;
-  private readonly chatId: string | null;
+  readonly bot: Telegraf;
+  readonly chatId: string;
+  private readonly autoTrading: boolean;
 
-  constructor(botToken: string | null, chatId: string | null) {
-    this.botToken = botToken;
-    this.chatId = chatId;
+  constructor() {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    this.chatId = process.env.TELEGRAM_CHAT_ID || '';
+    this.autoTrading = process.env.AUTO_TRADING === 'true';
+
+    if (!botToken || !this.chatId) {
+      logger.warn('Telegram credentials not configured (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)');
+      this.bot = new Telegraf('dummy:token');
+      return;
+    }
+
+    this.bot = new Telegraf(botToken);
+    this.bot.launch().catch((err) => {
+      logger.error(`Failed to start Telegram bot: ${err.message}`);
+    });
   }
 
-  get enabled(): boolean {
-    return this.botToken !== null && this.chatId !== null;
-  }
-
-  async send(text: string): Promise<boolean> {
-    if (!this.enabled || !this.botToken || !this.chatId) {
-      logger.debug('Telegram notifications disabled (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID)');
+  async sendMessage(html: string): Promise<boolean> {
+    if (!this.chatId) {
+      logger.debug('Telegram chat ID not configured');
       return false;
     }
-    const url = `${TELEGRAM_API_BASE}/bot${this.botToken}/sendMessage`;
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chat_id: this.chatId, text }),
-        signal: AbortSignal.timeout(TELEGRAM_REQUEST_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        const body = await response.text();
-        logger.error(`Telegram send failed: HTTP ${response.status} ${body.slice(0, 300)}`);
-        return false;
-      }
+      await this.bot.telegram.sendMessage(this.chatId, html, { parse_mode: 'HTML' });
       return true;
     } catch (error) {
-      logger.error(
-        `Telegram send failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      logger.error(`Failed to send Telegram message: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   }
 
-  async notifySetupFound(symbol: string, entry: string, stopLoss: string, takeProfit: string): Promise<boolean> {
-    return this.send(
-      `👀 Найден сетап по ${symbol}. Вход: ${entry}, SL: ${stopLoss}, TP: ${takeProfit}`,
-    );
+  async sendMessageWithKeyboard(text: string, keyboard: ReturnType<typeof Markup.inlineKeyboard>): Promise<void> {
+    if (!this.chatId) return;
+    await this.bot.telegram.sendMessage(this.chatId, text, {
+      parse_mode: 'HTML',
+      ...keyboard,
+    });
   }
 
-  async notifyOrderOpened(): Promise<boolean> {
-    return this.send('🚀 Ордер открыт по рынку!');
+  async sendDocument(buffer: Buffer, filename: string): Promise<boolean> {
+    if (!this.chatId) {
+      logger.debug('Telegram chat ID not configured');
+      return false;
+    }
+    try {
+      await this.bot.telegram.sendDocument(this.chatId, {
+        source: buffer,
+        filename,
+      });
+      return true;
+    } catch (error) {
+      logger.error(`Failed to send Telegram document: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   }
 
-  async notifyTradeClosed(pnl: string): Promise<boolean> {
+  async notifySetupFound(symbol: string, entry: string, sl: string, tp: string, scenarioId: number, reason: string): Promise<boolean> {
+    const text = [
+      '👀 <b>Найден сетап</b>',
+      '',
+      `📊 ${symbol} | Сценарий #${scenarioId}`,
+      `💰 Вход: ${entry} | SL: ${sl} | TP: ${tp}`,
+      `📝 ${reason}`,
+    ].join('\n');
+    return this.sendMessage(text);
+  }
+
+  async notifyOrderOpened(symbol: string, entry: string, sl: string, tp: string): Promise<boolean> {
+    const text = [
+      '🚀 <b>Ордер открыт</b>',
+      '',
+      `📊 ${symbol}`,
+      `💰 Вход: ${entry} | SL: ${sl} | TP: ${tp}`,
+    ].join('\n');
+    return this.sendMessage(text);
+  }
+
+  async notifyTradeClosed(symbol: string, pnl: string, pnlPercent: string): Promise<boolean> {
     const icon = new Decimal(pnl).isNegative() ? '❌' : '✅';
-    return this.send(`${icon} Позиция закрыта. PnL: ${pnl} USDT`);
+    const text = [
+      `${icon} <b>Позиция закрыта</b>`,
+      '',
+      `📊 ${symbol}`,
+      `💰 PnL: ${pnl} USDT (${pnlPercent}%)`,
+    ].join('\n');
+    return this.sendMessage(text);
   }
 
   async notifyCriticalError(message: string): Promise<boolean> {
-    return this.send(`⚠️ Критическая ошибка бота: ${message}`);
+    return this.sendMessage(`⚠️ <b>Критическая ошибка</b>\n\n${message}`);
+  }
+
+  async notifyInfo(message: string): Promise<boolean> {
+    return this.sendMessage(`ℹ️ <b>Инфо</b>\n\n${message}`);
+  }
+
+  get enabled(): boolean {
+    return !!this.chatId && !!process.env.TELEGRAM_BOT_TOKEN;
+  }
+
+  get isAutoTrading(): boolean {
+    return this.autoTrading;
   }
 }
+
+export const notifier = new TelegramNotifier();

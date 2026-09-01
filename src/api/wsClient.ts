@@ -2,6 +2,7 @@ import { WebsocketClient } from 'bybit-api';
 import { BotConfig } from '../config/env';
 import { Candle, Timeframe } from '../types';
 import { logger } from '../utils/logger';
+import { Decimal } from 'decimal.js';
 
 const WS_HEARTBEAT_INTERVAL_MS = 20000;
 
@@ -18,6 +19,25 @@ function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null;
 }
 
+function validateWsCandle(open: string, high: string, low: string, close: string, volume: string): boolean {
+  try {
+    const o = new Decimal(open);
+    const h = new Decimal(high);
+    const l = new Decimal(low);
+    const c = new Decimal(close);
+    const v = new Decimal(volume);
+
+    if (!o.isFinite() || !h.isFinite() || !l.isFinite() || !c.isFinite() || !v.isFinite()) return false;
+    if (o.lte(0) || h.lte(0) || l.lte(0) || c.lte(0)) return false;
+    if (h.lt(l)) return false;
+    if (h.lt(o) || h.lt(c)) return false;
+    if (l.gt(o) || l.gt(c)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseKlineItem(symbol: string, interval: string, item: unknown): KlineUpdate | null {
   if (!isRecord(item)) return null;
   const { start, open, high, low, close, volume, confirm } = item;
@@ -26,10 +46,17 @@ function parseKlineItem(symbol: string, interval: string, item: unknown): KlineU
     || typeof close !== 'string' || typeof volume !== 'string') {
     return null;
   }
+  if (!validateWsCandle(open, high, low, close, volume)) {
+    logger.warn(`Skipping invalid WS kline for ${symbol} ${interval}: ${JSON.stringify({ open, high, low, close, volume }).slice(0, 200)}`);
+    return null;
+  }
+  // Only process confirmed candles for SMC logic (confirm === true)
+  // Intermediate ticks (confirm: false) are not used for SMC logic
+  const confirmed = confirm === true;
   return {
     symbol,
     interval,
-    confirmed: confirm === true,
+    confirmed,
     candle: {
       timestamp: Number(start),
       open,

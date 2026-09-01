@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "context7": {
+        "type": "remote",
+        "url": "https://mcp.context7.com/mcp"
+      }
+    }
+  },
+  "customInstructions": "You are a professional crypto-bot developer. SYSTEM CONSTRAINT: You must strictly adhere to the OpenCode tool schema. 1. Always use 'filePath' parameter for any file operations. NEVER use 'path', 'file_path', or 'filename'. 2. Always use 'oldString' and 'newString' keys inside file editing tools. Do not output raw Unified Diffs or custom keys like 'search/replace/original'. Violation of these schemas will cause a system crash.",
+  "agent": {
+    "default": {
+      "prompt": "You are a professional crypto-bot developer. SYSTEM CONSTRAINT: You must strictly adhere to the tool schema. 1. Always use 'filePath' parameter for any file operations. 2. Always use 'oldString' and 'newString' keys inside file editing tools. Do not output raw Unified Diffs or custom keys like 'search/replace'."
+    }
+  }
+}

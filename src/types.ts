@@ -3,7 +3,7 @@ import { Decimal } from 'decimal.js';
 export type Direction = 'BULLISH' | 'BEARISH';
 export type StructureBreakKind = 'BOS' | 'CHOCH';
 export type SwingType = 'HIGH' | 'LOW';
-export type Timeframe = '15' | '240';
+export type Timeframe = '1' | '3' | '5' | '15' | '30' | '60' | '120' | '240' | '360' | '720' | 'D' | 'W' | 'M';
 export type TradeSide = 'Buy' | 'Sell';
 export type TradeStatus = 'OPEN' | 'CLOSED';
 
@@ -109,4 +109,28 @@ export interface MarketOrderRequest {
   readonly qty: string;
   readonly stopLoss: string;
   readonly takeProfit: string;
+}
+
+export interface ScenarioLevels {
+  readonly entry: string;
+  readonly stopLoss: string;
+  readonly takeProfit: string;
+}
+
+export interface IScenario {
+  readonly id: number;
+  readonly name: string;
+  evaluate(patternData: any): boolean;
+  getLevels(): ScenarioLevels;
+  getReason(): string;
+}
+
+export type ScenarioConstructor = new (deps: ScenarioDeps) => IScenario;
+
+export interface ScenarioDeps {
+  readonly symbol: string;
+  readonly instrument: InstrumentInfo;
+  readonly riskManager: any;
+  readonly notifier: any;
+  readonly db: any;
 }

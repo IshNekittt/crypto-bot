@@ -2,24 +2,12 @@ import { BybitClient } from '../api/bybitClient';
 import { KlineUpdate } from '../api/wsClient';
 import { ExecutionEngine } from '../execution/executionEngine';
 import { CandleFeed } from '../feed/candleFeed';
-import { StateDatabase } from '../db/database';
+import { PostgresDatabase } from '../db/database';
 import { PositionPlan, RiskManager } from '../risk/riskManager';
-import {
-  calculateStopLoss,
-  detectStructureBreaks,
-  findFVGs,
-  findOrderBlocks,
-  hasRecentLiquiditySweep,
-} from '../smc/smc';
+import { ScenarioRouter } from './scenarioRouter';
 import { TelegramNotifier } from '../telegram/notifier';
-import {
-  Direction,
-  FVG,
-  InstrumentInfo,
-  OrderBlock,
-  StrategyState,
-  Timeframe,
-} from '../types';
+import { PendingTradeManager } from './pendingTradeManager';
+import { InstrumentInfo, StrategyState, Timeframe } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 
@@ -29,18 +17,13 @@ export interface StrategyEngineDeps {
   readonly symbol: string;
   readonly instrument: InstrumentInfo;
   readonly client: BybitClient;
-  readonly db: StateDatabase;
+  readonly db: PostgresDatabase;
   readonly riskManager: RiskManager;
   readonly executionEngine: ExecutionEngine;
   readonly notifier: TelegramNotifier;
-}
-
-interface SetupContext {
-  direction: Direction;
-  orderBlock4h: OrderBlock;
-  waitingCandlesCount4h: number;
-  orderBlock15m: OrderBlock | null;
-  fvg15m: FVG | null;
+  readonly patternRecognizer: any;
+  readonly autoTrading: boolean;
+  readonly pendingTradeManager: PendingTradeManager;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -66,20 +49,13 @@ function parseClosedPositions(payload: unknown, ownSymbol: string): ClosedPositi
   return events;
 }
 
-function bodyClosesBeyond(candle: { close: string }, block: OrderBlock, direction: Direction): boolean {
-  const close = new Decimal(candle.close);
-  return direction === 'BULLISH'
-    ? close.lessThan(block.bottom)
-    : close.greaterThan(block.top);
-}
-
 export class StrategyEngine {
   readonly symbol: string;
   private readonly deps: StrategyEngineDeps;
   private readonly feed15m: CandleFeed;
   private readonly feed4h: CandleFeed;
+  private readonly scenarioRouter: ScenarioRouter;
   private state: StrategyState = StrategyState.SCANNING;
-  private setup: SetupContext | null = null;
   private plan: PositionPlan | null = null;
   private processing = false;
 
@@ -88,6 +64,12 @@ export class StrategyEngine {
     this.deps = deps;
     this.feed15m = new CandleFeed(deps.symbol, '15', 200);
     this.feed4h = new CandleFeed(deps.symbol, '240', 200);
+
+    this.scenarioRouter = new ScenarioRouter({
+      symbol: deps.symbol,
+      patternRecognizer: deps.patternRecognizer,
+      notifier: deps.notifier,
+    });
   }
 
   getState(): StrategyState {
@@ -96,8 +78,8 @@ export class StrategyEngine {
 
   async initialize(): Promise<void> {
     await this.reloadHistory();
-    const saved = this.deps.db.getSymbolState(this.symbol);
-    const openTrade = this.deps.db.getOpenTrade(this.symbol);
+    const saved = await this.deps.db.getSymbolState(this.symbol);
+    const openTrade = await this.deps.db.getOpenTrade(this.symbol);
     if (saved?.state === StrategyState.IN_TRADE && openTrade) {
       this.state = StrategyState.IN_TRADE;
       logger.warn(
@@ -151,13 +133,55 @@ export class StrategyEngine {
     }
   }
 
+  async handleTradeApproval(tradeId: string, approved: boolean): Promise<void> {
+    const handled = this.deps.pendingTradeManager.handleApproval(tradeId, approved);
+    if (!handled) {
+      logger.warn(`${this.symbol}: approval for unknown/expired trade ${tradeId}`);
+      return;
+    }
+
+    if (!approved) {
+      logger.info(`${this.symbol}: trade ${tradeId} rejected by user`);
+      this.transition(StrategyState.SCANNING);
+      return;
+    }
+
+    // Approved - execute the trade
+    if (!this.plan) {
+      logger.error(`${this.symbol}: no plan for approved trade ${tradeId}`);
+      this.transition(StrategyState.SCANNING);
+      return;
+    }
+
+    logger.info(`${this.symbol}: trade ${tradeId} approved, executing market order`);
+    const result = await this.deps.executionEngine.execute(this.plan);
+    if (!result.ok) {
+      logger.error(`${this.symbol}: order execution failed after approval: ${result.reason}`);
+      this.transition(StrategyState.SCANNING);
+      return;
+    }
+
+    await this.deps.db.openTrade({
+      symbol: this.symbol,
+      scenario_id: this.plan.scenarioId ?? null,
+      entry_price: this.plan.entryPrice,
+      sl_price: this.plan.stopLoss,
+      tp_price: this.plan.takeProfit,
+      qty: this.plan.qty,
+      reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
+      opened_at: Date.now(),
+    });
+    logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
+    this.transition(StrategyState.IN_TRADE);
+  }
+
   private async onExchangePositionClosed(pnl: string | null): Promise<void> {
-    const trade = this.deps.db.getOpenTrade(this.symbol);
+    const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (trade) {
-      this.deps.db.closeTrade(trade.id, pnl, null, Date.now());
+      await this.deps.db.closeTrade(trade.id, pnl, null, Date.now());
     }
     if (pnl !== null) {
-      await this.deps.notifier.notifyTradeClosed(pnl);
+      await this.deps.notifier.notifyTradeClosed(this.symbol, pnl, '0%');
     } else {
       logger.warn(`${this.symbol}: position closed by exchange event, PnL unknown`);
     }
@@ -168,219 +192,208 @@ export class StrategyEngine {
   private transition(state: StrategyState): void {
     this.state = state;
     if (state === StrategyState.SCANNING) {
-      this.setup = null;
       this.plan = null;
     }
-    this.deps.db.setSymbolState(this.symbol, state);
+    void this.deps.db.setSymbolState(this.symbol, state);
     logger.info(`${this.symbol}: state → ${state}`);
   }
 
-  private last4h() {
-    return this.feed4h.getLastClosed();
-  }
-
-  private last15m() {
-    return this.feed15m.getLastClosed();
-  }
-
   private async process(timeframe: Timeframe): Promise<void> {
-    switch (this.state) {
-      case StrategyState.SCANNING:
-        if (timeframe === '240') await this.scan();
-        return;
-      case StrategyState.WAITING:
-        if (timeframe === '240') this.checkWaiting();
-        return;
-      case StrategyState.CONFIRMATION:
-        if (timeframe === '15') await this.checkConfirmation();
-        else this.check4hInvalidation();
-        return;
-      case StrategyState.ENTRY_STAGED:
-        if (timeframe === '15') await this.checkEntryTrigger();
-        else this.check4hInvalidation();
-        return;
-      case StrategyState.IN_TRADE:
-        return;
-    }
-  }
+    // Only evaluate on 15m confirmed candles for scenario matching
+    if (timeframe !== '15') return;
 
-  private async scan(): Promise<void> {
-    const candles = this.feed4h.getCandles();
-    const breaks = detectStructureBreaks(candles);
-    if (breaks.length === 0) return;
-    const blocks = findOrderBlocks(candles, breaks)
-      .filter((block) => !block.invalidated)
-      .sort((a, b) => b.breakEvent.candleIndex - a.breakEvent.candleIndex);
-    const latest = blocks[0];
-    if (!latest) return;
-    this.setup = {
-      direction: latest.direction,
-      orderBlock4h: latest,
-      waitingCandlesCount4h: 0,
-      orderBlock15m: null,
-      fvg15m: null,
-    };
-    logger.info(
-      `${this.symbol}: found ${latest.direction} 4H OB [${latest.bottom.toFixed()}..${latest.top.toFixed()}]`,
-    );
-    this.transition(StrategyState.WAITING);
-  }
+    if (this.state === StrategyState.IN_TRADE) return;
+    if (this.state === StrategyState.ENTRY_STAGED) return;
 
-  private checkWaiting(): void {
-    const candle = this.last4h();
-    const setup = this.setup;
-    if (!candle || !setup) {
-      this.transition(StrategyState.SCANNING);
-      return;
-    }
-    if (bodyClosesBeyond(candle, setup.orderBlock4h, setup.direction)) {
-      logger.info(`${this.symbol}: 4H OB invalidated by body close, back to scanning`);
-      this.transition(StrategyState.SCANNING);
-      return;
-    }
+    const candles15m = this.feed15m.getCandles() as any[];
+    const candles4h = this.feed4h.getCandles() as any[];
 
-    setup.waitingCandlesCount4h += 1;
-    const touched = new Decimal(candle.low).lessThanOrEqualTo(setup.orderBlock4h.top)
-      && new Decimal(candle.high).greaterThanOrEqualTo(setup.orderBlock4h.bottom);
+    if (candles15m.length < 20 || candles4h.length < 20) return;
 
-    if (touched) {
+    const result = await this.scenarioRouter.evaluate(candles15m, candles4h);
+
+    if (result.triggered && result.levels) {
+      const riskResult = await this.deps.riskManager.calculatePosition({
+        symbol: this.symbol,
+        side: 'Buy',
+        entryPrice: new Decimal(result.levels.entry),
+        stopLossRaw: new Decimal(result.levels.stopLoss),
+        instrument: this.deps.instrument,
+      });
+
+      if (!riskResult.ok) {
+        logger.warn(`${this.symbol}: setup discarded — ${riskResult.reason}`);
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
+
+      const newPlan: PositionPlan = {
+        ...riskResult.plan,
+        scenarioId: result.scenario?.id ?? null,
+      };
+      this.plan = newPlan;
+
       logger.info(
-        `${this.symbol}: price touched 4H OB [${setup.orderBlock4h.bottom.toFixed()}..${setup.orderBlock4h.top.toFixed()}]`,
+        `${this.symbol}: ENTRY_STAGED plan qty=${riskResult.plan.qty} entry≈${riskResult.plan.entryPrice} sl=${riskResult.plan.stopLoss} tp=${riskResult.plan.takeProfit} [${result.scenario?.name}]`,
       );
-      this.transition(StrategyState.CONFIRMATION);
+
+      // Send setup found notification (always)
+      await this.deps.notifier.notifySetupFound(
+        this.symbol,
+        result.levels.entry,
+        result.levels.stopLoss,
+        result.levels.takeProfit,
+        result.scenario?.id ?? 0,
+        result.reason,
+      );
+
+      this.transition(StrategyState.ENTRY_STAGED);
+
+      // Handle AUTO_TRADING logic
+      if (this.deps.autoTrading) {
+        // Auto mode: execute immediately
+        await this.executeStagedEntry();
+      } else {
+        // Manual mode: queue for approval
+        await this.queueForApproval(result);
+      }
       return;
     }
 
-    if (setup.waitingCandlesCount4h >= WAITING_ANTI_STUCK_CANDLES_4H) {
-      logger.info(`${this.symbol}: anti-stuck timeout (${WAITING_ANTI_STUCK_CANDLES_4H}x4H without touch), back to scanning`);
-      this.transition(StrategyState.SCANNING);
+    if (!result.triggered) {
+      logger.debug(`No scenario matched`, {
+        symbol: this.symbol,
+        reason: result.reason,
+      });
     }
   }
 
-  private check4hInvalidation(): void {
-    const setup = this.setup;
-    const candle = this.last4h();
-    if (!setup || !candle) return;
-    if (bodyClosesBeyond(candle, setup.orderBlock4h, setup.direction)) {
-      logger.info(`${this.symbol}: 4H OB invalidated while in ${this.state}, back to scanning`);
-      this.transition(StrategyState.SCANNING);
-    }
-  }
+  private async executeStagedEntry(): Promise<void> {
+    if (!this.plan) return;
 
-  private async checkConfirmation(): Promise<void> {
-    const setup = this.setup;
-    if (!setup) {
-      this.transition(StrategyState.SCANNING);
-      return;
-    }
-    const candles = this.feed15m.getCandles();
-    const breaks = detectStructureBreaks(candles);
-    const latestBreak = breaks[breaks.length - 1];
-    if (!latestBreak) return;
-    if (latestBreak.kind !== 'CHOCH' || latestBreak.direction !== setup.direction) return;
-
-    if (!hasRecentLiquiditySweep(candles, setup.direction)) {
-      logger.info(`${this.symbol}: ChoCh seen but no liquidity sweep yet`);
-      return;
-    }
-
-    const freshFvgs = findFVGs(candles)
-      .filter((fvg) => fvg.direction === setup.direction && fvg.index + 2 >= latestBreak.candleIndex)
-      .sort((a, b) => b.index - a.index);
-    const fvg = freshFvgs[0];
-    if (!fvg) {
-      logger.info(`${this.symbol}: ChoCh + sweep confirmed, waiting for fresh 15m FVG`);
-      return;
-    }
-
-    const obs = findOrderBlocks(candles, [latestBreak]);
-    const ob15m = obs.length > 0 ? obs[obs.length - 1] : null;
-    if (!ob15m) {
-      logger.info(`${this.symbol}: ChoCh + sweep confirmed, waiting for 15m OB`);
-      return;
-    }
-
-    setup.fvg15m = fvg;
-    setup.orderBlock15m = ob15m;
-
-    const stopLossRaw = calculateStopLoss(ob15m, setup.direction);
-    const entryEstimate = setup.direction === 'BULLISH' ? fvg.top : fvg.bottom;
-    const planResult = await this.deps.riskManager.calculatePosition({
-      symbol: this.symbol,
-      side: setup.direction === 'BULLISH' ? 'Buy' : 'Sell',
-      entryPrice: entryEstimate,
-      stopLossRaw,
-      instrument: this.deps.instrument,
-    });
-    if (!planResult.ok) {
-      logger.warn(`${this.symbol}: setup discarded — ${planResult.reason}`);
-      this.transition(StrategyState.SCANNING);
-      return;
-    }
-
-    this.plan = planResult.plan;
-    logger.info(
-      `${this.symbol}: ENTRY_STAGED plan qty=${planResult.plan.qty} entry≈${planResult.plan.entryPrice} sl=${planResult.plan.stopLoss} tp=${planResult.plan.takeProfit}`,
-    );
-    await this.deps.notifier.notifySetupFound(
-      this.symbol,
-      planResult.plan.entryPrice,
-      planResult.plan.stopLoss,
-      planResult.plan.takeProfit,
-    );
-    this.transition(StrategyState.ENTRY_STAGED);
-  }
-
-  private async checkEntryTrigger(): Promise<void> {
-    const setup = this.setup;
-    const plan = this.plan;
-    const candle = this.last15m();
-    if (!setup || !plan || !setup.fvg15m || !setup.orderBlock15m || !candle) {
-      this.transition(StrategyState.SCANNING);
-      return;
-    }
-
-    if (bodyClosesBeyond(candle, setup.orderBlock15m, setup.direction)) {
-      logger.info(`${this.symbol}: 15m OB invalidated before entry, setup cancelled`);
-      this.transition(StrategyState.SCANNING);
-      return;
-    }
-
-    const pulledBack = setup.direction === 'BULLISH'
-      ? new Decimal(candle.low).lessThanOrEqualTo(setup.fvg15m.top)
-      : new Decimal(candle.high).greaterThanOrEqualTo(setup.fvg15m.bottom);
-    if (!pulledBack) return;
-
-    logger.info(`${this.symbol}: pullback into 15m FVG detected, executing market order`);
-    const result = await this.deps.executionEngine.execute(plan);
+    logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry`);
+    const result = await this.deps.executionEngine.execute(this.plan);
     if (!result.ok) {
       this.transition(StrategyState.SCANNING);
       return;
     }
-    this.deps.db.openTrade({
+
+    await this.deps.db.openTrade({
       symbol: this.symbol,
-      side: plan.side,
-      entryPrice: plan.entryPrice,
-      stopLoss: plan.stopLoss,
-      takeProfit: plan.takeProfit,
-      qty: plan.qty,
-      openedAt: Date.now(),
-      orderId: result.orderId,
+      scenario_id: this.plan.scenarioId ?? null,
+      entry_price: this.plan.entryPrice,
+      sl_price: this.plan.stopLoss,
+      tp_price: this.plan.takeProfit,
+      qty: this.plan.qty,
+      reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
+      opened_at: Date.now(),
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);
+  }
+
+  private async queueForApproval(result: { levels: any; scenario?: any; reason: string }): Promise<void> {
+    if (!this.plan) return;
+
+    logger.info(`${this.symbol}: AUTO_TRADING=false, queuing for manual approval`);
+    
+    const queued = await this.deps.pendingTradeManager.queueTrade(
+      this.symbol,
+      result.levels.entry,
+      result.levels.stopLoss,
+      result.levels.takeProfit,
+      result.scenario?.id ?? 0,
+      result.reason,
+      this.plan.side,
+      this.plan.qty,
+    );
+
+    if (!queued) {
+      logger.warn(`${this.symbol}: failed to queue trade for approval`);
+      this.transition(StrategyState.SCANNING);
+    }
   }
 
   async reconcile(positions: readonly { size: unknown }[]): Promise<boolean> {
     if (this.state !== StrategyState.IN_TRADE) return false;
     const hasOpenPosition = positions.some((position) => Number(position.size) > 0);
     if (hasOpenPosition) return false;
-    const trade = this.deps.db.getOpenTrade(this.symbol);
+    const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (trade && trade.pnl === null) {
-      this.deps.db.closeTrade(trade.id, null, null, Date.now());
+      await this.deps.db.closeTrade(trade.id, null, null, Date.now());
     }
     logger.warn(`${this.symbol}: reconciliation force-reset IN_TRADE → SCANNING (no position on exchange)`);
     this.transition(StrategyState.SCANNING);
     return true;
   }
+
+  async reconcileWithTrade(trade: {
+    id: number;
+    symbol: string;
+    entryPrice: string;
+    qty: string;
+    side: 'Buy' | 'Sell';
+    openedAt: number;
+    orderId: string | null;
+  }): Promise<boolean> {
+    // Fetch executions from Bybit to calculate PnL
+    try {
+      const endTime = Date.now();
+      const startTime = trade.openedAt;
+      const executions = await this.deps.client.getExecutions(trade.symbol, startTime, endTime);
+
+      // Find closing executions (opposite side of our position)
+      let totalPnl = new Decimal(0);
+      let exitPrice: string | null = null;
+      let foundClosingExecution = false;
+
+      for (const exec of executions) {
+        // For a LONG position (Buy), closing is SELL. For SHORT (Sell), closing is BUY.
+        const isClosingExec = trade.side === 'Buy' ? exec.side === 'Sell' : exec.side === 'Buy';
+        if (!isClosingExec) continue;
+        if (exec.execQty.lte(0)) continue;
+
+        // Calculate PnL from this closing execution
+        const entryPrice = new Decimal(trade.entryPrice);
+        const execPrice = exec.execPrice;
+        const qty = exec.execQty;
+
+        if (trade.side === 'Buy') {
+          totalPnl = totalPnl.plus(execPrice.minus(entryPrice).mul(qty));
+        } else {
+          totalPnl = totalPnl.plus(entryPrice.minus(execPrice).mul(qty));
+        }
+
+        exitPrice = execPrice.toFixed(8);
+        foundClosingExecution = true;
+      }
+
+      const pnlString = foundClosingExecution ? totalPnl.toFixed(8) : null;
+
+      // Close the trade in DB
+      await this.deps.db.closeTrade(trade.id, pnlString, exitPrice, Date.now());
+
+      // Notify Telegram
+      if (pnlString !== null) {
+        await this.deps.notifier.notifyTradeClosed(this.symbol, pnlString, '0%');
+        logger.info(`${this.symbol}: reconciliation closed trade ${trade.id} with PnL ${pnlString}`);
+      } else {
+        logger.warn(`${this.symbol}: reconciliation closed trade ${trade.id} but PnL unknown (no closing execution found)`);
+      }
+
+      // Reset state if this engine was in IN_TRADE
+      if (this.state === StrategyState.IN_TRADE) {
+        this.transition(StrategyState.SCANNING);
+      }
+
+      return true;
+    } catch (error) {
+      logger.error(`${this.symbol}: failed to calculate PnL for trade ${trade.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+}
+
+export function createStrategyEngine(deps: StrategyEngineDeps): StrategyEngine {
+  return new StrategyEngine(deps);
 }

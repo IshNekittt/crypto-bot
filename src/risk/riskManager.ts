@@ -8,7 +8,7 @@ export interface BalanceSource {
 }
 
 export interface TradeHistorySource {
-  getRecentClosedTrades(limit: number): TradeRecord[];
+  getRecentClosedTrades(limit: number): Promise<TradeRecord[]>;
 }
 
 export interface RiskManagerOptions {
@@ -37,6 +37,7 @@ export interface PositionPlan {
   readonly riskAmount: string;
   readonly riskPercentApplied: string;
   readonly balanceUsdt: string;
+  readonly scenarioId: number | null;
 }
 
 export type PositionPlanResult =
@@ -59,7 +60,7 @@ export class RiskManager {
   }
 
   async getEffectiveRiskPercent(): Promise<Decimal> {
-    const recent = this.historySource.getRecentClosedTrades(DRAWDOWN_LOSING_TRADES_COUNT);
+    const recent = await this.historySource.getRecentClosedTrades(DRAWDOWN_LOSING_TRADES_COUNT);
     if (recent.length >= DRAWDOWN_LOSING_TRADES_COUNT && recent.every(isLosingTrade)) {
       return new Decimal(this.options.reducedRiskPercent);
     }
@@ -129,6 +130,7 @@ export class RiskManager {
         riskAmount: riskAmount.toFixed(),
         riskPercentApplied: riskPercent.toFixed(),
         balanceUsdt: balance.toFixed(),
+        scenarioId: null,
       },
     };
   }
