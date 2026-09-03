@@ -1,3 +1,5 @@
+import 'dotenv/config';
+
 import { BybitClient } from './api/bybitClient';
 import { BybitWebsocket } from './api/wsClient';
 import { runPreflight } from './bootstrap/preflight';
@@ -90,6 +92,21 @@ async function main(): Promise<void> {
   });
 
   const engines: StrategyEngine[] = [];
+
+  // Create shared PatternRecognizer instance
+  const patternRecognizer = new PatternRecognizer(client);
+
+  // Initialize macro context for all symbols at startup (bootstrap phase)
+  logger.info('Initializing macro context for all symbols...');
+  for (const symbol of config.symbols) {
+    try {
+      await patternRecognizer.initializeMacroContext(symbol, config.macroCandles);
+    } catch (error) {
+      logger.error(`Failed to initialize macro context for ${symbol}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  logger.info('Macro context initialization complete for all symbols');
+
   for (const symbol of config.symbols) {
     const instrument = instruments.get(symbol);
     if (!instrument) throw new Error(`No instrument info for ${symbol}, aborting`);
@@ -101,7 +118,7 @@ async function main(): Promise<void> {
       riskManager,
       executionEngine,
       notifier,
-      patternRecognizer: new PatternRecognizer(client),
+      patternRecognizer,
       autoTrading: config.autoTrading,
       pendingTradeManager,
     }));
@@ -141,6 +158,17 @@ async function main(): Promise<void> {
 
   await ws.subscribeKlines(config.symbols, ['15', '240']);
   await ws.subscribePrivate();
+
+  // Send Telegram startup test message
+  if (notifier.enabled) {
+    const mode = config.demoTrading ? 'Demo Trading' : (config.testnet ? 'Testnet' : 'Mainnet');
+    await notifier.sendMessage(
+      `🟢 <b>SMC Бот запущен</b>\n` +
+      `Режим: <b>${mode}</b>\n` +
+      `Символы: ${config.symbols.join(', ')}\n` +
+      `Мониторинг запущен!`
+    );
+  }
 
   const reconciliation = new ReconciliationLoop(client, db, engines);
   reconciliation.start();

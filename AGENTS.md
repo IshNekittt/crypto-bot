@@ -36,7 +36,7 @@
 ### Группа Б: Развороты тренда (Reversals)
 5. **HTF Liquidity Sweep** — PDH/PDL/PWH/PWL/BSL/SSL в киллзоне → SFP → агрессивный 15m CHoCH → вход от 15m FVG
 6. **Failure Swing (SMS)** — неудача обновить экстремум → агрессивный CHoCH в обратную сторону → вход от OB, сформировавшего SMS
-7. **AMD** — Asian Range (00-06 NY) →伦敦开盘 свип Asian Low → SFP/CHoCH вверх → вход в лонг, цель — Asian High
+7. **AMD** — Asian Range (00-06 NY) → Лондонский открытие свип Asian Low → SFP/CHoCH вверх → вход в лонг, цель — Asian High
 
 ### Группа В: Работа в боковике (Ranges)
 8. **Range Deviation & Reclaim** — Trading Range → девиация выше RH → реклейм внутрь → медвежий CHoCH → вход от 15m FVG (SHORT), цели: 0.5 Range / Range Low
@@ -82,7 +82,8 @@ TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DATABASE_URL,
 AUTO_TRADING (default false), TRADE_APPROVAL_TIMEOUT_MINUTES (5),
 LEVERAGE (10), REDUCED_RISK_PERCENT (1),
 HISTORY_CANDLES (200, max 1000), MACRO_CANDLES (1000, max 1000),
-LTF_TIMEFRAME (15), HTF_TIMEFRAME (240), LOG_LEVEL, DATA_DIR
+LTF_TIMEFRAME (15), HTF_TIMEFRAME (240), LOG_LEVEL, DATA_DIR,
+DEMO_TRADING (default false)
 ```
 
 ---
@@ -93,6 +94,19 @@ LTF_TIMEFRAME (15), HTF_TIMEFRAME (240), LOG_LEVEL, DATA_DIR
 |-------|----------------|-----------|
 | **Авто** | `true` | Мгновенный MARKET ордер через ExecutionEngine → запись в БД → `IN_TRADE` |
 | **Полуавто** | `false` | `PendingTradeManager.queueTrade()` → TG inline [✅ Войти] [❌ Отменить] + таймер `TRADE_APPROVAL_TIMEOUT_MINUTES` → `engine.handleTradeApproval()` исполняет или отменяет |
+
+### Режим Demo Trading (`DEMO_TRADING=true`)
+- Реальная ликвидность Bybit, но фейковые USDT (как Testnet)
+- `testnet` принудительно ставится в `false` (Bybit API не позволяет одновременно)
+- Используется для тестирования SMC-логики на реальной ликвидности без риска
+
+| Режим | `TESTNET` | `DEMO_TRADING` | Где торгует |
+|-------|-----------|----------------|-------------|
+| Testnet | `true` | `false` | testnet.bybit.com (фейковые USDT, нет ликвидности) |
+| Demo Trading | `false` | `true` | bybit.com/demo (реальная ликвидность, демо USDT) |
+| Mainnet | `false` | `false` | bybit.com (РЕАЛЬНЫЕ ДЕНЬГИ) |
+
+> **Важно**: `DEMO_TRADING=true` принудительно ставит `testnet=false`. Нельзя использовать одновременно.
 
 ---
 
@@ -146,25 +160,35 @@ npm start         # build → bootstrap (требует .env, TESTNET=true по 
 
 ---
 
----
+## КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ PERFORMANCE (2026-09-03)
 
-## КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ ПАРСЕРОВ (2026-09-01)
+### Macro Context — ультра-быстрая инициализация (~5-10ms)
+- **Убрано ВСЁ тяжелое** на макро-свечах (1W/1D): `detectStructureBreaks`, `detectOrderBlocks`, `findSwingPoints`, `detectEqualLevels`, ликвидные пулы BSL/SSL/EQH/EQL
+- **Оставлено ТОЛЬКО необходимое** (линейные проходы O(N)):
+  - **ATH/ATL** — один проход по массиву (max high / min low)
+  - **PWH/PWL** — `weeklyCandles[length-2]` (предпоследняя неделя)
+  - **PDH/PDL** — `dailyCandles[length-2]` (предпоследний день)
+  - **DO/WO** — `open` последней свечи 1D/1W
+  - **FVG** — только на последних **20** дневных свечах (не 1000!)
+  - **Нет** Order Blocks, Breakers, Mitigation на макро
+- **Логи**: `[SYMBOL] Macro context loaded in Xms: ATH=xxx, ATL=yyy`
 
-### REST Klines (GET /v5/market/kline)
-- **Формат API**: `data.list` — массив массивов строк: `[startTime, open, high, low, close, volume, turnover]`
-- **Парсер** `parseRestKlines`: обращается к индексам `[0..5]`, конвертирует в `Decimal`, отбрасывает `turnover` (индекс 6)
-- Валидация: timestamp > 0, все цены/объём > 0, high ≥ low, high ≥ open/close, low ≤ open/close
+### detectStructureBreaks — оптимизация O(N²) → O(N)
+- Свинг-поинты вычисляются **один раз** перед циклом (O(N))
+- Два указателя (`highSwingIdx`, `lowSwingIdx`) вместо O(N²) поиска на каждой итерации
+- **НИКАКИХ `while` циклов** — только `for` с `break`
 
-### WS Klines (kline.{interval}.{symbol})
-- **Payload**: `data: [{ start, end, open, high, low, close, volume, confirm }]`
-- **Парсер** `parseKlineItem`: обрабатывает **ТОЛЬКО** если `confirm === true`
-- Промежуточные тики (`confirm: false`) игнорируются для SMC-логики
-- Используются только подтверждённые свечи для анализа
+### Macro Context — инициализация ТОЛЬКО при старте (Bootstrap)
+- При старте создаётся **один** `PatternRecognizer` на все движки
+- При старте бота (Bootstrap) макроконтекст загружается **ОДИН РАЗ** для всех символов
+- В `buildPatternData` убраны вызовы `initializeMacroContext` — используется только кэш
+- В WebSocket-хендлере (`ws.onKline`) **НЕТ** REST-запросов
 
-### WS Orders (topic: order) — статус
-- Bybit использует строгие **CamelCase** статусы: `New`, `PartiallyFilled`, `Filled`, `Cancelled`, `Rejected`
-- Любые другие написания (`closed`, `FILLED` и т.д.) сломают стейт-машину
-- **Важно**: текущая реализация использует топики `position` и `execution` для управления позициями, топик `order` не используется
+### detectOrderBlocks — СТРОГО по индексам массива
+- **НИКОГДА** не итерировать по `br.timestamp` (триллионы миллисекунд!)
+- Находим `breakIdx = candles.findIndex(c => c.timestamp === br.timestamp)`
+- Идём НАЗАД по индексам: `for (let i = breakIdx - 1; i >= 0; i--)`
+- Никаких циклов по timestamp!
 
 ---
 
@@ -212,10 +236,27 @@ CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades (closed_at DESC);
 
 - **Candle buffers** — index-ordered (ascending), **никогда не ресортить**. `CandleFeed.loadHistory` доверяет порядку REST.
 - **WS reconnect** — `bybit-api` делает сам, `onResync` колбэк: `syncServerTime()` + `reloadHistory()` по всем символам.
-- **Macro context** — при старте загрузка 1000 свечей 1W и 1D → ATH/ATL, HTF FVG/OB, PWH/PWL/DO/WO кэш как LiquidityPool/Zone.
+- **Macro context** — при старте загрузка 1000 свечей 1W и 1D → ATH/ATL, PWH/PWL, PDH/PDL, DO/WO, последние 20 дневных FVG. Время ~5-10ms.
 - **Private WS** — топики `execution`, `position` требуют `isPrivateTopic=true` (в `wsClient.ts`).
 - **Graceful shutdown** — `SIGINT`/`SIGTERM` → stop reconciliation → cancel pending → close WS → close DB pool → `process.exit(0)`.
 
+### PostgreSQL Pool (Supabase) — предотвращение разрывов
+- **max: 5** — для одного бота достаточно, меньше нагрузка на Supabase
+- **idleTimeoutMillis: 10000** (10 сек) — пул сам закрывает простаивающие клиенты до того, как их оборвет Supabase
+- **keepAlive: true** + **keepAliveInitialDelayMillis: 10000** — TCP keep-alive пакеты каждые 10 сек, предотвращают разрыв `ETIMEDOUT` от Supabase
+- **allowExitOnIdle: false** — пул не завершает работу при отсутствии активных клиентов
+- **connectionTimeoutMillis: 5000** — таймаут установки соединения
+
 ---
 
-*Последнее обновление: 2026-09-01. Все 178 тестов зелёные, build проходит.*
+## ЛОГИРОВАНИЕ (Production-ready)
+
+- **Telegram test message** при старте: `🟢 SMC Бот запущен | mode=Demo Trading`
+- **15m candle close**: `[SYMBOL] 15m candle closed at PRICE. Scanning 11 scenarios...`
+- **PatternData built**: `[DEBUG] [SYMBOL] PatternData built in Xms`
+- **Scan complete**: `[INFO] [SYMBOL] Scan complete: no setups triggered.`
+- **Scenario evaluation**: `[DEBUG] [SYMBOL] ScenarioName evaluated in Xms. Result: true/false`
+
+---
+
+*Последнее обновление: 2026-09-03. Все 178 тестов зелёные, build проходит.*

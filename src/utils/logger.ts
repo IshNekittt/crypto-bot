@@ -1,7 +1,13 @@
 import { createLogger, format, transports } from 'winston';
 
+let currentLevel = process.env.LOG_LEVEL ?? 'info';
+
+function getLevel(): string {
+  return process.env.LOG_LEVEL ?? currentLevel;
+}
+
 export const logger = createLogger({
-  level: process.env.LOG_LEVEL ?? 'info',
+  level: getLevel(),
   format: format.combine(
     format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
     format.errors({ stack: true }),
@@ -12,3 +18,8 @@ export const logger = createLogger({
   ),
   transports: [new transports.Console()],
 });
+
+export function setLogLevel(level: string): void {
+  currentLevel = level;
+  logger.level = level;
+}

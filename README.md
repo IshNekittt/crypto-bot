@@ -48,6 +48,7 @@
 BYBIT_API_KEY=ваш_api_key
 BYBIT_API_SECRET=ваш_api_secret
 TESTNET=true                    # true = testnet.bybit.com, false = mainnet (РЕАЛЬНЫЕ ДЕНЬГИ!)
+DEMO_TRADING=false              # true = Demo Trading (реальная ликвидность, фейковые USDT)
 SYMBOLS=SOLUSDT,BTCUSDT,ETHUSDT # Торговые пары через запятую (Bybit V5 Linear/USDT Perpetual)
 
 # ──────────────────────────────────────────────
@@ -96,9 +97,56 @@ DATA_DIR=./data                 # Папка для временных файл�
 | Переменная | Пояснение |
 |------------|-----------|
 | **TESTNET** | `true` — торгует на `testnet.bybit.com` (фейковые USDT). `false` — **РЕАЛЬНЫЕ ДЕНЬГИ** на `bybit.com`. Всегда начинайте с `true`. |
+| **DEMO_TRADING** | `true` — **Demo Trading** (реальная ликвидность Bybit, фейковые USDT). `false` — обычный режим. `DEMO_TRADING=true` принудительно ставит `testnet=false`. Нельзя использовать одновременно с `TESTNET=true`. |
 | **AUTO_TRADING** | `true` — бот сам выставляет MARKET-ордер сразу при сигнале. `false` — бот шлёт в Telegram сообщение с кнопками `✅ Войти / ❌ Отменить` и таймером (`TRADE_APPROVAL_TIMEOUT_MINUTES`). |
 | **LTF_TIMEFRAME / HTF_TIMEFRAME** | В **минутах** как в API Bybit. `15` = 15m, `240` = 4H. LTF — для входа (15m), HTF — для тренда/контекста (4H). Допустимые: `1,3,5,15,30,60,120,240,360,720,D,W,M`. |
 | **DATABASE_URL** | **Direct connection** (port 5432), НЕ PgBouncer (port 6543). В Supabase: Settings → Database → Connection string → **Direct connection**. Формат: `postgresql://postgres.[REF]:[PASS]@db.[REF].supabase.co:5432/postgres?sslmode=require`. |
+
+---
+
+## ⚙️ Режимы работы бота
+
+| Режим | `TESTNET` | `DEMO_TRADING` | Где торгует | Деньги |
+|-------|-----------|----------------|-------------|--------|
+| **Testnet** | `true` | `false` | `testnet.bybit.com` | Фейковые USDT, нет ликвидности |
+| **Demo Trading** | `false` | `true` | `bybit.com/demo` | **Реальная ликвидность**, демо USDT |
+| **Mainnet** | `false` | `false` | `bybit.com` | **РЕАЛЬНЫЕ ДЕНЬГИ** |
+
+> **Важно**: `DEMO_TRADING=true` принудительно ставит `testnet=false`. Нельзя использовать одновременно `TESTNET=true` и `DEMO_TRADING=true`.
+
+> **Совет**: Начинайте с `TESTNET=true` → тестируете 1-2 недели → переходите на `DEMO_TRADING=true` для тестов на реальной ликвидности → только потом `TESTNET=false` + `DEMO_TRADING=false` (Mainnet).
+
+---
+
+## ⚡ Performance Optimizations (2026-09-03)
+
+### Macro Context — ультра-быстрая инициализация (~5-10ms)
+- **Убрано ВСЁ тяжелое** на макро-свечах (1W/1D): `detectStructureBreaks`, `detectOrderBlocks`, `findSwingPoints`, ликвидные пулы на 1000 свечах
+- **Оставлено ТОЛЬКО необходимое** (линейные проходы O(N)):
+  - **ATH/ATL** — один проход по массиву (max high / min low)
+  - **PWH/PWL** — `weeklyCandles[length-2]` (предпоследняя неделя)
+  - **PDH/PDL** — `dailyCandles[length-2]` (предпоследний день)
+  - **DO/WO** — `open` последней свечи 1D/1W
+  - **FVG** — только на последних **20** дневных свечах (не 1000!)
+  - **Нет** Order Blocks, Breakers, Mitigation на макро
+- **Логи**: `[SYMBOL] Macro context loaded in 8ms: ATH=245.50, ATL=12.30`
+
+### detectStructureBreaks — оптимизация O(N²) → O(N)
+- Свинг-поинты вычисляются **один раз** перед циклом (O(N))
+- Два указателя (`highSwingIdx`, `lowSwingIdx`) вместо O(N²) поиска на каждой итерации
+- **НИКАКИХ `while` циклов** — только `for` с `break`
+
+### Macro Context — инициализация ТОЛЬКО при старте (Bootstrap)
+- При старте создаётся **один** `PatternRecognizer` на все движки
+- При старте бота (Bootstrap) макроконтекст загружается **ОДИН РАЗ** для всех символов
+- В `buildPatternData` убраны вызовы `initializeMacroContext` — используется только кэш
+- В WebSocket-хендлере (`ws.onKline`) **НЕТ** REST-запросов
+
+### detectOrderBlocks — СТРОГО по индексам массива
+- **НИКОГДА** не итерировать по `br.timestamp` (триллионы миллисекунд!)
+- Находим `breakIdx = candles.findIndex(c => c.timestamp === br.timestamp)`
+- Идём НАЗАД по индексам: `for (let i = breakIdx - 1; i >= 0; i--)`
+- Никаких циклов по timestamp!
 
 ---
 
@@ -224,6 +272,23 @@ CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades (closed_at DESC);
 > **Ручная настройка таблиц в Supabase НЕ НУЖНА.**
 
 Если нужно сбросить БД — просто удалите таблицы в Supabase Dashboard (SQL Editor: `DROP TABLE trades, symbol_state;`), при следующем старте бот создаст их заново.
+
+---
+
+## ⚙️ Настройка пула подключений PostgreSQL (Supabase)
+
+В `src/db/database.ts` настроен пул подключений для стабильной работы с Supabase:
+
+| Параметр | Значение | Назначение |
+|----------|----------|------------|
+| `max` | `5` | Достаточно для одного бота, меньше нагрузка на Supabase |
+| `idleTimeoutMillis` | `10000` (10 сек) | Пул сам закрывает простаивающие клиенты до разрыва от Supabase |
+| `keepAlive` | `true` | TCP keep-alive пакеты предотвращают разрыв `ETIMEDOUT` |
+| `keepAliveInitialDelayMillis` | `10000` | Первые keep-alive пакеты через 10 сек |
+| `allowExitOnIdle` | `false` | Пул не завершается при отсутствии активных клиентов |
+| `connectionTimeoutMillis` | `5000` | Таймаут установки соединения |
+
+> Эти настройки предотвращают ошибки `ETIMEDOUT` и `read ETIMEDOUT` от бездействующих соединений.
 
 ---
 

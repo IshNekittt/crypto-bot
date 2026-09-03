@@ -59,6 +59,7 @@ export class ScenarioRouter {
         candles4h
       );
 
+      const t0 = Date.now();
       for (const scenario of this.scenarios) {
         try {
           const matches = scenario.evaluate(patternData);
@@ -81,11 +82,6 @@ export class ScenarioRouter {
               levels,
               reason,
             };
-          } else {
-            logger.debug(`Scenario ${scenario.name} not matched`, {
-              symbol: this.symbol,
-              scenario: scenario.name,
-            });
           }
         } catch (err) {
           logger.error('Scenario evaluation error', {
@@ -95,6 +91,10 @@ export class ScenarioRouter {
           });
         }
       }
+
+      const ms = Date.now() - t0;
+      logger.debug(`[${this.symbol}] PatternData built in ${ms}ms`);
+      logger.info(`[${this.symbol}] Scan complete: no setups triggered.`);
 
       return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched' };
     } catch (err) {

@@ -211,6 +211,11 @@ export class StrategyEngine {
 
     if (candles15m.length < 20 || candles4h.length < 20) return;
 
+    const lastCandle = candles15m[candles15m.length - 1];
+    const closePrice = lastCandle?.close ?? 'unknown';
+
+    logger.info(`[${this.symbol}] 15m candle closed at ${closePrice}. Scanning 11 scenarios...`);
+
     const result = await this.scenarioRouter.evaluate(candles15m, candles4h);
 
     if (result.triggered && result.levels) {
@@ -262,10 +267,7 @@ export class StrategyEngine {
     }
 
     if (!result.triggered) {
-      logger.debug(`No scenario matched`, {
-        symbol: this.symbol,
-        reason: result.reason,
-      });
+      logger.info(`[${this.symbol}] Scan complete: no setups triggered.`);
     }
   }
 

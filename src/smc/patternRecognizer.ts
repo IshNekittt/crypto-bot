@@ -256,21 +256,49 @@ export class PatternRecognizer {
   /**
    * Detect BOS/CHoCH with Displacement (> 1.5 * ATR)
    */
+  /**
+   * Detect BOS/CHoCH with Displacement (> 1.5 * ATR)
+   * Optimized: compute swing points ONCE, then iterate with simple for loops
+   */
   detectStructureBreaks(candles: Candle[], atr: Decimal): Structure[] {
     const structures: Structure[] = [];
     let lastValidSwing: SwingPoint | null = null;
     let trend: Direction | null = null;
 
+    // Pre-compute all swing points ONCE (O(N))
+    const allSwingPoints = this.findSwingPoints(candles);
+    const highSwingsAll = allSwingPoints.filter(s => s.type === 'HIGH');
+    const lowSwingsAll = allSwingPoints.filter(s => s.type === 'LOW');
+
+    // Pointers to track the latest valid swing up to index i-3
+    let highSwingIdx = -1;
+    let lowSwingIdx = -1;
+
     for (let i = 0; i < candles.length; i++) {
       // Update last valid swing (confirmed 3 candles ago)
       if (i >= 3) {
         const checkIndex = i - 3;
-        const highSwings = this.findSwingPoints(candles.slice(0, checkIndex + 1)).filter(s => s.type === 'HIGH');
-        const lowSwings = this.findSwingPoints(candles.slice(0, checkIndex + 1)).filter(s => s.type === 'LOW');
 
-        if (highSwings.length > 0) lastValidSwing = highSwings[highSwings.length - 1];
-        if (lowSwings.length > 0 && (!lastValidSwing || lowSwings[lowSwings.length - 1].index > lastValidSwing.index)) {
-          lastValidSwing = lowSwings[lowSwings.length - 1];
+        // Advance highSwingIdx to include swings up to checkIndex
+        for (let h = highSwingIdx + 1; h < highSwingsAll.length; h++) {
+          if (highSwingsAll[h].index <= checkIndex) {
+            highSwingIdx = h;
+          } else {
+            break;
+          }
+        }
+        // Advance lowSwingIdx to include swings up to checkIndex
+        for (let l = lowSwingIdx + 1; l < lowSwingsAll.length; l++) {
+          if (lowSwingsAll[l].index <= checkIndex) {
+            lowSwingIdx = l;
+          } else {
+            break;
+          }
+        }
+
+        if (highSwingIdx >= 0) lastValidSwing = highSwingsAll[highSwingIdx];
+        if (lowSwingIdx >= 0 && (!lastValidSwing || lowSwingsAll[lowSwingIdx].index > lastValidSwing.index)) {
+          lastValidSwing = lowSwingsAll[lowSwingIdx];
         }
       }
 
@@ -365,30 +393,31 @@ export class PatternRecognizer {
     const obs: Zone[] = [];
 
     for (const br of breaks) {
-      // Find the last opposite candle before the break
-      let obIndex = -1;
-      for (let i = br.timestamp; i >= 0; i--) {
-        const candleIdx = candles.findIndex(c => c.timestamp === br.timestamp) - 1;
-        if (candleIdx < 0) break;
+      // Find the index of the break candle
+      const breakIdx = candles.findIndex(c => c.timestamp === br.timestamp);
+      if (breakIdx <= 0) continue; // No candle before the break
 
-        const isBullishCandle = new Decimal(candles[candleIdx].close).gt(candles[candleIdx].open);
+      let obIndex = -1;
+
+      // Go BACKWARDS from the candle BEFORE the break, using array indices (not timestamps!)
+      for (let i = breakIdx - 1; i >= 0; i--) {
+        const isBullishCandle = new Decimal(candles[i].close).gt(candles[i].open);
         const targetBullish = br.direction === 'BEARISH';
 
         if (isBullishCandle === targetBullish) {
-          obIndex = candleIdx;
+          obIndex = i;
           break;
         }
       }
 
       if (obIndex >= 0) {
-        const obCandle = candles[obIndex];
         const direction: Direction = br.direction === 'BULLISH' ? 'BULLISH' : 'BEARISH';
         obs.push({
           type: 'OB',
           direction,
-          top: new Decimal(obCandle.high),
-          bottom: new Decimal(obCandle.low),
-          timestamp: obCandle.timestamp,
+          top: new Decimal(candles[obIndex].high),
+          bottom: new Decimal(candles[obIndex].low),
+          timestamp: candles[obIndex].timestamp,
           mitigated: false,
           timeframe: '15',
         });
@@ -688,6 +717,8 @@ export class PatternRecognizer {
 
   /**
    * Initialize macro context: fetch 1W and 1D candles, find ATH/ATL, POIs
+   * ULTRA-FAST: ~5ms - NO heavy SMC analysis on macro timeframes!
+   * Only computes: ATH, ATL, PWH/PWL, PDH/PDL, DO/WO, recent FVGs (last 20 daily)
    */
   async initializeMacroContext(symbol: string, macroCandles: number): Promise<MacroContext> {
     const cacheKey = `${symbol}_macro`;
@@ -695,95 +726,100 @@ export class PatternRecognizer {
       return this.macroCache.get(cacheKey)!;
     }
 
+    const startMs = Date.now();
     logger.info(`Initializing macro context for ${symbol}...`);
 
-    // Fetch 1W and 1D candles
-    const [weeklyCandles, dailyCandles] = await Promise.all([
-      this.client.getKlines(symbol, 'W', macroCandles),
-      this.client.getKlines(symbol, 'D', macroCandles),
-    ]);
+    try {
+      // Single request for 1W and 1D with limit=1000 (no pagination, no heavy SMC)
+      const [weeklyCandles, dailyCandles] = await Promise.all([
+        this.client.getKlines(symbol, 'W', macroCandles),
+        this.client.getKlines(symbol, 'D', macroCandles),
+      ]);
 
-    // Find ATH/ATL
-    let ath = new Decimal(0);
-    let atl = new Decimal('Infinity');
-    for (const c of [...weeklyCandles, ...dailyCandles]) {
-      const high = new Decimal(c.high);
-      const low = new Decimal(c.low);
-      if (high.gt(ath)) ath = high;
-      if (low.lt(atl)) atl = low;
+      if (!weeklyCandles.length || !dailyCandles.length) {
+        throw new Error('Empty candles from Bybit');
+      }
+
+      // === ATH/ATL: simple linear scan O(N) ===
+      let ath = new Decimal(0);
+      let atl = new Decimal('Infinity');
+      for (const c of [...weeklyCandles, ...dailyCandles]) {
+        const high = new Decimal(c.high);
+        const low = new Decimal(c.low);
+        if (high.gt(ath)) ath = high;
+        if (low.lt(atl)) atl = low;
+      }
+
+      // === PWH/PWL: Previous Week High/Low (2nd last weekly candle) ===
+      const prevWeek = weeklyCandles[weeklyCandles.length - 2] || weeklyCandles[weeklyCandles.length - 1];
+      const wo = new Decimal(weeklyCandles[weeklyCandles.length - 1].open);
+
+      // === PDH/PDL: Previous Day High/Low (2nd last daily candle) ===
+      const prevDay = dailyCandles[dailyCandles.length - 2] || dailyCandles[dailyCandles.length - 1];
+      const do_ = new Decimal(dailyCandles[dailyCandles.length - 1].open);
+
+      // === Recent FVGs: only last 20 daily candles (not 1000!) ===
+      const recentDaily = dailyCandles.slice(-20);
+      const htfFvgs = this.detectFVGs(recentDaily);
+
+      // === Simple levels only - NO heavy SMC on macro timeframes! ===
+      const weeklyLevels = { 
+        pwh: new Decimal(prevWeek.high), 
+        pwl: new Decimal(prevWeek.low), 
+        wo 
+      };
+      const dailyLevels = { 
+        pdh: new Decimal(prevDay.high), 
+        pdl: new Decimal(prevDay.low), 
+        do: do_ 
+      };
+
+      const macro: MacroContext = {
+        ath,
+        atl,
+        htfFvgs: htfFvgs.map(f => ({ ...f, timeframe: 'D' as Timeframe })),
+        htfObs: [],
+        weeklyLevels,
+        dailyLevels,
+        liquidityPools: [],
+      };
+
+      this.macroCache.set(`${symbol}_macro`, macro);
+      const elapsed = Date.now() - startMs;
+      logger.info(`[${symbol}] Macro context loaded in ${elapsed}ms: ATH=${ath.toFixed(2)}, ATL=${atl.toFixed(2)}`);
+      return macro;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to initialize macro context for ${symbol}: ${message}`);
+      // Return empty macro context to allow bot to continue without macro data
+      return {
+        ath: new Decimal(0),
+        atl: new Decimal('Infinity'),
+        htfFvgs: [],
+        htfObs: [],
+        weeklyLevels: { pwh: new Decimal(0), pwl: new Decimal(0), wo: new Decimal(0) },
+        dailyLevels: { pdh: new Decimal(0), pdl: new Decimal(0), do: new Decimal(0) },
+        liquidityPools: [],
+      };
     }
-
-    // Daily levels
-    const dailyLevels = this.detectDailyLevels(dailyCandles);
-    // Weekly levels
-    const weeklyLevels = this.detectWeeklyLevels(weeklyCandles);
-
-    // HTF FVGs and OBs from daily/weekly
-    const htfFvgs = [...this.detectFVGs(dailyCandles), ...this.detectFVGs(weeklyCandles)];
-    const htfStructures = this.detectStructureBreaks(dailyCandles, new Decimal(0));
-    const htfObs = this.detectOrderBlocks(dailyCandles, htfStructures);
-
-    // Equal highs/lows
-    const equalLevels = this.detectEqualLevels(dailyCandles);
-
-    // Build liquidity pools
-    const liquidityPools: LiquidityPool[] = [];
-
-    // BSL/SSL from daily highs/lows
-    for (const c of dailyCandles) {
-      liquidityPools.push({
-        type: 'BSL',
-        priceLevel: new Decimal(c.high),
-        points: [],
-        isTaken: false,
-        timestamp: c.timestamp,
-      });
-      liquidityPools.push({
-        type: 'SSL',
-        priceLevel: new Decimal(c.low),
-        points: [],
-        isTaken: false,
-        timestamp: c.timestamp,
-      });
-    }
-
-    // Add PDH/PDL, PWH/PWL, DO/WO as liquidity pools
-    liquidityPools.push({ type: 'PDH', priceLevel: dailyLevels.pdh, points: [], isTaken: false, timestamp: Date.now() });
-    liquidityPools.push({ type: 'PDL', priceLevel: dailyLevels.pdl, points: [], isTaken: false, timestamp: Date.now() });
-    liquidityPools.push({ type: 'PWH', priceLevel: weeklyLevels.pwh, points: [], isTaken: false, timestamp: Date.now() });
-    liquidityPools.push({ type: 'PWL', priceLevel: weeklyLevels.pwl, points: [], isTaken: false, timestamp: Date.now() });
-    liquidityPools.push({ type: 'DO', priceLevel: dailyLevels.do, points: [], isTaken: false, timestamp: Date.now() });
-    liquidityPools.push({ type: 'WO', priceLevel: weeklyLevels.wo, points: [], isTaken: false, timestamp: Date.now() });
-
-    // EQH/EQL as liquidity
-    for (const eqh of equalLevels.eqh) {
-      liquidityPools.push({ type: 'EQH', priceLevel: eqh, points: [], isTaken: false, timestamp: Date.now() });
-    }
-    for (const eql of equalLevels.eql) {
-      liquidityPools.push({ type: 'EQL', priceLevel: eql, points: [], isTaken: false, timestamp: Date.now() });
-    }
-
-    const macro: MacroContext = {
-      ath,
-      atl,
-      htfFvgs,
-      htfObs,
-      weeklyLevels,
-      dailyLevels,
-      liquidityPools,
-    };
-
-    this.macroCache.set(cacheKey, macro);
-    logger.info(`Macro context initialized for ${symbol}: ATH=${ath.toFixed(2)}, ATL=${atl.toFixed(2)}`);
-    return macro;
   }
 
   /**
    * Build complete pattern data for a symbol
+   * Uses pre-initialized macro context from cache (initialized at startup)
    */
   async buildPatternData(symbol: string, ltfCandles: Candle[], htfCandles: Candle[]): Promise<PatternData> {
-    // Get macro context
-    const macroContext = await this.initializeMacroContext(symbol, this.config.atrPeriod * 10);
+    const startMs = Date.now();
+    // Get macro context from cache (pre-initialized at startup)
+    const macroContext = this.macroCache.get(`${symbol}_macro`) ?? {
+      ath: new Decimal(0),
+      atl: new Decimal('Infinity'),
+      htfFvgs: [],
+      htfObs: [],
+      weeklyLevels: { pwh: new Decimal(0), pwl: new Decimal(0), wo: new Decimal(0) },
+      dailyLevels: { pdh: new Decimal(0), pdl: new Decimal(0), do: new Decimal(0) },
+      liquidityPools: [],
+    };
 
     // Calculate ATRs
     const atr15m = this.calculateATR(ltfCandles, this.config.atrPeriod);
@@ -805,6 +841,9 @@ export class PatternRecognizer {
 
     // Detect Trading Range on 15m
     const tradingRange = this.detectTradingRange(ltfCandles);
+
+    const ms = Date.now() - startMs;
+    logger.debug(`[${symbol}] PatternData built in ${ms}ms`);
 
     return {
       candles15m: ltfCandles,

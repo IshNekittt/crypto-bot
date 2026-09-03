@@ -63,11 +63,14 @@ export class PostgresDatabase {
 
     this.pool = new Pool({
       connectionString: databaseUrl,
-      max: 10,
-      idleTimeoutMillis: 30000,
+      max: 5,
+      idleTimeoutMillis: 10000,
       connectionTimeoutMillis: 5000,
       // Supabase/PostgreSQL connection resilience
       allowExitOnIdle: false,
+      // TCP keep-alive to prevent Supabase from closing idle connections
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
     });
 
     this.pool.on('error', (err) => {
