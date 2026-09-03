@@ -80,6 +80,7 @@ export class BybitWebsocket {
       key: config.apiKey,
       secret: config.apiSecret,
       testnet: config.testnet,
+      demoTrading: config.demoTrading,
       pingInterval: WS_HEARTBEAT_INTERVAL_MS,
     });
     this.registerLifecycleHandlers();

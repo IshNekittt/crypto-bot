@@ -38,8 +38,9 @@ async function main(): Promise<void> {
   setupGlobalErrorHandlers();
 
   const config = loadConfig();
+  const mode = config.demoTrading ? 'Demo Trading' : (config.testnet ? 'Testnet' : 'Mainnet');
   logger.info(
-    `Starting SMC bot | testnet=${config.testnet} symbols=[${config.symbols.join(', ')}] risk=${config.riskPercent}% leverage=${config.leverage}x history=${config.historyCandles} autoTrading=${config.autoTrading}`,
+    `Starting SMC bot | mode=${mode} testnet=${config.testnet} demoTrading=${config.demoTrading} symbols=[${config.symbols.join(', ')}] risk=${config.riskPercent}% leverage=${config.leverage}x history=${config.historyCandles} autoTrading=${config.autoTrading}`,
   );
 
   // Initialize PostgreSQL database

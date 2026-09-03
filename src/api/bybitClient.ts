@@ -125,6 +125,7 @@ export class BybitClient {
       key: config.apiKey,
       secret: config.apiSecret,
       testnet: config.testnet,
+      demoTrading: config.demoTrading,
       strict_param_validation: true,
     }));
   }

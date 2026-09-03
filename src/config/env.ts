@@ -9,6 +9,7 @@ export interface BotConfig {
   readonly apiKey: string;
   readonly apiSecret: string;
   readonly testnet: boolean;
+  readonly demoTrading: boolean;
   readonly symbols: string[];
   readonly riskPercent: string;
   readonly reducedRiskPercent: string;
@@ -103,10 +104,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     throw new Error('MACRO_CANDLES must be <= 1000 (Bybit kline limit)');
   }
 
+  const demoTrading = (optionalEnv(env, 'DEMO_TRADING') ?? 'false').toLowerCase() === 'true';
+  const testnet = demoTrading ? false : (optionalEnv(env, 'TESTNET') ?? 'true').toLowerCase() !== 'false';
+
+  if (demoTrading && testnet) {
+    throw new Error('DEMO_TRADING and TESTNET cannot both be true. DEMO_TRADING forces TESTNET=false.');
+  }
+
   return {
     apiKey: requireEnv(env, 'BYBIT_API_KEY'),
     apiSecret: requireEnv(env, 'BYBIT_API_SECRET'),
-    testnet: (optionalEnv(env, 'TESTNET') ?? 'true').toLowerCase() !== 'false',
+    testnet,
+    demoTrading,
     symbols: parseSymbols(requireEnv(env, 'SYMBOLS')),
     riskPercent,
     reducedRiskPercent,
