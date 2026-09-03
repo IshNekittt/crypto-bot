@@ -17,9 +17,11 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "sourceMap": true,
-    "skipLibCheck": true,
-    "allowImportingTsExtensions": true,
-    "noEmit": true
+    "skipLibCheck": true
+    // These are the settings for AI to run tests, builds and linter observations
+    // Need to be turned on each time AI works with project
+    // "allowImportingTsExtensions": true,
+    // "noEmit": true
   },
   "include": [
     "src/**/*"

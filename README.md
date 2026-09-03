@@ -184,12 +184,44 @@ git push origin main
 > **Миграции выполняются автоматически** при старте бота (`src/db/database.ts::initialize()`).
 > **Ручная настройка таблиц в Supabase НЕ НУЖНА.**
 
-Схема создаётся при первом запуске:
+### Схема таблицы `trades`
 ```sql
--- trades: id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, pnl, exit_price, status, reason, opened_at, closed_at
--- symbol_state: symbol, state, updated_at
--- Индексы на symbol+status, closed_at
+CREATE TABLE trades (
+  id BIGSERIAL PRIMARY KEY,
+  symbol VARCHAR(20) NOT NULL,
+  scenario_id INTEGER,
+  entry_price NUMERIC(24, 8) NOT NULL,
+  sl_price NUMERIC(24, 8) NOT NULL,
+  tp_price NUMERIC(24, 8) NOT NULL,
+  qty NUMERIC(24, 8) NOT NULL,
+  pnl NUMERIC(24, 8),
+  exit_price NUMERIC(24, 8),
+  status VARCHAR(20) NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
+  reason TEXT,
+  opened_at BIGINT NOT NULL,
+  closed_at BIGINT,
+  order_id VARCHAR(255),
+  side VARCHAR(10) CHECK (side IN ('Buy', 'Sell'))
+);
 ```
+
+### Схема таблицы `symbol_state`
+```sql
+CREATE TABLE symbol_state (
+  symbol VARCHAR(20) PRIMARY KEY,
+  state VARCHAR(20) NOT NULL CHECK (state IN ('SCANNING', 'WAITING', 'CONFIRMATION', 'ENTRY_STAGED', 'IN_TRADE')),
+  updated_at BIGINT NOT NULL
+);
+```
+
+### Индексы
+```sql
+CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades (symbol, status, opened_at);
+CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades (closed_at DESC);
+```
+
+> **Миграции выполняются автоматически** при старте бота (`src/db/database.ts::initialize()`).
+> **Ручная настройка таблиц в Supabase НЕ НУЖНА.**
 
 Если нужно сбросить БД — просто удалите таблицы в Supabase Dashboard (SQL Editor: `DROP TABLE trades, symbol_state;`), при следующем старте бот создаст их заново.
 

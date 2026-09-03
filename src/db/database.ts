@@ -96,7 +96,9 @@ export class PostgresDatabase {
           status VARCHAR(20) NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
           reason TEXT,
           opened_at BIGINT NOT NULL,
-          closed_at BIGINT
+          closed_at BIGINT,
+          order_id VARCHAR(255),
+          side VARCHAR(10) CHECK (side IN ('Buy', 'Sell'))
         );
 
         CREATE TABLE IF NOT EXISTS symbol_state (
@@ -154,12 +156,13 @@ export class PostgresDatabase {
     qty: string;
     reason: string | null;
     opened_at: number;
+    side: 'Buy' | 'Sell';
   }): Promise<number> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `INSERT INTO trades (symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8)
+        `INSERT INTO trades (symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side)
+         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9)
          RETURNING id`,
         [
           input.symbol,
@@ -170,6 +173,7 @@ export class PostgresDatabase {
           input.qty,
           input.reason,
           input.opened_at,
+          input.side,
         ],
       );
       return result.rows[0].id;

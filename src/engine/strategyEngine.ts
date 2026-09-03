@@ -170,6 +170,7 @@ export class StrategyEngine {
       qty: this.plan.qty,
       reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
       opened_at: Date.now(),
+      side: this.plan.side,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);
@@ -287,6 +288,7 @@ export class StrategyEngine {
       qty: this.plan.qty,
       reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
       opened_at: Date.now(),
+      side: this.plan.side,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);

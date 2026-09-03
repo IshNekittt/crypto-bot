@@ -168,6 +168,46 @@ npm start         # build → bootstrap (требует .env, TESTNET=true по 
 
 ---
 
+## СХЕМА БАЗЫ ДАННЫХ (PostgreSQL / Supabase)
+
+### Таблица `trades`
+```sql
+CREATE TABLE trades (
+  id BIGSERIAL PRIMARY KEY,
+  symbol VARCHAR(20) NOT NULL,
+  scenario_id INTEGER,
+  entry_price NUMERIC(24, 8) NOT NULL,
+  sl_price NUMERIC(24, 8) NOT NULL,
+  tp_price NUMERIC(24, 8) NOT NULL,
+  qty NUMERIC(24, 8) NOT NULL,
+  pnl NUMERIC(24, 8),
+  exit_price NUMERIC(24, 8),
+  status VARCHAR(20) NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
+  reason TEXT,
+  opened_at BIGINT NOT NULL,
+  closed_at BIGINT,
+  order_id VARCHAR(255),
+  side VARCHAR(10) CHECK (side IN ('Buy', 'Sell'))
+);
+```
+
+### Таблица `symbol_state`
+```sql
+CREATE TABLE symbol_state (
+  symbol VARCHAR(20) PRIMARY KEY,
+  state VARCHAR(20) NOT NULL CHECK (state IN ('SCANNING', 'WAITING', 'CONFIRMATION', 'ENTRY_STAGED', 'IN_TRADE')),
+  updated_at BIGINT NOT NULL
+);
+```
+
+### Индексы
+```sql
+CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades (symbol, status, opened_at);
+CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades (closed_at DESC);
+```
+
+---
+
 ## ВАЖНЫЕ ТЕХНИЧЕСКИЕ ДЕТАЛИ
 
 - **Candle buffers** — index-ordered (ascending), **никогда не ресортить**. `CandleFeed.loadHistory` доверяет порядку REST.

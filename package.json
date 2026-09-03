@@ -14,7 +14,6 @@
     "test": "jest"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
     "bybit-api": "^4.7.4",
     "decimal.js": "^10.6.0",
     "dotenv": "^17.4.2",
@@ -25,7 +24,6 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
     "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
     "@types/luxon": "^3.7.5",
