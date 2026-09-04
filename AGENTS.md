@@ -190,6 +190,24 @@ npm start         # build → bootstrap (требует .env, TESTNET=true по 
 - Идём НАЗАД по индексам: `for (let i = breakIdx - 1; i >= 0; i--)`
 - Никаких циклов по timestamp!
 
+### Исправление дублей логов и дедупликации свечей (2026-09-04)
+- **Убрано задвоение лога "PatternData built"**: удален дублирующий `logger.debug` в `scenarioRouter.ts`, оставлен только в `patternRecognizer.ts`
+- **Исправлена дедупликация свечей**: вместо строгого сравнения timestamp (`===`) используется окно в 60 секунд (`timeDiff < 60000`), что блокирует повторную обработку при двойном `confirm: true` от Bybit
+- **Убран дубль лога "PatternData built" в `scenarioRouter.ts`** — оставлен только в `patternRecognizer.ts`
+- **Убраны неиспользуемые переменные** `t0`, `ms` в `scenarioRouter.ts`
+- **Формат логов**: строго 3 строки на закрытие свечи (candle close, PatternData built, Scan complete)
+
+### Telegram UX improvements (2026-09-04)
+- **Inline-кнопки**: после нажатия Approve/Reject клавиатура убирается (`editMessageReplyMarkup`), в конец сообщения добавляется статус `[ ✅ APPROVED ]` / `[ ❌ REJECTED ]`
+- **Dry-run тест**: команда `/test_signal` создает фейковую сделку с флагом `isTest: true`, при аппруве логируется `✅ Test trade approved (DRY RUN)` без реального ордера
+- **Dependency Injection**: `setPendingTradeManager()` в `TelegramNotifier` для внедрения `PendingTradeManager`
+
+### detectOrderBlocks — СТРОГО по индексам массива
+- **НИКОГДА** не итерировать по `br.timestamp` (триллионы миллисекунд!)
+- Находим `breakIdx = candles.findIndex(c => c.timestamp === br.timestamp)`
+- Идём НАЗАД по индексам: `for (let i = breakIdx - 1; i >= 0; i--)`
+- Никаких циклов по timestamp!
+
 ---
 
 ## СХЕМА БАЗЫ ДАННЫХ (PostgreSQL / Supabase)
@@ -253,10 +271,17 @@ CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades (closed_at DESC);
 
 - **Telegram test message** при старте: `🟢 SMC Бот запущен | mode=Demo Trading`
 - **15m candle close**: `[SYMBOL] 15m candle closed at PRICE. Scanning 11 scenarios...`
-- **PatternData built**: `[DEBUG] [SYMBOL] PatternData built in Xms`
+- **PatternData built**: `[DEBUG] [SYMBOL] PatternData built in Xms` (только в `patternRecognizer.ts`, убрано дублирование в `scenarioRouter.ts`)
 - **Scan complete**: `[INFO] [SYMBOL] Scan complete: no setups triggered.`
 - **Scenario evaluation**: `[DEBUG] [SYMBOL] ScenarioName evaluated in Xms. Result: true/false`
 
+### Формат логов на закрытие каждой 15m свечи (строго 3 строки)
+```
+[INFO] [SYMBOL] 15m candle closed at PRICE. Scanning 11 scenarios...
+[DEBUG] [SYMBOL] PatternData built in Xms
+[INFO] [SYMBOL] Scan complete: no setups triggered.
+```
+
 ---
 
-*Последнее обновление: 2026-09-03. Все 178 тестов зелёные, build проходит.*
+*Последнее обновление: 2026-09-04. Все 178 тестов зелёные, build проходит.*

@@ -59,7 +59,6 @@ export class ScenarioRouter {
         candles4h
       );
 
-      const t0 = Date.now();
       for (const scenario of this.scenarios) {
         try {
           const matches = scenario.evaluate(patternData);
@@ -92,8 +91,6 @@ export class ScenarioRouter {
         }
       }
 
-      const ms = Date.now() - t0;
-      logger.debug(`[${this.symbol}] PatternData built in ${ms}ms`);
       logger.info(`[${this.symbol}] Scan complete: no setups triggered.`);
 
       return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched' };

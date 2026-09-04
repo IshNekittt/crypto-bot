@@ -58,6 +58,7 @@ export class StrategyEngine {
   private state: StrategyState = StrategyState.SCANNING;
   private plan: PositionPlan | null = null;
   private processing = false;
+  private lastProcessedCandleTimestamp: number = 0;
 
   constructor(deps: StrategyEngineDeps) {
     this.symbol = deps.symbol;
@@ -212,9 +213,15 @@ export class StrategyEngine {
     if (candles15m.length < 20 || candles4h.length < 20) return;
 
     const lastCandle = candles15m[candles15m.length - 1];
-    const closePrice = lastCandle?.close ?? 'unknown';
+    const candleTimestamp = lastCandle?.timestamp ?? 0;
 
-    logger.info(`[${this.symbol}] 15m candle closed at ${closePrice}. Scanning 11 scenarios...`);
+    // Deduplication: skip if we already processed this candle (within 1 minute window)
+    const timeDiff = Math.abs(candleTimestamp - this.lastProcessedCandleTimestamp);
+    if (timeDiff < 60000 && this.lastProcessedCandleTimestamp > 0) {
+      logger.debug(`[${this.symbol}] Skipping duplicate/near-duplicate candle at ${candleTimestamp} (diff: ${timeDiff}ms)`);
+      return;
+    }
+    this.lastProcessedCandleTimestamp = candleTimestamp;
 
     const result = await this.scenarioRouter.evaluate(candles15m, candles4h);
 

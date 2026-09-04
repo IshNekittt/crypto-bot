@@ -26,14 +26,16 @@ function setupGlobalErrorHandlers(): void {
     process.exit(1);
   });
 
-  process.on('unhandledRejection', async (reason: unknown) => {
+  function onUnhandledRejection(reason: unknown): void {
     const message = reason instanceof Error ? reason.message : String(reason);
     logger.error(`🆘 UNHANDLED REJECTION: ${message}`);
     if (notifier.enabled) {
-      await notifier.notifyCriticalError(`🆘 <b>UNHANDLED REJECTION</b>\n<code>${message}</code>\n\nContainer will restart.`);
+      notifier.notifyCriticalError(`🆘 <b>UNHANDLED REJECTION</b>\n<code>${message}</code>\n\nContainer will restart.`);
     }
     process.exit(1);
-  });
+  }
+  
+  process.on('unhandledRejection', onUnhandledRejection);
 }
 
 async function main(): Promise<void> {
@@ -68,27 +70,79 @@ async function main(): Promise<void> {
   const approvalTimeoutMinutes = config.tradeApprovalTimeoutMinutes ?? 5;
   const pendingTradeManager = new PendingTradeManager(notifier, approvalTimeoutMinutes);
 
+  // Inject PendingTradeManager into TelegramNotifier for /test_signal command
+  notifier.setPendingTradeManager(pendingTradeManager);
+
   // Register Telegram action handlers for approve/reject
   notifier.bot.action(/^approve_(.+)$/, async (ctx) => {
     const tradeId = ctx.match[1];
     const engine = engines.find((e) => tradeId.startsWith(e.symbol));
-    if (engine) {
+    
+    // Get the pending trade to check if it's a test trade
+    const pendingTradeApprove = pendingTradeManager.getPendingTrade(tradeId);
+    const isTestTrade = pendingTradeApprove?.isTest === true;
+    
+    if (engine && !isTestTrade) {
       await engine.handleTradeApproval(tradeId, true);
-      await ctx.answerCbQuery('✅ Сделка подтверждена');
-    } else {
+    } else if (isTestTrade) {
+      logger.info(`✅ Test trade approved (DRY RUN): ${tradeId}`);
+    } else if (!engine && !isTestTrade) {
       await ctx.answerCbQuery('Сделка не найдена');
+      return;
     }
+    
+    // Edit message: remove keyboard and add status
+    try {
+      await ctx.editMessageReplyMarkup(undefined); // Remove keyboard
+      let originalText = '';
+      const message = ctx.callbackQuery?.message;
+      if (message && 'text' in message) {
+        originalText = message.text;
+      }
+      await ctx.editMessageText(
+        `${originalText}\n\n<b>[ ✅ APPROVED ]</b>`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (editError) {
+      logger.debug(`Failed to edit message: ${editError instanceof Error ? editError.message : String(editError)}`);
+    }
+    
+    await ctx.answerCbQuery(isTestTrade ? '✅ Test trade approved (DRY RUN)' : '✅ Сделка подтверждена');
   });
-
+  
   notifier.bot.action(/^reject_(.+)$/, async (ctx) => {
     const tradeId = ctx.match[1];
     const engine = engines.find((e) => tradeId.startsWith(e.symbol));
-    if (engine) {
+    
+    const pendingTradeReject = pendingTradeManager.getPendingTrade(tradeId);
+    const isTestTrade = pendingTradeReject?.isTest === true;
+    
+    if (engine && !isTestTrade) {
       await engine.handleTradeApproval(tradeId, false);
-      await ctx.answerCbQuery('❌ Сделка отклонена');
-    } else {
+    } else if (isTestTrade) {
+      logger.info(`❌ Test trade rejected (DRY RUN): ${tradeId}`);
+    } else if (!engine && !isTestTrade) {
       await ctx.answerCbQuery('Сделка не найдена');
+      return;
     }
+    
+    // Edit message: remove keyboard and add status
+    try {
+      await ctx.editMessageReplyMarkup(undefined); // Remove keyboard
+      let originalText = '';
+      const message = ctx.callbackQuery?.message;
+      if (message && 'text' in message) {
+        originalText = message.text;
+      }
+      await ctx.editMessageText(
+        `${originalText}\n\n<b>[ ❌ REJECTED ]</b>`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (editError) {
+      logger.debug(`Failed to edit message: ${editError instanceof Error ? editError.message : String(editError)}`);
+    }
+    
+    await ctx.answerCbQuery(isTestTrade ? '❌ Test trade rejected (DRY RUN)' : '❌ Сделка отклонена');
   });
 
   const engines: StrategyEngine[] = [];
@@ -158,17 +212,6 @@ async function main(): Promise<void> {
 
   await ws.subscribeKlines(config.symbols, ['15', '240']);
   await ws.subscribePrivate();
-
-  // Send Telegram startup test message
-  if (notifier.enabled) {
-    const mode = config.demoTrading ? 'Demo Trading' : (config.testnet ? 'Testnet' : 'Mainnet');
-    await notifier.sendMessage(
-      `🟢 <b>SMC Бот запущен</b>\n` +
-      `Режим: <b>${mode}</b>\n` +
-      `Символы: ${config.symbols.join(', ')}\n` +
-      `Мониторинг запущен!`
-    );
-  }
 
   const reconciliation = new ReconciliationLoop(client, db, engines);
   reconciliation.start();

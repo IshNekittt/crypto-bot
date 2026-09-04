@@ -15,6 +15,7 @@ export interface PendingTrade {
   resolve: (approved: boolean) => void;
   timeoutHandle: NodeJS.Timeout;
   createdAt: number;
+  isTest?: boolean;  // Flag for dry-run test trades
 }
 
 export class PendingTradeManager {
@@ -122,6 +123,27 @@ export class PendingTradeManager {
     this.pendingTrades.delete(tradeId);
     pending.resolve(approved);
     return true;
+  }
+
+  /**
+   * Add a test trade for dry-run testing via /test_signal command
+   */
+  addTestTrade(tradeId: string, trade: {
+    id: string;
+    symbol: string;
+    entry: string;
+    sl: string;
+    tp: string;
+    scenarioId: number;
+    reason: string;
+    side: 'Buy' | 'Sell';
+    qty: string;
+    resolve: (approved: boolean) => void;
+    timeoutHandle: NodeJS.Timeout;
+    createdAt: number;
+    isTest?: boolean;
+  }): void {
+    this.pendingTrades.set(tradeId, trade as PendingTrade);
   }
 
   getPendingCount(): number {

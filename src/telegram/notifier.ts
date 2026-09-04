@@ -1,11 +1,17 @@
 import { Telegraf, Markup } from 'telegraf';
 import { Decimal } from 'decimal.js';
 import { logger } from '../utils/logger';
+import { PendingTradeManager } from '../engine/pendingTradeManager';
 
 export class TelegramNotifier {
   readonly bot: Telegraf;
   readonly chatId: string;
   private readonly autoTrading: boolean;
+  private pendingTradeManager: PendingTradeManager | null = null;
+
+  setPendingTradeManager(manager: PendingTradeManager): void {
+    this.pendingTradeManager = manager;
+  }
 
   constructor() {
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -21,6 +27,87 @@ export class TelegramNotifier {
     this.bot = new Telegraf(botToken);
     this.bot.launch().catch((err) => {
       logger.error(`Failed to start Telegram bot: ${err.message}`);
+    });
+
+    // Register /test_signal command for dry-run testing
+    this.bot.command('test_signal', async (ctx) => {
+      if (ctx.chat.id.toString() !== this.chatId) {
+        await ctx.reply('❌ Unauthorized');
+        return;
+      }
+
+      if (!this.pendingTradeManager) {
+        await ctx.reply('❌ PendingTradeManager not initialized');
+        return;
+      }
+
+      // Create a fake trade for testing
+      const fakeTrade = {
+        symbol: 'BTCUSDT',
+        entry: '45000',
+        sl: '44000',
+        tp: '48000',
+        scenarioId: 1,
+        reason: 'TEST SIGNAL - Dry run for approval flow',
+        side: 'Buy' as const,
+        qty: '0.01',
+      };
+
+      const tradeId = this.pendingTradeManager.generateTradeId(fakeTrade.symbol);
+      
+      const text = [
+        '🧪 <b>TEST SIGNAL (DRY RUN)</b>',
+        '',
+        `📊 <b>Symbol:</b> ${fakeTrade.symbol}`,
+        `🎯 <b>Scenario:</b> #${fakeTrade.scenarioId}`,
+        `📈 <b>Direction:</b> ${fakeTrade.side}`,
+        `💰 <b>Entry:</b> ${fakeTrade.entry}`,
+        `🛡 <b>SL:</b> ${fakeTrade.sl}`,
+        `🎯 <b>TP:</b> ${fakeTrade.tp}`,
+        `📦 <b>Qty:</b> ${fakeTrade.qty}`,
+        '',
+        `📝 <b>Reason:</b> ${fakeTrade.reason}`,
+        '',
+        `⏱ Timer: 5 min`,
+        '',
+        '<i>This is a TEST signal - no real order will be placed</i>',
+      ].join('\n');
+
+      const keyboard = Markup.inlineKeyboard([
+        Markup.button.callback('✅ Войти (Test)', `approve_${tradeId}`),
+        Markup.button.callback('❌ Отменить (Test)', `reject_${tradeId}`),
+      ]);
+
+      // Store the fake trade in pendingTradeManager
+      const timeoutHandle = setTimeout(() => {
+        if (this.pendingTradeManager) {
+          this.pendingTradeManager.handleApproval(tradeId, false);
+        }
+      }, 5 * 60 * 1000); // 5 minutes
+
+      this.pendingTradeManager.addTestTrade(tradeId, {
+        id: tradeId,
+        symbol: fakeTrade.symbol,
+        entry: fakeTrade.entry,
+        sl: fakeTrade.sl,
+        tp: fakeTrade.tp,
+        scenarioId: fakeTrade.scenarioId,
+        reason: fakeTrade.reason,
+        side: fakeTrade.side,
+        qty: fakeTrade.qty,
+        resolve: () => {},
+        timeoutHandle,
+        createdAt: Date.now(),
+        isTest: true,
+      });
+
+      try {
+        await this.sendMessageWithKeyboard(text, keyboard);
+        await ctx.reply('✅ Test signal sent! Check the message above.');
+      } catch (error) {
+        logger.error(`Failed to send test signal: ${error instanceof Error ? error.message : String(error)}`);
+        await ctx.reply('❌ Failed to send test signal');
+      }
     });
   }
 

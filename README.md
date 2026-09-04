@@ -118,7 +118,26 @@ DATA_DIR=./data                 # Папка для временных файл�
 
 ---
 
-## ⚡ Performance Optimizations (2026-09-03)
+## ⚡ Performance Optimizations & Fixes (2026-09-04)
+
+### Исправления и оптимизации (2026-09-04)
+
+### Исправление дублей логов и дедупликация свечей
+- **Убрано задвоение лога "PatternData built"**: удален дублирующий `logger.debug` в `scenarioRouter.ts`, оставлен только в `patternRecognizer.ts`
+- **Исправлена дедупликация свечей**: вместо строгого сравнения timestamp (`===`) используется окно в **60 секунд** (`timeDiff < 60000`), что блокирует повторную обработку при двойном `confirm: true` от Bybit
+- **Убран дубль лога "PatternData built"** в `scenarioRouter.ts` — оставлен только в `patternRecognizer.ts`
+- **Убраны неиспользуемые переменные** `t0`, `ms` в `scenarioRouter.ts`
+
+### Telegram UX улучшения
+- **Inline-кнопки**: после нажатия Approve/Reject клавиатура убирается (`editMessageReplyMarkup`), в конец сообщения добавляется статус `[ ✅ APPROVED ]` / `[ ❌ REJECTED ]`
+- **Dry-run тест**: команда `/test_signal` создает фейковую сделку BTCUSDT (entry: 45000, SL: 44000, TP: 48000, qty: 0.01), кладет в `PendingTradeManager`, шлет в Telegram сообщение с кнопками ✅ Войти (Test) / ❌ Отменить (Test). При нажатии ✅ — бот пишет в консоль `✅ Test trade approved (DRY RUN)` (реальный ордер на Bybit **не** отправляется).
+- **Dependency Injection**: добавлен сеттер `setPendingTradeManager()` в `TelegramNotifier` для внедрения `PendingTradeManager`
+
+### Исправление detectOrderBlocks
+- **Строгое правило**: перебор свечей **строго по индексам массива** (`breakIdx - 1`), никаких таймстемпов!
+- Исправлен критический баг: цикл `for (let i = br.timestamp; i >= 0; i--)` → `for (let i = breakIdx - 1; i >= 0; i--)`
+
+### Performance Optimizations (2026-09-03)
 
 ### Macro Context — ультра-быстрая инициализация (~5-10ms)
 - **Убрано ВСЁ тяжелое** на макро-свечах (1W/1D): `detectStructureBreaks`, `detectOrderBlocks`, `findSwingPoints`, ликвидные пулы на 1000 свечах
@@ -130,6 +149,23 @@ DATA_DIR=./data                 # Папка для временных файл�
   - **FVG** — только на последних **20** дневных свечах (не 1000!)
   - **Нет** Order Blocks, Breakers, Mitigation на макро
 - **Логи**: `[SYMBOL] Macro context loaded in 8ms: ATH=245.50, ATL=12.30`
+
+### detectStructureBreaks — оптимизация O(N²) → O(N)
+- Свинг-поинты вычисляются **один раз** перед циклом (O(N))
+- Два указателя (`highSwingIdx`, `lowSwingIdx`) вместо O(N²) поиска на каждой итерации
+- **НИКАКИХ `while` циклов** — только `for` с `break`
+
+### Macro Context — инициализация ТОЛЬКО при старте (Bootstrap)
+- При старте создаётся **один** `PatternRecognizer` на все движки
+- При старте бота (Bootstrap) макроконтекст загружается **ОДИН РАЗ** для всех символов
+- В `buildPatternData` убраны вызовы `initializeMacroContext` — используется только кэш
+- В WebSocket-хендлере (`ws.onKline`) **НЕТ** REST-запросов
+
+### detectOrderBlocks — СТРОГО по индексам массива
+- **НИКОГДА** не итерировать по `br.timestamp` (триллионы миллисекунд!)
+- Находим `breakIdx = candles.findIndex(c => c.timestamp === br.timestamp)`
+- Идём НАЗАД по индексам: `for (let i = breakIdx - 1; i >= 0; i--)`
+- Никаких циклов по timestamp!
 
 ### detectStructureBreaks — оптимизация O(N²) → O(N)
 - Свинг-поинты вычисляются **один раз** перед циклом (O(N))
