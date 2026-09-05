@@ -77,7 +77,7 @@ export interface SymbolRuntimeState {
 }
 
 export interface TradeRecord {
-  readonly id: number;
+  readonly id: string;
   readonly symbol: string;
   readonly side: TradeSide;
   readonly entryPrice: string;

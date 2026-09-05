@@ -4,9 +4,6 @@ services:
     container_name: smc-bot
     restart: unless-stopped
     env_file: .env
-    volumes:
-      - bot-data:/app/data
+    ports:
+      - "3000:3000"
     stop_grace_period: 30s
-
-volumes:
-  bot-data:

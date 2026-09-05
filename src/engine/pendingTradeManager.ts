@@ -15,7 +15,8 @@ export interface PendingTrade {
   resolve: (approved: boolean) => void;
   timeoutHandle: NodeJS.Timeout;
   createdAt: number;
-  isTest?: boolean;  // Flag for dry-run test trades
+  isTest?: boolean;           // Flag for dry-run test trades
+  isLiveDemoTest?: boolean;   // Flag for live demo test trades (real order on Demo)
 }
 
 export class PendingTradeManager {
@@ -142,6 +143,28 @@ export class PendingTradeManager {
     timeoutHandle: NodeJS.Timeout;
     createdAt: number;
     isTest?: boolean;
+  }): void {
+    this.pendingTrades.set(tradeId, trade as PendingTrade);
+  }
+
+  /**
+   * Add a live demo test trade for /test_live_order command
+   * This creates a real trade that will execute on Bybit Demo when approved
+   */
+  addLiveDemoTestTrade(tradeId: string, trade: {
+    id: string;
+    symbol: string;
+    entry: string;
+    sl: string;
+    tp: string;
+    scenarioId: number;
+    reason: string;
+    side: 'Buy' | 'Sell';
+    qty: string;
+    resolve: (approved: boolean) => void;
+    timeoutHandle: NodeJS.Timeout;
+    createdAt: number;
+    isLiveDemoTest: true;
   }): void {
     this.pendingTrades.set(tradeId, trade as PendingTrade);
   }

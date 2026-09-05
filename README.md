@@ -84,6 +84,7 @@ DATABASE_URL=postgresql://postgres.[PROJECT_REF]:[PASSWORD]@db.[PROJECT_REF].sup
 # ──────────────────────────────────────────────
 AUTO_TRADING=false              # true = бот сам входит в сделку; false = шлет кнопки в TG
 TRADE_APPROVAL_TIMEOUT_MINUTES=5 # Таймаут на аппрув в полуавто (мин)
+ENABLE_LIVE_TEST_ORDERS=false   # true = включить команду /test_live_order (E2E тест на Demo)
 
 # ──────────────────────────────────────────────
 # СИСТЕМНЫЕ
@@ -101,6 +102,7 @@ DATA_DIR=./data                 # Папка для временных файл�
 | **AUTO_TRADING** | `true` — бот сам выставляет MARKET-ордер сразу при сигнале. `false` — бот шлёт в Telegram сообщение с кнопками `✅ Войти / ❌ Отменить` и таймером (`TRADE_APPROVAL_TIMEOUT_MINUTES`). |
 | **LTF_TIMEFRAME / HTF_TIMEFRAME** | В **минутах** как в API Bybit. `15` = 15m, `240` = 4H. LTF — для входа (15m), HTF — для тренда/контекста (4H). Допустимые: `1,3,5,15,30,60,120,240,360,720,D,W,M`. |
 | **DATABASE_URL** | **Direct connection** (port 5432), НЕ PgBouncer (port 6543). В Supabase: Settings → Database → Connection string → **Direct connection**. Формат: `postgresql://postgres.[REF]:[PASS]@db.[REF].supabase.co:5432/postgres?sslmode=require`. |
+| **ENABLE_LIVE_TEST_ORDERS** | `true` — включает команду `/test_live_order` для сквозного E2E теста на Demo Trading. `false` (по умолчанию) — команда скрыта и недоступна. **Настоятельно рекомендуется держать `false` на мейннете!** |
 
 ---
 
@@ -132,6 +134,23 @@ DATA_DIR=./data                 # Папка для временных файл�
 - **Inline-кнопки**: после нажатия Approve/Reject клавиатура убирается (`editMessageReplyMarkup`), в конец сообщения добавляется статус `[ ✅ APPROVED ]` / `[ ❌ REJECTED ]`
 - **Dry-run тест**: команда `/test_signal` создает фейковую сделку BTCUSDT (entry: 45000, SL: 44000, TP: 48000, qty: 0.01), кладет в `PendingTradeManager`, шлет в Telegram сообщение с кнопками ✅ Войти (Test) / ❌ Отменить (Test). При нажатии ✅ — бот пишет в консоль `✅ Test trade approved (DRY RUN)` (реальный ордер на Bybit **не** отправляется).
 - **Dependency Injection**: добавлен сеттер `setPendingTradeManager()` в `TelegramNotifier` для внедрения `PendingTradeManager`
+
+### Telegram Commands & Security (2026-09-05)
+- **Команда `/test_signal`** — создает тестовый сигнал (dry-run) для проверки флоу аппрува. Бот отправляет сообщение с inline-кнопками ✅ Войти (Test) / ❌ Отменить (Test). При нажатии ✅ логируется `✅ Test trade approved (DRY RUN)`, реальный ордер на Bybit **не** отправляется.
+- **Команда `/test_live_order`** — сквозной интеграционный тест (E2E) полного цикла исполнения ордера на Bybit Demo. Берет первую пару, получает текущую цену, рассчитывает SL/TP, использует реальный RiskManager для расчёта qty (баланс, tickSize, qtyStep), кладет сделку в PendingTradeManager с флагом `isLiveDemoTest: true`, шлет в Telegram алерт с кнопками ✅ Войти (LIVE DEMO) / ❌ Отменить. При нажатии ✅ сделка проходит через `engine.handleTradeApproval` → `ExecutionEngine` → реальный POST /v5/order/create на Bybit Demo. Полный ответ API (orderId, retCode, retMsg) логируется в консоль. Работает ТОЛЬКО в режиме Demo Trading.
+- **Команда `/backup`** — ручной запуск бэкапа БД. Вызывает `BackupService.runManualBackup()`, делает `SELECT * FROM trades`, собирает CSV, сжимает в `.csv.gz` через `zlib.gzipSync`, отправляет как документ в Telegram. Если таблица пуста — отправляется файл только с заголовками колонок. Имя файла в формате `trades_backup_YYYY_MM_DD.csv.gz` (такое же как у авто-бэкапа).
+- **Stealth Authorization Middleware** — глобальный middleware в Telegraf, проверяет `ctx.chat?.id.toString()` на строгое совпадение с `TELEGRAM_CHAT_ID` из `.env`. Чужие пользователи получают **глухой игнор** (просто `return`, никаких ответов/ошибок). Меню команд (`setMyCommands`) **не настраивается** — бот невидим для посторонних.
+- **Dependency Injection**: добавлен сеттер `setBackupService()` в `TelegramNotifier` для внедрения `BackupService`. Добавлен `setLiveTestDependencies()` для внедрения client, riskManager, executionEngine, pendingTradeManager, engines.
+
+### Backup Service Improvements (2026-09-05)
+- **Нет авто-бэкапа при старте** — `BackupService.start()` только ставит `setInterval` на 24 часа. Первый авто-бэкап через 24 часа после запуска.
+- **Единая логика имени файла** — `getBackupFilename()` возвращает `trades_backup_YYYY_MM_DD.csv.gz` для авто и ручного бэкапа.
+- **Ручной бэкап через основной метод** — `/backup` вызывает `runManualBackup()`, который использует ту же `runBackup()` логику, что и таймер. Никакого дублирования кода.
+- **Web Standard sendDocument** — используется нативный `fetch` + `Blob` + `FormData` (Web API), а не Telegraf streams. Это исправляет `socket hang up` в Node.js 26+.
+
+### Database Schema Fix (2026-09-05)
+- **id и order_id изменены на VARCHAR(255)** — Были `BIGSERIAL`/`BIGINT`, теперь строковые идентификаторы (например, `BTCUSDT_1788604751264_1` или `TEST_DB_1`). Это позволяет использовать понятные ID сделок вместо автоинкремента.
+- Обновлены все интерфейсы (`TradeRecord`, `TradeRow`, `TradeInput`) и методы (`openTrade`, `closeTrade`, `getOpenTrade`, `getRecentClosedTrades`, `getAllOpenTrades`, `reconcileWithTrade`) на `string`.
 
 ### Исправление detectOrderBlocks
 - **Строгое правило**: перебор свечей **строго по индексам массива** (`breakIdx - 1`), никаких таймстемпов!
@@ -212,6 +231,52 @@ npm run dev               # ts-node (если настроено)
 
 ---
 
+## 🐳 Docker Deploy (2026-09-05)
+
+### Быстрый запуск через Docker Compose
+```bash
+# 1. Настройте .env
+cp .env.example .env
+nano .env
+
+# 2. Сборка и запуск
+docker compose up -d --build
+
+# 3. Логи
+docker compose logs -f
+
+# 4. Остановка
+docker compose down
+```
+
+### Dockerfile (Multi-stage)
+| Стадия | Образ | Действие |
+|--------|-------|----------|
+| **Builder** | `node:20-alpine` | `npm ci` → `npm run build` |
+| **Runner** | `node:20-alpine` | `npm ci --omit=dev` → копирует `dist/` |
+
+- **Итоговый образ**: ~80-100 MB, чистый JS, никаких dev-зависимостей
+- **Port**: `EXPOSE 3000` (health-check на `GET /` → `200 OK`)
+- **Graceful shutdown**: 30s (`stop_grace_period` в compose)
+
+### docker-compose.yml
+```yaml
+services:
+  smc-bot:
+    build: .
+    container_name: smc-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    stop_grace_period: 30s
+```
+- **Нет volumes** — бот полностью Stateless
+- **Порт 3000** проброшен для health-check
+- **Переменные окружения** из `.env` файла
+
+---
+
 ## ☁️ Деплой на Render.com
 
 ### 1. Подготовка репозитория
@@ -253,7 +318,7 @@ git push origin main
 
 | Параметр | Значение |
 |----------|----------|
-| **Расписание** | При старте бота + каждые 24 часа |
+| **Расписание** | Каждые 24 часа (первый — через 24 часа после старта) |
 | **Источник** | `SELECT * FROM trades` (все сделки за всё время) |
 | **Формат** | CSV → GZIP (в памяти, через `zlib.gzipSync`) |
 | **Доставка** | Telegram документ `.csv.gz` (файл `trades_backup_YYYY_MM_DD.csv.gz`) |

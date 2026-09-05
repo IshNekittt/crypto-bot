@@ -202,6 +202,23 @@ npm start         # build → bootstrap (требует .env, TESTNET=true по 
 - **Dry-run тест**: команда `/test_signal` создает фейковую сделку с флагом `isTest: true`, при аппруве логируется `✅ Test trade approved (DRY RUN)` без реального ордера
 - **Dependency Injection**: `setPendingTradeManager()` в `TelegramNotifier` для внедрения `PendingTradeManager`
 
+### Telegram Commands & Security (2026-09-05)
+- **Команда `/test_signal`** — создает тестовый сигнал (dry-run) для проверки флоу аппрува. Бот отправляет сообщение с inline-кнопками ✅ Войти (Test) / ❌ Отменить (Test). При нажатии ✅ логируется `✅ Test trade approved (DRY RUN)`, реальный ордер на Bybit **не** отправляется.
+- **Команда `/test_live_order`** — сквозной интеграционный тест (E2E) полного цикла исполнения ордера на Bybit Demo. Берет первую пару, получает текущую цену, рассчитывает SL/TP, использует реальный RiskManager для расчёта qty (баланс, tickSize, qtyStep), кладет сделку в PendingTradeManager с флагом `isLiveDemoTest: true`, шлет в Telegram алерт с кнопками ✅ Войти (LIVE DEMO) / ❌ Отменить. При нажатии ✅ сделка проходит через `engine.handleTradeApproval` → `ExecutionEngine` → реальный POST /v5/order/create на Bybit Demo. Полный ответ API (orderId, retCode, retMsg) логируется в консоль. **Отключена по умолчанию** через `ENABLE_LIVE_TEST_ORDERS=false` (env). Включается только для тестов на Demo Trading.
+- **Команда `/backup`** — ручной запуск бэкапа БД. Вызывает `BackupService.runManualBackup()`, делает `SELECT * FROM trades`, собирает CSV, сжимает в `.csv.gz` через `zlib.gzipSync`, отправляет как документ в Telegram. Если таблица пуста — отправляется файл только с заголовками колонок. Имя файла в формате `trades_backup_YYYY_MM_DD.csv.gz` (такое же как у авто-бэкапа).
+- **Stealth Authorization Middleware** — глобальный middleware в Telegraf, проверяет `ctx.chat?.id.toString()` на строгое совпадение с `TELEGRAM_CHAT_ID` из `.env`. Чужие пользователи получают **глухой игнор** (просто `return`, никаких ответов/ошибок). Меню команд (`setMyCommands`) **не настраивается** — бот невидим для посторонних.
+- **Dependency Injection**: `setBackupService()` в `TelegramNotifier` для внедрения `BackupService`. `BackupService` создается на старте в `index.ts` и внедряется до запуска WS/движков. Добавлен `setLiveTestDependencies()` для внедрения client, riskManager, executionEngine, pendingTradeManager, engines. Добавлен `setEnableLiveTestOrders()` для включения/отключения `/test_live_order`.
+
+### Backup Service Improvements (2026-09-05)
+- **Нет авто-бэкапа при старте** — `BackupService.start()` только ставит `setInterval` на 24 часа. Первый авто-бэкап через 24 часа после запуска.
+- **Единая логика имени файла** — `getBackupFilename()` возвращает `trades_backup_YYYY_MM_DD.csv.gz` для авто и ручного бэкапа.
+- **Ручной бэкап через основной метод** — `/backup` вызывает `runManualBackup()`, который использует ту же `runBackup()` логику, что и таймер. Никакого дублирования кода.
+- **Web Standard sendDocument** — используется нативный `fetch` + `Blob` + `FormData` (Web API), а не Telegraf streams. Это исправляет `socket hang up` в Node.js 26+.
+
+### Database Schema Fix (2026-09-05)
+- **id и order_id изменены на VARCHAR(255)** — Были `BIGSERIAL`/`BIGINT`, теперь строковые идентификаторы (например, `BTCUSDT_1788604751264_1` или `TEST_DB_1`). Это позволяет использовать понятные ID сделок вместо автоинкремента.
+- Обновлены все интерфейсы (`TradeRecord`, `TradeRow`, `TradeInput`) и методы (`openTrade`, `closeTrade`, `getOpenTrade`, `getRecentClosedTrades`, `getAllOpenTrades`, `reconcileWithTrade`) на `string`.
+
 ### detectOrderBlocks — СТРОГО по индексам массива
 - **НИКОГДА** не итерировать по `br.timestamp` (триллионы миллисекунд!)
 - Находим `breakIdx = candles.findIndex(c => c.timestamp === br.timestamp)`
@@ -215,7 +232,7 @@ npm start         # build → bootstrap (требует .env, TESTNET=true по 
 ### Таблица `trades`
 ```sql
 CREATE TABLE trades (
-  id BIGSERIAL PRIMARY KEY,
+  id VARCHAR(255) PRIMARY KEY,
   symbol VARCHAR(20) NOT NULL,
   scenario_id INTEGER,
   entry_price NUMERIC(24, 8) NOT NULL,
@@ -284,4 +301,35 @@ CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades (closed_at DESC);
 
 ---
 
-*Последнее обновление: 2026-09-04. Все 178 тестов зелёные, build проходит.*
+---
+
+## DOCKER DEPLOY (2026-09-05)
+
+### Dockerfile (Multi-stage)
+- **Base**: `node:20-alpine` (легковесный, без python/make/gcc)
+- **Stage 1 (builder)**: `npm ci` → `npm run build` → собирает `dist/`
+- **Stage 2 (runner)**: `npm ci --omit=dev` → копирует `dist/` → `EXPOSE 3000` → `CMD ["node", "dist/index.js"]`
+- **Итоговый образ**: ~80-100 MB, чистый JS, никаких dev-зависимостей
+
+### docker-compose.yml
+```yaml
+services:
+  smc-bot:
+    build: .
+    container_name: smc-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    stop_grace_period: 30s
+```
+- **Нет volumes** — бот полностью Stateless, `/data` не используется
+- **Порт 3000** проброшен для health-check (Render/load balancer)
+- **Graceful shutdown** 30s для корректного завершения
+
+### .dockerignore
+Исключены: `.git`, `node_modules`, `dist`, `data`, `.env*`, `*.md`, `tests/`, `jest.config.js`, `tsconfig.json`, `AGENTS.md`, `smc_full_guide.md`, `*.sh`
+
+---
+
+*Последнее обновление: 2026-09-05. Все 178 тестов зелёные, build проходит.*

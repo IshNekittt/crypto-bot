@@ -18,14 +18,12 @@ export class BackupService {
 
   start(): void {
     if (this.timer) return;
-    // Run immediately on startup, then every 24h
-    this.runBackup().catch((err) => logger.error(`Initial backup failed: ${err.message}`));
-    
+    // Only schedule every 24h, NO immediate backup on startup
     this.timer = setInterval(() => {
       void this.runBackup();
     }, BACKUP_INTERVAL_MS);
     this.timer.unref();
-    logger.info(`Backup service started (every 24h)`);
+    logger.info(`Backup service started (every 24h, first run in 24h)`);
   }
 
   stop(): void {
@@ -33,6 +31,33 @@ export class BackupService {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  async generateBackupBuffer(): Promise<Buffer> {
+    const trades = await this.db.getAllTrades();
+    const csv = this.tradesToCsv(trades);
+    return gzipSync(Buffer.from(csv, 'utf8'));
+  }
+
+  private getBackupFilename(): string {
+    const date = new Date();
+    return `trades_backup_${date.getFullYear()}_${String(date.getMonth() + 1).padStart(2, '0')}_${String(date.getDate()).padStart(2, '0')}.csv.gz`;
+  }
+
+  async runManualBackup(): Promise<void> {
+    if (!this.notifier.enabled) {
+      logger.debug('Telegram not configured, skipping manual backup');
+      return;
+    }
+    await this.runBackup();
+  }
+
+  async forceBackup(): Promise<void> {
+    if (!this.notifier.enabled) {
+      logger.debug('Telegram not configured, skipping auto backup');
+      return;
+    }
+    await this.runBackup();
   }
 
   private async runBackup(): Promise<void> {
@@ -46,22 +71,14 @@ export class BackupService {
     }
     this.running = true;
     try {
-      const trades = await this.db.getAllTrades();
-      if (trades.length === 0) {
-        logger.info('Backup: no trades to backup');
-        return;
-      }
+      const buffer = await this.generateBackupBuffer();
+      const filename = this.getBackupFilename();
 
-      const csv = this.tradesToCsv(trades);
-      const gzipped = gzipSync(Buffer.from(csv, 'utf8'));
-      
-      const date = new Date();
-      const filename = `trades_backup_${date.getFullYear()}_${String(date.getMonth() + 1).padStart(2, '0')}_${String(date.getDate()).padStart(2, '0')}.csv.gz`;
-
-      const success = await this.notifier.sendDocument(gzipped, filename);
+      const success = await this.notifier.sendDocument(buffer, filename);
       
       if (success) {
-        logger.info(`Backup completed: ${trades.length} trades, ${gzipped.length} bytes compressed`);
+        const trades = await this.db.getAllTrades();
+        logger.info(`Backup completed: ${trades.length} trades, ${buffer.length} bytes compressed`);
       } else {
         throw new Error('Telegram sendDocument returned false');
       }
@@ -75,7 +92,7 @@ export class BackupService {
   }
 
   private tradesToCsv(trades: Array<{
-    id: number;
+    id: string;
     symbol: string;
     scenario_id: number | null;
     entry_price: string;

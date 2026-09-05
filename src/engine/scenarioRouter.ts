@@ -91,8 +91,6 @@ export class ScenarioRouter {
         }
       }
 
-      logger.info(`[${this.symbol}] Scan complete: no setups triggered.`);
-
       return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched' };
     } catch (err) {
       logger.error('Pattern recognition failed', {

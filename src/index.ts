@@ -73,20 +73,49 @@ async function main(): Promise<void> {
   // Inject PendingTradeManager into TelegramNotifier for /test_signal command
   notifier.setPendingTradeManager(pendingTradeManager);
 
+  // Initialize BackupService early for DI into TelegramNotifier
+  const backupService = new BackupService(db, notifier);
+  notifier.setBackupService(backupService);
+
   // Register Telegram action handlers for approve/reject
   notifier.bot.action(/^approve_(.+)$/, async (ctx) => {
     const tradeId = ctx.match[1];
     const engine = engines.find((e) => tradeId.startsWith(e.symbol));
     
-    // Get the pending trade to check if it's a test trade
+    // Get the pending trade to check flags
     const pendingTradeApprove = pendingTradeManager.getPendingTrade(tradeId);
     const isTestTrade = pendingTradeApprove?.isTest === true;
+    const isLiveDemoTest = pendingTradeApprove?.isLiveDemoTest === true;
     
-    if (engine && !isTestTrade) {
+    if (engine && !isTestTrade && !isLiveDemoTest) {
       await engine.handleTradeApproval(tradeId, true);
     } else if (isTestTrade) {
       logger.info(`✅ Test trade approved (DRY RUN): ${tradeId}`);
-    } else if (!engine && !isTestTrade) {
+    } else if (isLiveDemoTest) {
+      logger.info(`⚡ LIVE DEMO TEST trade approved - executing real order: ${tradeId}`);
+      const pending = pendingTradeApprove;
+      if (pending) {
+        const result = await executionEngine.executeLiveDemoTest({
+          symbol: pending.symbol,
+          side: pending.side,
+          qty: pending.qty,
+          entry: pending.entry,
+          stopLoss: pending.sl,
+          takeProfit: pending.tp,
+        });
+        
+        // Log full Bybit API response
+        logger.info(`⚡ LIVE DEMO TEST Result: orderId=${result.orderId ?? 'N/A'} retCode=${result.retCode ?? 'N/A'} retMsg=${result.retMsg ?? 'N/A'} ok=${result.ok}`);
+        
+        if (result.ok) {
+          await ctx.answerCbQuery(`⚡ LIVE DEMO TEST executed! Order: ${result.orderId}`);
+          // Remove from pending
+          pendingTradeManager.handleApproval(tradeId, false); // Just clean up, don't trigger engine
+        } else {
+          await ctx.answerCbQuery(`❌ Order failed: ${result.reason}`);
+        }
+      }
+    } else if (!engine && !isTestTrade && !isLiveDemoTest) {
       await ctx.answerCbQuery('Сделка не найдена');
       return;
     }
@@ -107,7 +136,10 @@ async function main(): Promise<void> {
       logger.debug(`Failed to edit message: ${editError instanceof Error ? editError.message : String(editError)}`);
     }
     
-    await ctx.answerCbQuery(isTestTrade ? '✅ Test trade approved (DRY RUN)' : '✅ Сделка подтверждена');
+    const answerText = isTestTrade ? '✅ Test trade approved (DRY RUN)' 
+      : isLiveDemoTest ? '⚡ LIVE DEMO TEST order executed!'
+      : '✅ Сделка подтверждена';
+    await ctx.answerCbQuery(answerText);
   });
   
   notifier.bot.action(/^reject_(.+)$/, async (ctx) => {
@@ -116,12 +148,15 @@ async function main(): Promise<void> {
     
     const pendingTradeReject = pendingTradeManager.getPendingTrade(tradeId);
     const isTestTrade = pendingTradeReject?.isTest === true;
+    const isLiveDemoTest = pendingTradeReject?.isLiveDemoTest === true;
     
     if (engine && !isTestTrade) {
       await engine.handleTradeApproval(tradeId, false);
     } else if (isTestTrade) {
       logger.info(`❌ Test trade rejected (DRY RUN): ${tradeId}`);
-    } else if (!engine && !isTestTrade) {
+    } else if (isLiveDemoTest) {
+      logger.info(`⚡ LIVE DEMO TEST trade rejected: ${tradeId}`);
+    } else if (!engine && !isTestTrade && !isLiveDemoTest) {
       await ctx.answerCbQuery('Сделка не найдена');
       return;
     }
@@ -142,7 +177,10 @@ async function main(): Promise<void> {
       logger.debug(`Failed to edit message: ${editError instanceof Error ? editError.message : String(editError)}`);
     }
     
-    await ctx.answerCbQuery(isTestTrade ? '❌ Test trade rejected (DRY RUN)' : '❌ Сделка отклонена');
+    const answerText = isTestTrade ? '❌ Test trade rejected (DRY RUN)' 
+      : isLiveDemoTest ? '⚡ LIVE DEMO TEST cancelled'
+      : '❌ Сделка отклонена';
+    await ctx.answerCbQuery(answerText);
   });
 
   const engines: StrategyEngine[] = [];
@@ -182,6 +220,18 @@ async function main(): Promise<void> {
     await engine.initialize();
   }
 
+  // Inject live test dependencies into TelegramNotifier for /test_live_order command
+  notifier.setLiveTestDependencies({
+    client,
+    riskManager,
+    executionEngine,
+    pendingTradeManager,
+    engines,
+  });
+
+  // Enable /test_live_order command only if env var is set
+  notifier.setEnableLiveTestOrders(config.enableLiveTestOrders);
+
   const ws = new BybitWebsocket(config);
 
   let resyncInProgress = false;
@@ -216,8 +266,6 @@ async function main(): Promise<void> {
   const reconciliation = new ReconciliationLoop(client, db, engines);
   reconciliation.start();
 
-  // Initialize backup service
-  const backupService = new BackupService(db, notifier);
   backupService.start();
 
   // Graceful shutdown handler

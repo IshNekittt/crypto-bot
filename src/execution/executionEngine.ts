@@ -80,4 +80,63 @@ export class ExecutionEngine {
       return { ok: false, reason: message };
     }
   }
+
+  /**
+   * Execute a live demo test order directly (bypassing StrategyEngine)
+   * Used by /test_live_order command
+   */
+  async executeLiveDemoTest(params: {
+    symbol: string;
+    side: 'Buy' | 'Sell';
+    qty: string;
+    entry: string;
+    stopLoss: string;
+    takeProfit: string;
+  }): Promise<{ ok: boolean; orderId?: string; reason?: string; retCode?: number; retMsg?: string }> {
+    try {
+      const orderId = await this.submitter.placeMarketOrderWithTpsl({
+        symbol: params.symbol,
+        side: params.side,
+        qty: params.qty,
+        stopLoss: params.stopLoss,
+        takeProfit: params.takeProfit,
+      });
+      logger.info(
+        `⚡ LIVE DEMO TEST Order placed: ${params.symbol} ${params.side} qty=${params.qty} entry≈${params.entry} sl=${params.stopLoss} tp=${params.takeProfit} id=${orderId}`,
+      );
+      return { ok: true, orderId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`⚡ LIVE DEMO TEST Order failed for ${params.symbol}: ${message}`);
+      
+      // Try to extract retCode and retMsg from error message
+      let retCode: number | undefined;
+      let retMsg: string | undefined;
+      const codeMatch = /\[(\d+)\]/.exec(message);
+      if (codeMatch) {
+        retCode = parseInt(codeMatch[1], 10);
+      }
+      const msgMatch = /\"retMsg\":\"([^\"]+)\"/.exec(message) || /retMsg:\s*([^,\}]+)/.exec(message);
+      if (msgMatch) {
+        retMsg = msgMatch[1];
+      }
+      
+      if (isCircuitBreakerError(error)) {
+        await this.notifier.notifyCriticalError(
+          `${params.symbol}: circuit breaker — отправка ордеров заблокирована на 60с (${message})`,
+        );
+        return { ok: false, reason: `${params.symbol}: circuit breaker — ${message}`, retCode, retMsg };
+      }
+
+      if (isThrottlingOrMarginError(error)) {
+        await this.notifier.notifyCriticalError(
+          `${params.symbol}: rate limit / insufficient balance — ${message}`,
+        );
+        return { ok: false, reason: `${params.symbol}: rate limit — ${message}`, retCode, retMsg };
+      }
+
+      await this.notifier.notifyCriticalError(`${params.symbol}: ордер отклонён — ${message}`);
+      return { ok: false, reason: message, retCode, retMsg };
+    }
+  }
 }

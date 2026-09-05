@@ -9,7 +9,7 @@ export interface ReconcilableEngine {
   getState(): import('../types').StrategyState;
   reconcile(positions: readonly { size: unknown }[]): Promise<boolean>;
   reconcileWithTrade(trade: {
-    id: number;
+    id: string;
     symbol: string;
     entryPrice: string;
     qty: string;

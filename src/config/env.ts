@@ -24,6 +24,7 @@ export interface BotConfig {
   readonly databaseUrl: string | null;
   readonly autoTrading: boolean;
   readonly tradeApprovalTimeoutMinutes: number;
+  readonly enableLiveTestOrders: boolean;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -130,5 +131,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     databaseUrl: optionalEnv(env, 'DATABASE_URL'),
     autoTrading: (optionalEnv(env, 'AUTO_TRADING') ?? 'false').toLowerCase() === 'true',
     tradeApprovalTimeoutMinutes: parseInt(optionalEnv(env, 'TRADE_APPROVAL_TIMEOUT_MINUTES') ?? '5', 10),
+    enableLiveTestOrders: (optionalEnv(env, 'ENABLE_LIVE_TEST_ORDERS') ?? 'false').toLowerCase() === 'true',
   };
 }

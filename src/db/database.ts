@@ -4,7 +4,7 @@ import { logger } from '../utils/logger';
 const { Pool } = pg;
 
 export interface TradeRow {
-  id: number;
+  id: string;
   symbol: string;
   scenario_id: number | null;
   entry_price: string;
@@ -37,7 +37,7 @@ export interface TradeInput {
 }
 
 export interface TradeRecord {
-  readonly id: number;
+  readonly id: string;
   readonly symbol: string;
   readonly scenario_id: number | null;
   readonly entry_price: string;
@@ -87,7 +87,7 @@ export class PostgresDatabase {
     try {
       await client.query(`
         CREATE TABLE IF NOT EXISTS trades (
-          id BIGSERIAL PRIMARY KEY,
+          id VARCHAR(255) PRIMARY KEY,
           symbol VARCHAR(20) NOT NULL,
           scenario_id INTEGER,
           entry_price NUMERIC(24, 8) NOT NULL,
@@ -160,7 +160,7 @@ export class PostgresDatabase {
     reason: string | null;
     opened_at: number;
     side: 'Buy' | 'Sell';
-  }): Promise<number> {
+  }): Promise<string> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
@@ -185,7 +185,7 @@ export class PostgresDatabase {
     }
   }
 
-  async closeTrade(tradeId: number, pnl: string | null, exitPrice: string | null, closedAt: number): Promise<boolean> {
+  async closeTrade(tradeId: string, pnl: string | null, exitPrice: string | null, closedAt: number): Promise<boolean> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
@@ -199,7 +199,7 @@ export class PostgresDatabase {
   }
 
   async getOpenTrade(symbol: string): Promise<{
-    id: number;
+    id: string;
     symbol: string;
     scenario_id: number | null;
     entryPrice: string;
@@ -228,7 +228,7 @@ export class PostgresDatabase {
   }
 
   async getRecentClosedTrades(limit: number): Promise<{
-    id: number;
+    id: string;
     symbol: string;
     side: 'Buy' | 'Sell';
     scenario_id: number | null;
@@ -258,7 +258,7 @@ export class PostgresDatabase {
   }
 
   async getAllOpenTrades(): Promise<{
-    id: number;
+    id: string;
     symbol: string;
     scenario_id: number | null;
     entryPrice: string;
@@ -281,6 +281,45 @@ export class PostgresDatabase {
          FROM trades WHERE status = 'OPEN' ORDER BY id DESC`,
       );
       return result.rows;
+    } finally {
+      client.release();
+    }
+  }
+
+  async runIntegrationTest(): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      const testId = 'TEST_DB_1';
+      const now = Date.now();
+
+      // INSERT
+      await client.query(
+        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (id) DO NOTHING`,
+        [testId, 'TESTUSDT', 1, '100.12345678', '99.12345678', '103.12345678', '0.12345678', 'OPEN', 'INTEGRATION TEST', now, 'Buy'],
+      );
+
+      // SELECT
+      const selectResult = await client.query(
+        `SELECT id, symbol, entry_price, sl_price, tp_price, qty, status FROM trades WHERE id = $1`,
+        [testId],
+      );
+
+      if (selectResult.rows.length === 0) {
+        throw new Error('Test row not found after INSERT');
+      }
+
+      const row = selectResult.rows[0];
+      if (row.symbol !== 'TESTUSDT' || row.entry_price !== '100.12345678') {
+        throw new Error('Data mismatch after INSERT');
+      }
+
+      // DELETE
+      await client.query(`DELETE FROM trades WHERE id = $1`, [testId]);
+
+      logger.info('Database integration test passed (INSERT/SELECT/DELETE)');
+      return true;
     } finally {
       client.release();
     }

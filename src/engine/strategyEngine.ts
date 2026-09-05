@@ -77,6 +77,16 @@ export class StrategyEngine {
     return this.state;
   }
 
+  getInstrument(): InstrumentInfo {
+    return this.deps.instrument;
+  }
+
+  getLastClosedCandle(): { close: Decimal; timestamp: number } | null {
+    const candle = this.feed15m.getLastClosed();
+    if (!candle) return null;
+    return { close: new Decimal(candle.close), timestamp: candle.timestamp };
+  }
+
   async initialize(): Promise<void> {
     await this.reloadHistory();
     const saved = await this.deps.db.getSymbolState(this.symbol);
@@ -339,7 +349,7 @@ export class StrategyEngine {
   }
 
   async reconcileWithTrade(trade: {
-    id: number;
+    id: string;
     symbol: string;
     entryPrice: string;
     qty: string;
