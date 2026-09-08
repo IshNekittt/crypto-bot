@@ -6,6 +6,5 @@ data/*.db-wal
 .env
 .DS_Store
 Крипто-бот SMC.md
-smc_full_guide.md
 Крипто-бот SMC эволюция.md
 data/*

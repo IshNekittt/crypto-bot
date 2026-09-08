@@ -479,7 +479,7 @@ export class PostgresDatabase {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, pnl, exit_price, status, reason, opened_at, closed_at
+        `SELECT id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, pnl, exit_price, status, reason, opened_at, closed_at, order_id, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
          FROM trades ORDER BY id ASC`,
       );
       return result.rows as TradeRecord[];

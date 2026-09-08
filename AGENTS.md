@@ -132,6 +132,13 @@ services:
   ```
 - Вся обработка в RAM (никаких файлов на диск), `zlib.gzipSync` для синхронного сжатия
 
+### 2.1. Бэкап: Полный дамп всех колонок таблицы trades
+- **Проблема**: `tradesToCsv` и `getAllTrades()` возвращали только часть колонок (без `order_id`, `side`, `zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp`)
+- **Решение**:
+  - `getAllTrades()` теперь делает `SELECT` всех 19 колонок таблицы `trades`
+  - `tradesToCsv()` расширен: добавлены все недостающие колонки в заголовки и строки CSV
+- Теперь авто-бэкап (каждые 24ч) и ручной `/backup` в Telegram создают полноценный дамп всей таблицы
+
 ### 3. RiskManager: zoneDetails в PositionPlan для сохранения зоны входа
 - `PositionPlanInput` расширен полем `zoneDetails` (type, top, bottom, timeframe, direction, timestamp)
 - `PositionPlan` теперь включает `zoneDetails` для сохранения в БД при открытии сделки

@@ -105,6 +105,14 @@ export class BackupService {
     reason: string | null;
     opened_at: number;
     closed_at: number | null;
+    order_id: string | null;
+    side: string | null;
+    zone_type: string | null;
+    zone_top: string | null;
+    zone_bottom: string | null;
+    zone_timeframe: string | null;
+    zone_direction: string | null;
+    zone_timestamp: number | null;
   }>): string {
 
     const headers = [
@@ -121,6 +129,14 @@ export class BackupService {
       'reason',
       'opened_at',
       'closed_at',
+      'order_id',
+      'side',
+      'zone_type',
+      'zone_top',
+      'zone_bottom',
+      'zone_timeframe',
+      'zone_direction',
+      'zone_timestamp',
     ];
 
     const escape = (val: string | number | null | undefined): string => {
@@ -146,6 +162,14 @@ export class BackupService {
       escape(t.reason),
       escape(t.opened_at),
       escape(t.closed_at),
+      escape(t.order_id),
+      escape(t.side),
+      escape(t.zone_type),
+      escape(t.zone_top),
+      escape(t.zone_bottom),
+      escape(t.zone_timeframe),
+      escape(t.zone_direction),
+      escape(t.zone_timestamp),
     ].join(','));
 
     return [headers.join(','), ...rows].join('\n');
