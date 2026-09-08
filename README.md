@@ -158,7 +158,7 @@ npm run backtest -- BTCUSDT  # Single symbol
 
 ## 📁 Project Structure
 
-```tree
+```text
 src/
 ├── index.ts                 # Entry: DB → health → Bybit preflight → engines → WS
 ├── api/bybitClient.ts       # Bybit V5 REST + WS
