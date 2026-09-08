@@ -13,6 +13,15 @@ import { Decimal } from 'decimal.js';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
 
+export interface MitigatedZone {
+  readonly type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION';
+  readonly top: string;
+  readonly bottom: string;
+  readonly timeframe: string;
+  readonly direction: string;
+  readonly timestamp: number;
+}
+
 export interface StrategyEngineDeps {
   readonly symbol: string;
   readonly instrument: InstrumentInfo;
@@ -59,6 +68,7 @@ export class StrategyEngine {
   private plan: PositionPlan | null = null;
   private processing = false;
   private lastProcessedCandleTimestamp: number = 0;
+  private mitigatedZones: MitigatedZone[] = [];
 
   constructor(deps: StrategyEngineDeps) {
     this.symbol = deps.symbol;
@@ -191,6 +201,10 @@ export class StrategyEngine {
     const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (trade) {
       await this.deps.db.closeTrade(trade.id, pnl, null, Date.now());
+      // Add the zone used for entry to mitigated zones
+      if (trade.zoneDetails) {
+        this.addMitigatedZone(trade.zoneDetails);
+      }
     }
     if (pnl !== null) {
       await this.deps.notifier.notifyTradeClosed(this.symbol, pnl, '0%');
@@ -199,6 +213,22 @@ export class StrategyEngine {
     }
     logger.info(`${this.symbol}: IN_TRADE → SCANNING (position close event)`);
     this.transition(StrategyState.SCANNING);
+  }
+
+  private addMitigatedZone(zoneDetails: any): void {
+    const zone: MitigatedZone = {
+      type: zoneDetails.type,
+      top: zoneDetails.top.toString(),
+      bottom: zoneDetails.bottom.toString(),
+      timeframe: zoneDetails.timeframe,
+      direction: zoneDetails.direction,
+      timestamp: zoneDetails.timestamp,
+    };
+    this.mitigatedZones.push(zone);
+    // Keep only last 100 mitigated zones to prevent memory leak
+    if (this.mitigatedZones.length > 100) {
+      this.mitigatedZones = this.mitigatedZones.slice(-100);
+    }
   }
 
   private transition(state: StrategyState): void {
@@ -233,7 +263,7 @@ export class StrategyEngine {
     }
     this.lastProcessedCandleTimestamp = candleTimestamp;
 
-    const result = await this.scenarioRouter.evaluate(candles15m, candles4h);
+    const result = await this.scenarioRouter.evaluate(candles15m, candles4h, candleTimestamp, this.mitigatedZones);
 
     if (result.triggered && result.levels) {
       const riskResult = await this.deps.riskManager.calculatePosition({
@@ -242,6 +272,14 @@ export class StrategyEngine {
         entryPrice: new Decimal(result.levels.entry),
         stopLossRaw: new Decimal(result.levels.stopLoss),
         instrument: this.deps.instrument,
+        zoneDetails: result.zoneDetails ? {
+          type: result.zoneDetails.type,
+          top: result.zoneDetails.top.toString(),
+          bottom: result.zoneDetails.bottom.toString(),
+          timeframe: result.zoneDetails.timeframe,
+          direction: result.zoneDetails.direction,
+          timestamp: result.zoneDetails.timestamp,
+        } : null,
       });
 
       if (!riskResult.ok) {
@@ -308,6 +346,12 @@ export class StrategyEngine {
       reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
       opened_at: Date.now(),
       side: this.plan.side,
+      zone_type: this.plan.zoneDetails?.type ?? null,
+      zone_top: this.plan.zoneDetails?.top?.toString() ?? null,
+      zone_bottom: this.plan.zoneDetails?.bottom?.toString() ?? null,
+      zone_timeframe: this.plan.zoneDetails?.timeframe ?? null,
+      zone_direction: this.plan.zoneDetails?.direction ?? null,
+      zone_timestamp: this.plan.zoneDetails?.timestamp ?? null,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);
@@ -356,6 +400,14 @@ export class StrategyEngine {
     side: 'Buy' | 'Sell';
     openedAt: number;
     orderId: string | null;
+    zoneDetails: {
+      type: string | null;
+      top: Decimal | null;
+      bottom: Decimal | null;
+      timeframe: string | null;
+      direction: string | null;
+      timestamp: number | null;
+    } | null;
   }): Promise<boolean> {
     // Fetch executions from Bybit to calculate PnL
     try {
@@ -400,6 +452,11 @@ export class StrategyEngine {
         logger.info(`${this.symbol}: reconciliation closed trade ${trade.id} with PnL ${pnlString}`);
       } else {
         logger.warn(`${this.symbol}: reconciliation closed trade ${trade.id} but PnL unknown (no closing execution found)`);
+      }
+
+      // Add the zone used for entry to mitigated zones
+      if (trade.zoneDetails) {
+        this.addMitigatedZone(trade.zoneDetails);
       }
 
       // Reset state if this engine was in IN_TRADE

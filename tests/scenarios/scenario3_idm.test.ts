@@ -17,24 +17,28 @@ describe('Scenario3: Inducement (IDM)', () => {
       priceTestsOb: overrides.priceTestsOb !== false,
     };
 
+    const now = Date.now();
     const recentLowSweep = config.hasIdmSweep ? {
-      direction: 'BULLISH', kind: 'CHOCH',
-      brokenSwing: { type: 'LOW', price: new Decimal(100), timestamp: Date.now() - 2000, index: 10, isSwept: false },
+      type: 'CHOCH', direction: 'BULLISH',
+      brokenSwing: { type: 'LOW', price: new Decimal(100), timestamp: now - 2 * 60 * 60 * 1000, index: 10, isSwept: false },
     } : null;
 
     const realOb = config.hasRealOb ? {
       type: 'OB', direction: 'BULLISH', top: new Decimal(99.5), bottom: new Decimal(99),
-      timestamp: Date.now() - 100000, mitigated: false, invalidated: false,
+      timestamp: now - 100000, mitigated: false, invalidated: false,
     } : null;
 
     const lastCandle = {
-      timestamp: Date.now(),
+      timestamp: now,
       close: config.priceTestsOb ? '99.2' : '95',
-      high: '100', low: '98.5', open: '99', volume: '1000',
+      high: config.priceTestsOb ? '100' : '96',
+      low: config.priceTestsOb ? '98.5' : '94',
+      open: '99', volume: '1000',
     };
 
     return {
       currentKillzone: config.killzone,
+      currentSession: 'LONDON',
       candles15m: [lastCandle],
       zones: realOb ? [realOb] : [],
       structures: recentLowSweep ? [recentLowSweep] : [],

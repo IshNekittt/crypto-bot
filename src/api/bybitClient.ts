@@ -164,8 +164,10 @@ export class BybitClient {
     return { symbol, tickSize, qtyStep, minOrderQty, maxOrderQty };
   }
 
-  async getKlines(symbol: string, interval: Timeframe, limit: number): Promise<Candle[]> {
-    const response = await this.rest.getKline({ category: 'linear', symbol, interval, limit });
+  async getKlines(symbol: string, interval: Timeframe, limit: number, endTime?: number): Promise<Candle[]> {
+    const params: any = { category: 'linear', symbol, interval, limit };
+    if (endTime !== undefined) params.end = endTime;
+    const response = await this.rest.getKline(params);
     if (response.retCode !== 0) {
       throw new Error(`Kline fetch failed for ${symbol} ${interval}: [${response.retCode}] ${response.retMsg}`);
     }

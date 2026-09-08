@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { logger } from '../utils/logger';
+import { Decimal } from 'decimal.js';
 
 const { Pool } = pg;
 
@@ -17,6 +18,14 @@ export interface TradeRow {
   reason: string | null;
   opened_at: number;
   closed_at: number | null;
+  order_id: string | null;
+  side: string | null;
+  zone_type: string | null;
+  zone_top: string | null;
+  zone_bottom: string | null;
+  zone_timeframe: string | null;
+  zone_direction: string | null;
+  zone_timestamp: number | null;
 }
 
 export interface SymbolStateRow {
@@ -50,6 +59,14 @@ export interface TradeRecord {
   readonly reason: string | null;
   readonly opened_at: number;
   readonly closed_at: number | null;
+  readonly order_id: string | null;
+  readonly side: string | null;
+  readonly zone_type: string | null;
+  readonly zone_top: string | null;
+  readonly zone_bottom: string | null;
+  readonly zone_timeframe: string | null;
+  readonly zone_direction: string | null;
+  readonly zone_timestamp: number | null;
 }
 
 export class PostgresDatabase {
@@ -101,7 +118,13 @@ export class PostgresDatabase {
           opened_at BIGINT NOT NULL,
           closed_at BIGINT,
           order_id VARCHAR(255),
-          side VARCHAR(10) CHECK (side IN ('Buy', 'Sell'))
+          side VARCHAR(10) CHECK (side IN ('Buy', 'Sell')),
+          zone_type VARCHAR(20),
+          zone_top NUMERIC(24, 8),
+          zone_bottom NUMERIC(24, 8),
+          zone_timeframe VARCHAR(10),
+          zone_direction VARCHAR(10),
+          zone_timestamp BIGINT
         );
 
         CREATE TABLE IF NOT EXISTS symbol_state (
@@ -160,12 +183,18 @@ export class PostgresDatabase {
     reason: string | null;
     opened_at: number;
     side: 'Buy' | 'Sell';
+    zone_type?: string | null;
+    zone_top?: string | null;
+    zone_bottom?: string | null;
+    zone_timeframe?: string | null;
+    zone_direction?: string | null;
+    zone_timestamp?: number | null;
   }): Promise<string> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `INSERT INTO trades (symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side)
-         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9)
+        `INSERT INTO trades (symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING id`,
         [
           input.symbol,
@@ -177,6 +206,12 @@ export class PostgresDatabase {
           input.reason,
           input.opened_at,
           input.side,
+          input.zone_type ?? null,
+          input.zone_top ?? null,
+          input.zone_bottom ?? null,
+          input.zone_timeframe ?? null,
+          input.zone_direction ?? null,
+          input.zone_timestamp ?? null,
         ],
       );
       return result.rows[0].id;
@@ -213,15 +248,50 @@ export class PostgresDatabase {
     openedAt: number;
     closedAt: number | null;
     orderId: string | null;
+    side: string | null;
+    zoneDetails: {
+      type: string | null;
+      top: Decimal | null;
+      bottom: Decimal | null;
+      timeframe: string | null;
+      direction: string | null;
+      timestamp: number | null;
+    } | null;
   } | null> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId"
+        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
          FROM trades WHERE symbol = $1 AND status = 'OPEN' ORDER BY id DESC LIMIT 1`,
         [symbol],
       );
-      return result.rows[0] || null;
+      if (result.rows.length === 0) return null;
+      const row = result.rows[0];
+      return {
+        id: row.id,
+        symbol: row.symbol,
+        scenario_id: row.scenario_id,
+        entryPrice: row.entryPrice,
+        stopLoss: row.stopLoss,
+        takeProfit: row.takeProfit,
+        qty: row.qty,
+        pnl: row.pnl,
+        exitPrice: row.exitPrice,
+        status: row.status,
+        reason: row.reason,
+        openedAt: row.openedAt,
+        closedAt: row.closedAt,
+        orderId: row.orderId,
+        side: row.side,
+        zoneDetails: row.zone_type ? {
+          type: row.zone_type,
+          top: new Decimal(row.zone_top),
+          bottom: new Decimal(row.zone_bottom),
+          timeframe: row.zone_timeframe,
+          direction: row.zone_direction,
+          timestamp: row.zone_timestamp,
+        } : null,
+      };
     } finally {
       client.release();
     }
@@ -243,15 +313,47 @@ export class PostgresDatabase {
     openedAt: number;
     closedAt: number | null;
     orderId: string | null;
+    zoneDetails: {
+      type: string | null;
+      top: Decimal | null;
+      bottom: Decimal | null;
+      timeframe: string | null;
+      direction: string | null;
+      timestamp: number | null;
+    } | null;
   }[]> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, side::text as side, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status::text as status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId"
+        `SELECT id, symbol, side::text as side, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status::text as status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
          FROM trades WHERE status = 'CLOSED' ORDER BY closed_at DESC, id DESC LIMIT $1`,
         [limit],
       );
-      return result.rows;
+      return result.rows.map(row => ({
+        id: row.id,
+        symbol: row.symbol,
+        side: row.side,
+        scenario_id: row.scenario_id,
+        entryPrice: row.entryPrice,
+        stopLoss: row.stopLoss,
+        takeProfit: row.takeProfit,
+        qty: row.qty,
+        pnl: row.pnl,
+        exitPrice: row.exitPrice,
+        status: row.status,
+        reason: row.reason,
+        openedAt: row.openedAt,
+        closedAt: row.closedAt,
+        orderId: row.orderId,
+        zoneDetails: row.zone_type ? {
+          type: row.zone_type,
+          top: new Decimal(row.zone_top),
+          bottom: new Decimal(row.zone_bottom),
+          timeframe: row.zone_timeframe,
+          direction: row.zone_direction,
+          timestamp: row.zone_timestamp,
+        } : null,
+      }));
     } finally {
       client.release();
     }
@@ -272,15 +374,47 @@ export class PostgresDatabase {
     openedAt: number;
     closedAt: number | null;
     orderId: string | null;
-    side: 'Buy' | 'Sell';
+    side: string | null;
+    zoneDetails: {
+      type: string | null;
+      top: Decimal | null;
+      bottom: Decimal | null;
+      timeframe: string | null;
+      direction: string | null;
+      timestamp: number | null;
+    } | null;
   }[]> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side
+        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
          FROM trades WHERE status = 'OPEN' ORDER BY id DESC`,
       );
-      return result.rows;
+      return result.rows.map(row => ({
+        id: row.id,
+        symbol: row.symbol,
+        scenario_id: row.scenario_id,
+        entryPrice: row.entryPrice,
+        stopLoss: row.stopLoss,
+        takeProfit: row.takeProfit,
+        qty: row.qty,
+        pnl: row.pnl,
+        exitPrice: row.exitPrice,
+        status: row.status,
+        reason: row.reason,
+        openedAt: row.openedAt,
+        closedAt: row.closedAt,
+        orderId: row.orderId,
+        side: row.side as 'Buy' | 'Sell' | null,
+        zoneDetails: row.zone_type ? {
+          type: row.zone_type,
+          top: new Decimal(row.zone_top),
+          bottom: new Decimal(row.zone_bottom),
+          timeframe: row.zone_timeframe,
+          direction: row.zone_direction,
+          timestamp: row.zone_timestamp,
+        } : null,
+      }));
     } finally {
       client.release();
     }
@@ -292,17 +426,17 @@ export class PostgresDatabase {
       const testId = 'TEST_DB_1';
       const now = Date.now();
 
-      // INSERT
+      // INSERT with zoneDetails including decimal values
       await client.query(
-        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          ON CONFLICT (id) DO NOTHING`,
-        [testId, 'TESTUSDT', 1, '100.12345678', '99.12345678', '103.12345678', '0.12345678', 'OPEN', 'INTEGRATION TEST', now, 'Buy'],
+        [testId, 'TESTUSDT', 1, '100.12345678', '99.12345678', '103.12345678', '0.12345678', 'OPEN', 'INTEGRATION TEST', now, 'Buy', 'OB', '105.50000000', '104.25000000', '15', 'BULLISH', now],
       );
 
       // SELECT
       const selectResult = await client.query(
-        `SELECT id, symbol, entry_price, sl_price, tp_price, qty, status FROM trades WHERE id = $1`,
+        `SELECT id, symbol, entry_price, sl_price, tp_price, qty, status, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp FROM trades WHERE id = $1`,
         [testId],
       );
 
@@ -315,10 +449,22 @@ export class PostgresDatabase {
         throw new Error('Data mismatch after INSERT');
       }
 
+      // Verify zoneDetails decimal deserialization and operations
+      if (!row.zone_type || row.zone_type !== 'OB') {
+        throw new Error('zone_type not saved correctly');
+      }
+      const zoneTop = new Decimal(row.zone_top);
+      const zoneBottom = new Decimal(row.zone_bottom);
+      const sum = zoneTop.plus(zoneBottom);
+      const half = sum.div(2);
+      if (!half.eq(new Decimal('104.87500000'))) {
+        throw new Error(`Decimal operations failed on deserialized zoneDetails: expected 104.875, got ${half.toString()}`);
+      }
+
       // DELETE
       await client.query(`DELETE FROM trades WHERE id = $1`, [testId]);
 
-      logger.info('Database integration test passed (INSERT/SELECT/DELETE)');
+      logger.info('Database integration test passed (INSERT/SELECT/DELETE with zoneDetails Decimal operations)');
       return true;
     } finally {
       client.release();

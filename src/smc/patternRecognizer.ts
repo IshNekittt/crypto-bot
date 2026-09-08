@@ -51,6 +51,7 @@ export interface Structure {
   readonly timestamp: number;
   readonly isValidated: boolean;
   readonly direction: Direction;
+  readonly impulseFactor?: Decimal;
 }
 
 export interface MacroContext {
@@ -122,6 +123,8 @@ export class PatternRecognizer {
   private readonly config: PatternConfig;
   private readonly timezone: string;
   private macroCache: Map<string, MacroContext> = new Map();
+  // Displacement rejection tracking
+  private displacementRejections: number = 0;
 
   constructor(client: BybitClient, config: Partial<PatternConfig> = {}) {
     this.client = client;
@@ -129,10 +132,19 @@ export class PatternRecognizer {
     this.timezone = this.config.sessionConfig.timezone;
   }
 
+  getDisplacementRejections(): number {
+    return this.displacementRejections;
+  }
+
+  resetDisplacementRejections(): void {
+    this.displacementRejections = 0;
+  }
+
   /**
    * Get current session and killzone based on NY time
+   * @param timestamp - Timestamp in milliseconds (defaults to now for live trading)
    */
-  getCurrentSessionAndKillzone(timestamp: number = Date.now()): { session: 'ASIAN' | 'LONDON' | 'NY' | 'NONE'; killzone: 'ASIAN' | 'LONDON' | 'NY' | 'NONE' } {
+  getCurrentSessionAndKillzone(timestamp: number): { session: 'ASIAN' | 'LONDON' | 'NY' | 'NONE'; killzone: 'ASIAN' | 'LONDON' | 'NY' | 'NONE' } {
     const nyTime = DateTime.fromMillis(timestamp).setZone(this.timezone);
     const hour = nyTime.hour;
     const minute = nyTime.minute;
@@ -170,9 +182,73 @@ export class PatternRecognizer {
   /**
    * Check if current time is in an active killzone
    */
-  isInKillzone(timestamp: number = Date.now()): boolean {
+  isInKillzone(timestamp: number): boolean {
     const { killzone } = this.getCurrentSessionAndKillzone(timestamp);
     return killzone !== 'NONE';
+  }
+
+  /**
+   * Detect session ranges (Asian, London, NY) from candles
+   * Asian: 20:00-24:00 NY time (Accumulation phase)
+   * London: 02:00-05:00 NY time (Manipulation phase)
+   * NY: 07:00-10:00 NY time (Distribution phase)
+   * OPTIMIZED: Only processes last 192 candles (2 days of 15m) for performance
+   */
+  detectSessionRanges(candles: Candle[]): SessionRange[] {
+    const ranges: SessionRange[] = [];
+    
+    // OPTIMIZATION: Only process last 192 candles (2 days of 15m candles)
+    // Asian session is 4 hours = 16 candles per day, so 2 days = ~32 Asian session candles
+    const relevantCandles = candles.slice(-192);
+    
+    // Group candles by session day (NY time)
+    const sessionDays = new Map<string, { high: Decimal; low: Decimal; start: number; end: number }>();
+    
+    for (const candle of relevantCandles) {
+      const nyTime = DateTime.fromMillis(candle.timestamp).setZone(this.timezone);
+      const dayKey = nyTime.toISODate(); // YYYY-MM-DD in NY time
+      if (!dayKey) continue; // Skip if date is invalid
+      const hour = nyTime.hour;
+      const minute = nyTime.minute;
+      const timeInMinutes = hour * 60 + minute;
+      
+      const asianStart = this.config.sessionConfig.asian.start * 60; // 20:00 = 1200
+      const asianEnd = this.config.sessionConfig.asian.end * 60;     // 24:00 = 1440 (0:00 next day)
+      
+      // Check if candle is in Asian session (20:00-24:00 NY time)
+      if (timeInMinutes >= asianStart && timeInMinutes < asianEnd) {
+        if (!sessionDays.has(dayKey)) {
+          sessionDays.set(dayKey, {
+            high: new Decimal(candle.high),
+            low: new Decimal(candle.low),
+            start: candle.timestamp,
+            end: candle.timestamp,
+          });
+        } else {
+          const day = sessionDays.get(dayKey)!;
+          const high = new Decimal(candle.high);
+          const low = new Decimal(candle.low);
+          if (high.gt(day.high)) day.high = high;
+          if (low.lt(day.low)) day.low = low;
+          day.end = candle.timestamp;
+        }
+      }
+    }
+    
+    // Convert to SessionRange array (only last 2 days for relevance)
+    const dayKeys = Array.from(sessionDays.keys()).slice(-2);
+    for (const dayKey of dayKeys) {
+      const day = sessionDays.get(dayKey)!;
+      ranges.push({
+        name: 'ASIAN',
+        high: day.high,
+        low: day.low,
+        start: day.start,
+        end: day.end,
+      });
+    }
+    
+    return ranges;
   }
 
   /**
@@ -255,9 +331,6 @@ export class PatternRecognizer {
 
   /**
    * Detect BOS/CHoCH with Displacement (> 1.5 * ATR)
-   */
-  /**
-   * Detect BOS/CHoCH with Displacement (> 1.5 * ATR)
    * Optimized: compute swing points ONCE, then iterate with simple for loops
    */
   detectStructureBreaks(candles: Candle[], atr: Decimal): Structure[] {
@@ -309,35 +382,39 @@ export class PatternRecognizer {
       const body = new Decimal(candle.close).minus(candle.open).abs();
       const minBody = atr.mul(this.config.displacementMultiplier);
 
-      // Bullish break: close > swing high with displacement
-      if (lastValidSwing.type === 'HIGH' && close.greaterThan(lastValidSwing.price) && body.greaterThanOrEqualTo(minBody)) {
-        const direction: Direction = 'BULLISH';
-        const type = trend === 'BULLISH' ? 'BOS' : 'CHOCH';
-        trend = 'BULLISH';
-        structures.push({
-          type,
-          price: close,
-          timestamp: candles[i].timestamp,
-          isValidated: true,
-          direction,
-        });
-        lastValidSwing = null; // Reset after valid break
-      }
-      // Bearish break: close < swing low with displacement
-      else if (lastValidSwing.type === 'LOW' && close.lessThan(lastValidSwing.price) && body.greaterThanOrEqualTo(minBody)) {
-        const direction: Direction = 'BEARISH';
-        const type = trend === 'BEARISH' ? 'BOS' : 'CHOCH';
-        trend = 'BEARISH';
-        structures.push({
-          type,
-          price: close,
-          timestamp: candles[i].timestamp,
-          isValidated: true,
-          direction,
-        });
-        lastValidSwing = null;
+      // Check if price breaks the swing level
+      const bullishBreak = lastValidSwing.type === 'HIGH' && close.greaterThan(lastValidSwing.price);
+      const bearishBreak = lastValidSwing.type === 'LOW' && close.lessThan(lastValidSwing.price);
+
+      if (bullishBreak || bearishBreak) {
+        // Check displacement - body must be >= 1.5 * ATR
+        if (body.greaterThanOrEqualTo(minBody)) {
+          const direction: Direction = bullishBreak ? 'BULLISH' : 'BEARISH';
+          const type = trend === direction ? 'BOS' : 'CHOCH';
+          trend = direction;
+          const impulseFactor = body.div(atr);
+          structures.push({
+            type,
+            price: close,
+            timestamp: candles[i].timestamp,
+            isValidated: true,
+            direction,
+            impulseFactor,
+          });
+          lastValidSwing = null; // Reset after valid break
+        } else {
+          // Track displacement rejection - structure break without sufficient impulse
+          this.displacementRejections++;
+          lastValidSwing = null; // Reset - invalid break doesn't count
+        }
       }
     }
+
+    // === Detect SMS (Smart Money Shift) - Failure Swings ===
+    // Bearish SMS: Higher High fails to follow through, then CHoCH down
+    // Bullish SMS: Lower Low fails to follow through, then CHoCH up
+    const smsStructures = this.detectSMS(candles, atr);
+    structures.push(...smsStructures);
 
     return structures;
   }
@@ -462,9 +539,10 @@ export class PatternRecognizer {
   }
 
   /**
-   * Detect EQH/EQL (equal highs/lows within 0.05%)
+   * Detect EQH/EQL (equal highs/lows within tolerance)
+   * Uses tolerance of max(0.1%, 0.5 * ATR) for better noise filtering
    */
-  detectEqualLevels(candles: Candle[]): { eqh: Decimal[]; eql: Decimal[] } {
+  detectEqualLevels(candles: Candle[], atr?: Decimal): { eqh: Decimal[]; eql: Decimal[] } {
     const highs: { price: Decimal; index: number }[] = [];
     const lows: { price: Decimal; index: number }[] = [];
 
@@ -473,13 +551,18 @@ export class PatternRecognizer {
       lows.push({ price: new Decimal(candles[i].low), index: i });
     }
 
+    // Dynamic tolerance: max(0.1%, 0.5 * ATR)
+    const atrTolerance = atr ? atr.mul(new Decimal('0.5')).div(candles[candles.length - 1].close) : new Decimal('0');
+    const baseThreshold = new Decimal('0.001'); // 0.1%
+    const threshold = Decimal.max(baseThreshold, atrTolerance);
+
     const eqh: Decimal[] = [];
     const eql: Decimal[] = [];
 
     for (let i = 0; i < highs.length; i++) {
       for (let j = i + 1; j < highs.length; j++) {
         const diff = highs[i].price.minus(highs[j].price).abs().div(highs[i].price);
-        if (diff.lte(this.config.eqThreshold)) {
+        if (diff.lte(threshold)) {
           eqh.push(highs[i].price);
         }
       }
@@ -488,7 +571,7 @@ export class PatternRecognizer {
     for (let i = 0; i < lows.length; i++) {
       for (let j = i + 1; j < lows.length; j++) {
         const diff = lows[i].price.minus(lows[j].price).abs().div(lows[i].price);
-        if (diff.lte(this.config.eqThreshold)) {
+        if (diff.lte(threshold)) {
           eql.push(lows[i].price);
         }
       }
@@ -544,52 +627,107 @@ export class PatternRecognizer {
 
   /**
    * Detect SMS (Smart Money Shift) - failure to make new high/low
+   * Returns array of SMS structures with displacement validation
+   * Uses more candles for better detection of failure swings
+   * Tolerance: max(0.5%, 0.5*ATR/price) for realistic crypto equal highs/lows
    */
-  detectSMS(candles: Candle[]): Structure | null {
-    const swings = this.findSwingPoints(candles);
+  detectSMS(candles: Candle[], atr: Decimal): Structure[] {
+    const smsStructures: Structure[] = [];
+    
+    // Use more candles for better SMS detection (last 100 candles)
+    const relevantCandles = candles.slice(-100);
+    const swings = this.findSwingPoints(relevantCandles, 2); // More sensitive swing detection
     const highs = swings.filter(s => s.type === 'HIGH');
     const lows = swings.filter(s => s.type === 'LOW');
+    const minBody = atr.mul(this.config.displacementMultiplier);
 
-    // Bearish SMS: failure to make higher high, then CHoCH down
+    // Dynamic tolerance for equal highs/lows: max(0.5%, 0.5 * ATR / price)
+    const lastPrice = new Decimal(relevantCandles[relevantCandles.length - 1].close);
+    const atrTolerance = atr.mul(new Decimal('0.5')).div(lastPrice);
+    const baseThreshold = new Decimal('0.005'); // 0.5%
+    const equalTolerance = Decimal.max(baseThreshold, atrTolerance);
+
+    // Bearish SMS: failure to make higher high (last high <= prev high), then CHoCH down
     if (highs.length >= 2) {
       const lastHigh = highs[highs.length - 1];
       const prevHigh = highs[highs.length - 2];
-      if (lastHigh.price.lte(prevHigh.price)) {
-        // Check for subsequent CHoCH down
-        const lastCandle = candles[candles.length - 1];
-        const close = new Decimal(lastCandle.close);
-        if (close.lt(lastHigh.price)) {
-          return {
-            type: 'SMS',
-            direction: 'BEARISH',
-            price: lastHigh.price,
-            timestamp: candles[candles.length - 1].timestamp,
-            isValidated: true,
-          };
+      
+      // Failure swing: last high <= previous high (failed to make higher high)
+      // Allow equal highs within dynamic tolerance
+      const highDiff = lastHigh.price.minus(prevHigh.price).abs().div(prevHigh.price);
+      if (highDiff.lte(equalTolerance)) {
+        // Look for bearish CHoCH after the failure swing
+        // The CHoCH must occur AFTER the lastHigh index
+        for (let i = lastHigh.index + 1; i < relevantCandles.length; i++) {
+          const candle = relevantCandles[i];
+          const close = new Decimal(candle.close);
+          
+          // Bearish CHoCH: close breaks below the last swing low
+          // Find the most recent swing low before this point
+          const recentLows = lows.filter(l => l.index < i);
+          if (recentLows.length > 0) {
+            const lastLow = recentLows[recentLows.length - 1];
+            if (close.lessThan(lastLow.price)) {
+              // Check displacement on the CHoCH candle
+              const body = new Decimal(candle.close).minus(candle.open).abs();
+              if (body.greaterThanOrEqualTo(minBody)) {
+                const impulseFactor = body.div(atr);
+                smsStructures.push({
+                  type: 'SMS',
+                  direction: 'BEARISH',
+                  price: lastHigh.price,
+                  timestamp: candle.timestamp,
+                  isValidated: true,
+                  impulseFactor,
+                });
+                break; // Only one SMS per failure swing
+              }
+            }
+          }
         }
       }
     }
 
-    // Bullish SMS: failure to make lower low, then CHoCH up
+    // Bullish SMS: failure to make lower low (last low >= prev low), then CHoCH up
     if (lows.length >= 2) {
       const lastLow = lows[lows.length - 1];
       const prevLow = lows[lows.length - 2];
-      if (lastLow.price.gte(prevLow.price)) {
-        const lastCandle = candles[candles.length - 1];
-        const close = new Decimal(lastCandle.close);
-        if (close.gt(lastLow.price)) {
-          return {
-            type: 'SMS',
-            direction: 'BULLISH',
-            price: lastLow.price,
-            timestamp: candles[candles.length - 1].timestamp,
-            isValidated: true,
-          };
+      
+      // Failure swing: last low >= previous low (failed to make lower low)
+      // Allow equal lows within dynamic tolerance
+      const lowDiff = lastLow.price.minus(prevLow.price).abs().div(prevLow.price);
+      if (lowDiff.lte(equalTolerance)) {
+        // Look for bullish CHoCH after the failure swing
+        for (let i = lastLow.index + 1; i < relevantCandles.length; i++) {
+          const candle = relevantCandles[i];
+          const close = new Decimal(candle.close);
+          const body = new Decimal(candle.close).minus(candle.open).abs();
+          
+          // Bullish CHoCH: close breaks above the last swing high
+          const recentHighs = highs.filter(h => h.index < i);
+          if (recentHighs.length > 0) {
+            const lastHigh = recentHighs[recentHighs.length - 1];
+            if (close.greaterThan(lastHigh.price)) {
+              // Check displacement on the CHoCH candle
+              if (body.greaterThanOrEqualTo(minBody)) {
+                const impulseFactor = body.div(atr);
+                smsStructures.push({
+                  type: 'SMS',
+                  direction: 'BULLISH',
+                  price: lastLow.price,
+                  timestamp: candle.timestamp,
+                  isValidated: true,
+                  impulseFactor,
+                });
+                break; // Only one SMS per failure swing
+              }
+            }
+          }
         }
       }
     }
 
-    return null;
+    return smsStructures;
   }
 
   /**
@@ -626,86 +764,67 @@ export class PatternRecognizer {
 
   /**
    * Detect Trading Range (consolidation zone) with Range High, Range Low, and Equilibrium
-   * A range is valid when price respects RH/RL multiple times without breaking structure
+   * A range is valid when price oscillates between a high and low for a period
+   * Realistic for crypto: uses actual price extremes, allows wicks through boundaries
+   * IMPORTANT: Excludes the last candle (current) from range formation to allow deviation detection
    */
   detectTradingRange(candles: Candle[], lookback: number = 50): TradingRange | null {
-    if (candles.length < lookback) return null;
+    if (candles.length < lookback + 1) return null; // Need lookback + current candle
 
-    const recentCandles = candles.slice(-lookback);
+    // Exclude the last candle (current) from range formation
+    // Range is formed by the PREVIOUS 'lookback' candles
+    const recentCandles = candles.slice(-(lookback + 1), -1);
     
-    // Find swing highs and lows in the lookback period
-    const swings = this.findSwingPoints(recentCandles, 3);
-    const highs = swings.filter(s => s.type === 'HIGH');
-    const lows = swings.filter(s => s.type === 'LOW');
-
-    if (highs.length < 2 || lows.length < 2) return null;
-
-    // Range High = highest swing high that was tested at least 2 times
-    // Range Low = lowest swing low that was tested at least 2 times
+    // Use actual price extremes in the lookback period (not just swing points)
+    // This captures ranges even without clean swing points
     let rangeHigh = new Decimal(0);
     let rangeLow = new Decimal('Infinity');
-
-    // Check for equal highs (EQH) - multiple tests of similar level
-    for (let i = 0; i < highs.length; i++) {
-      let testCount = 1;
-      for (let j = i + 1; j < highs.length; j++) {
-        const diff = highs[i].price.minus(highs[j].price).abs().div(highs[i].price);
-        if (diff.lte(this.config.eqThreshold)) {
-          testCount++;
-        }
-      }
-      if (testCount >= 2 && highs[i].price.gt(rangeHigh)) {
-        rangeHigh = highs[i].price;
-      }
-    }
-
-    // Check for equal lows (EQL) - multiple tests of similar level
-    for (let i = 0; i < lows.length; i++) {
-      let testCount = 1;
-      for (let j = i + 1; j < lows.length; j++) {
-        const diff = lows[i].price.minus(lows[j].price).abs().div(lows[i].price);
-        if (diff.lte(this.config.eqThreshold)) {
-          testCount++;
-        }
-      }
-      if (testCount >= 2 && lows[i].price.lt(rangeLow)) {
-        rangeLow = lows[i].price;
-      }
-    }
-
-    // If no clear EQH/EQL, use the extreme swing points
-    if (rangeHigh.eq(0)) {
-      rangeHigh = highs.reduce((max, s) => s.price.gt(max) ? s.price : max, new Decimal(0));
-    }
-    if (rangeLow.eq('Infinity')) {
-      rangeLow = lows.reduce((min, s) => s.price.lt(min) ? s.price : min, new Decimal('Infinity'));
-    }
-
-    // Validate range: price must be contained within RH/RL
-    const lastCandles = candles.slice(-20);
-    let contained = true;
-    for (const c of lastCandles) {
-      if (new Decimal(c.high).gt(rangeHigh) || new Decimal(c.low).lt(rangeLow)) {
-        contained = false;
-        break;
-      }
-    }
-
-    if (!contained) return null;
-
-    const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
-    const rangeSize = rangeHigh.minus(rangeLow);
     
-    // Range must have reasonable size (not too tight)
-    const avgPrice = rangeHigh.plus(rangeLow).dividedBy(2);
-    if (rangeSize.div(avgPrice).mul(100).lt(new Decimal('0.5'))) return null; // less than 0.5% range
+    for (const c of recentCandles) {
+      const high = new Decimal(c.high);
+      const low = new Decimal(c.low);
+      if (high.gt(rangeHigh)) rangeHigh = high;
+      if (low.lt(rangeLow)) rangeLow = low;
+    }
 
-    // Check for deviation - price recently poked outside RH or RL
+    // Require at least 1 touch of each boundary (the extreme itself counts)
+    // Use 0.5 * ATR as tolerance for "touching" a level
+    const atr = this.calculateATR(recentCandles, 14);
+    const tolerance = atr.mul(0.5); // 50% of ATR as touch tolerance
+    
+    let highTouches = 0;
+    let lowTouches = 0;
+    for (const c of recentCandles) {
+      const high = new Decimal(c.high);
+      const low = new Decimal(c.low);
+      
+      // Touched range high: wicked to/through it, or closed near it
+      if (high.gte(rangeHigh.minus(tolerance))) {
+        highTouches++;
+      }
+      // Touched range low: wicked to/through it, or closed near it
+      if (low.lte(rangeLow.plus(tolerance))) {
+        lowTouches++;
+      }
+    }
+
+    // Require at least 1 touch of each boundary (the extreme candle itself counts)
+    if (highTouches < 1 || lowTouches < 1) return null;
+
+    // Range size check - realistic for crypto (0.3% to 15%)
+    const rangeSize = rangeHigh.minus(rangeLow);
+    const avgPrice = rangeHigh.plus(rangeLow).dividedBy(2);
+    const rangePct = rangeSize.div(avgPrice).mul(100);
+    if (rangePct.lt(new Decimal('0.3')) || rangePct.gt(new Decimal('15'))) return null;
+
+    // Check for recent deviation - current candle poked outside RH or RL
     const lastCandle = candles[candles.length - 1];
     const lastHigh = new Decimal(lastCandle.high);
     const lastLow = new Decimal(lastCandle.low);
     
     const isDeviated = lastHigh.gt(rangeHigh) || lastLow.lt(rangeLow);
+
+    const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
 
     return {
       high: rangeHigh,
@@ -774,6 +893,19 @@ export class PatternRecognizer {
         do: do_ 
       };
 
+      // === Build liquidity pools from macro levels ===
+      const liquidityPools: LiquidityPool[] = [
+        // Previous Day High/Low
+        { type: 'PDH', priceLevel: dailyLevels.pdh, timestamp: prevDay.timestamp, isTaken: false, points: [] },
+        { type: 'PDL', priceLevel: dailyLevels.pdl, timestamp: prevDay.timestamp, isTaken: false, points: [] },
+        // Previous Week High/Low
+        { type: 'PWH', priceLevel: weeklyLevels.pwh, timestamp: prevWeek.timestamp, isTaken: false, points: [] },
+        { type: 'PWL', priceLevel: weeklyLevels.pwl, timestamp: prevWeek.timestamp, isTaken: false, points: [] },
+        // Daily/Weekly Open
+        { type: 'DO', priceLevel: dailyLevels.do, timestamp: dailyCandles[dailyCandles.length - 1].timestamp, isTaken: false, points: [] },
+        { type: 'WO', priceLevel: weeklyLevels.wo, timestamp: weeklyCandles[weeklyCandles.length - 1].timestamp, isTaken: false, points: [] },
+      ];
+
       const macro: MacroContext = {
         ath,
         atl,
@@ -781,7 +913,7 @@ export class PatternRecognizer {
         htfObs: [],
         weeklyLevels,
         dailyLevels,
-        liquidityPools: [],
+        liquidityPools,
       };
 
       this.macroCache.set(`${symbol}_macro`, macro);
@@ -807,8 +939,9 @@ export class PatternRecognizer {
   /**
    * Build complete pattern data for a symbol
    * Uses pre-initialized macro context from cache (initialized at startup)
+   * @param currentCandleTimestamp - Timestamp of the current 15m candle being analyzed (for killzone calculation)
    */
-  async buildPatternData(symbol: string, ltfCandles: Candle[], htfCandles: Candle[]): Promise<PatternData> {
+  async buildPatternData(symbol: string, ltfCandles: Candle[], htfCandles: Candle[], currentCandleTimestamp: number): Promise<PatternData> {
     const startMs = Date.now();
     // Get macro context from cache (pre-initialized at startup)
     const macroContext = this.macroCache.get(`${symbol}_macro`) ?? {
@@ -825,11 +958,11 @@ export class PatternRecognizer {
     const atr15m = this.calculateATR(ltfCandles, this.config.atrPeriod);
     const atr4h = this.calculateATR(htfCandles, this.config.atrPeriod);
 
-    // Current session and killzone
-    const { session, killzone } = this.getCurrentSessionAndKillzone();
+    // Current session and killzone (using candle timestamp to avoid lookahead bias)
+    const { session, killzone } = this.getCurrentSessionAndKillzone(currentCandleTimestamp);
 
-    // Session ranges (simplified - would need proper session detection)
-    const sessionRanges: SessionRange[] = [];
+    // Session ranges - detect Asian session ranges for AMD scenario
+    const sessionRanges = this.detectSessionRanges(ltfCandles);
 
     // Find swing points
     const swingPoints15m = this.findSwingPoints(ltfCandles);
@@ -842,6 +975,77 @@ export class PatternRecognizer {
     // Detect Trading Range on 15m
     const tradingRange = this.detectTradingRange(ltfCandles);
 
+    // === Add BSL/SSL from 4H swing points ===
+    // BSL = Buy Side Liquidity = Swing Highs (where buy stops are placed above)
+    // SSL = Sell Side Liquidity = Swing Lows (where sell stops are placed below)
+    const bslPools: LiquidityPool[] = swingPoints4h
+      .filter(sp => sp.type === 'HIGH')
+      .map(sp => ({
+        type: 'BSL' as const,
+        priceLevel: sp.price,
+        timestamp: sp.timestamp,
+        isTaken: false,
+        points: [],
+      }));
+    const sslPools: LiquidityPool[] = swingPoints4h
+      .filter(sp => sp.type === 'LOW')
+      .map(sp => ({
+        type: 'SSL' as const,
+        priceLevel: sp.price,
+        timestamp: sp.timestamp,
+        isTaken: false,
+        points: [],
+      }));
+
+    // === Add EQH/EQL from Trading Range (with tolerance) ===
+    const eqhPools: LiquidityPool[] = [];
+    const eqlPools: LiquidityPool[] = [];
+    if (tradingRange) {
+      const eqLevels = this.detectEqualLevels(ltfCandles, atr15m);
+      // Add EQH if near range high
+      if (tradingRange.high && eqLevels.eqh.length > 0) {
+        eqLevels.eqh.forEach(eqh => {
+          const diff = eqh.minus(tradingRange.high).abs().div(tradingRange.high);
+          const atrTolerance = atr15m.mul(new Decimal('0.5')).div(ltfCandles[ltfCandles.length - 1].close);
+          const threshold = Decimal.max(new Decimal('0.001'), atrTolerance);
+          if (diff.lte(threshold)) {
+            eqhPools.push({
+              type: 'EQH',
+              priceLevel: eqh,
+              timestamp: ltfCandles[ltfCandles.length - 1].timestamp,
+              isTaken: false,
+              points: [],
+            });
+          }
+        });
+      }
+      // Add EQL if near range low
+      if (tradingRange.low && eqLevels.eql.length > 0) {
+        eqLevels.eql.forEach(eql => {
+          const diff = eql.minus(tradingRange.low).abs().div(tradingRange.low);
+          const atrTolerance = atr15m.mul(new Decimal('0.5')).div(ltfCandles[ltfCandles.length - 1].close);
+          const threshold = Decimal.max(new Decimal('0.001'), atrTolerance);
+          if (diff.lte(threshold)) {
+            eqlPools.push({
+              type: 'EQL',
+              priceLevel: eql,
+              timestamp: ltfCandles[ltfCandles.length - 1].timestamp,
+              isTaken: false,
+              points: [],
+            });
+          }
+        });
+      }
+    }
+
+    const allLiquidityPools = [
+      ...macroContext.liquidityPools,
+      ...bslPools,
+      ...sslPools,
+      ...eqhPools,
+      ...eqlPools,
+    ];
+
     const ms = Date.now() - startMs;
     logger.debug(`[${symbol}] PatternData built in ${ms}ms`);
 
@@ -853,7 +1057,7 @@ export class PatternRecognizer {
       currentKillzone: killzone,
       sessionRanges,
       tradingRange,
-      liquidityPools: macroContext.liquidityPools,
+      liquidityPools: allLiquidityPools,
       structures: [...structures15m, ...structures4h],
       zones: [
         ...this.detectFVGs(ltfCandles).map(f => ({ ...f, timeframe: '15' as Timeframe })),

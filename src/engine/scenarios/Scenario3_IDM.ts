@@ -20,7 +20,7 @@ export class Scenario3_IDM extends BaseScenario {
 
     // Check for bearish IDM (local low swept, then bounce to test OB)
     const recentLowSweep = patternData.structures?.find((s: any) => 
-      s.direction === 'BULLISH' && s.kind === 'CHOCH' && 
+      s.direction === 'BULLISH' && s.type === 'CHOCH' && 
       s.brokenSwing && s.brokenSwing.type === 'LOW'
     );
 
@@ -43,8 +43,9 @@ export class Scenario3_IDM extends BaseScenario {
 
     // Check if price is now testing the real OB
     const realOb = realObs[0];
-    const lastClose = new Decimal(patternData.candles15m[patternData.candles15m.length - 1].close);
-    const testingOb = lastClose.gte(realOb.bottom) && lastClose.lte(realOb.top);
+    const lastHigh = new Decimal(lastCandle.high);
+    const lastLow = new Decimal(lastCandle.low);
+    const testingOb = lastHigh.gte(realOb.bottom) && lastLow.lte(realOb.top);
 
     if (!testingOb) {
       this.logRejection('Price not testing real OB after IDM sweep');
@@ -60,6 +61,16 @@ export class Scenario3_IDM extends BaseScenario {
       entry: entry.toFixed(2),
       stopLoss: sl.toFixed(2),
       takeProfit: tp.toFixed(2),
+    });
+
+    // Set zone details for mitigation tracking (the OB we entered from)
+    this.setZoneDetails({
+      type: 'OB',
+      top: realOb.top,
+      bottom: realOb.bottom,
+      timeframe: '15',
+      direction: 'BULLISH',
+      timestamp: realOb.timestamp,
     });
 
     this.setReason(`IDM: Local low swept + Real OB test at 0.5`);

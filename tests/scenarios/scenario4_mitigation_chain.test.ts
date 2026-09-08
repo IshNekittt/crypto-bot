@@ -4,46 +4,182 @@ import { Decimal } from 'decimal.js';
 describe('Scenario4: Mitigation Chain', () => {
   let scenario: Scenario4_MitigationChain;
 
-  const createMockPatternData = (overrides: Partial<{
-    killzone: string;
-    hasTrendOb: boolean;
-    obMitigated: boolean;
-    priceTouchesEq: boolean;
-    hasChoch: boolean;
-    chochDisplacement: boolean;
-  }> = {}) => {
-    const config = {
-      killzone: overrides.killzone || 'LONDON',
-      hasTrendOb: overrides.hasTrendOb !== false,
-      obMitigated: overrides.obMitigated || false,
-      priceTouchesEq: overrides.priceTouchesEq !== false,
-      hasChoch: overrides.hasChoch !== false,
-      chochDisplacement: overrides.chochDisplacement !== false,
+  /**
+   * Creates IDEAL synthetic pattern data for Mitigation Chain:
+   * - OB formed 5 candles ago (timestamp = now - 5*15min)
+   * - BOS occurred 3 candles after OB (within 24H)
+   * - Current candle: price at OB 0.5 (equilibrium = 101)
+   * - Fresh 15m BULLISH CHoCH with displacement >= 1.5 ATR
+   * - 4H trend is BULLISH (BOS present, no BEARISH)
+   */
+  const createIdealMitigationChainPatternData = () => {
+    const FIXED_NOW = 1788675600000; // LONDON killzone
+    const OB_TIME = FIXED_NOW - 5 * 900000; // 5 candles ago (75 min)
+
+    // Trend OB (BULLISH): top=102, bottom=100, eq=101
+    const trendOb = {
+      type: 'OB' as const,
+      direction: 'BULLISH' as const,
+      top: new Decimal(102),
+      bottom: new Decimal(100),
+      timestamp: OB_TIME,
+      mitigated: false,
+      timeframe: '15',
     };
 
-    const trendOb = config.hasTrendOb ? {
-      type: 'OB', direction: 'BULLISH', top: new Decimal(102), bottom: new Decimal(100),
-      timestamp: Date.now() - 100000, mitigated: config.obMitigated, timeframe: '15',
-    } : null;
+    // Create 6 candles
+    const candles15m: any[] = [];
+    for (let i = 0; i < 6; i++) {
+      const ts = FIXED_NOW - (5 - i) * 900000;
+      candles15m.push({
+        timestamp: ts,
+        open: '100',
+        high: '101',
+        low: '99',
+        close: '100',
+        volume: '1000',
+      });
+    }
 
-    const choch = config.hasChoch ? {
-      kind: 'CHOCH', direction: 'BULLISH', price: new Decimal(103),
-      timestamp: Date.now() - 1000, isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
-    } : null;
+    // OB formation candle (index 0, timestamp = OB_TIME)
+    candles15m[0] = {
+      timestamp: OB_TIME,
+      open: '101',
+      high: '102.5',
+      low: '100.5',
+      close: '101.5',
+      volume: '1000',
+    };
 
-    const lastCandle = {
-      timestamp: Date.now(),
-      close: config.priceTouchesEq ? '101' : '94',
-      high: config.priceTouchesEq ? '102' : '98',
-      low: config.priceTouchesEq ? '100' : '93',
-      open: '100', volume: '1000',
+    // Candle 1: BOS after OB (within 24H)
+    const bosTime = OB_TIME + 3 * 900000; // 45 min after OB
+    candles15m[1] = {
+      timestamp: bosTime,
+      open: '101',
+      high: '103', // BOS: broke above recent high
+      low: '100',
+      close: '102',
+      volume: '1000',
+    };
+
+    // Current candle (index 5): price at OB equilibrium (101)
+    candles15m[5] = {
+      timestamp: FIXED_NOW,
+      high: '101.5',
+      low: '100.5',
+      close: '101', // exactly at OB equilibrium
+      open: '101',
+      volume: '1000',
+    };
+
+    // 15m CHoCH after OB touch (current area)
+    const choch = {
+      type: 'CHOCH' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(101),
+      timestamp: FIXED_NOW - 500,
+      isValidated: true,
+      impulseFactor: new Decimal(2.0),
+    };
+
+    // 4H structures: BULLISH BOS (trend confirmation) - must be AFTER OB formation
+    const bos4h = {
+      type: 'BOS' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(102),
+      timestamp: OB_TIME + 3 * 900000, // 45 min after OB (same as bosTime candle)
+      timeframe: '240',
+      isValidated: true,
+      impulseFactor: new Decimal(2.0),
     };
 
     return {
-      currentKillzone: config.killzone,
-      candles15m: [lastCandle],
-      zones: trendOb ? [trendOb] : [],
-      structures: choch ? [choch] : [],
+      currentKillzone: 'LONDON' as const,
+      currentSession: 'LONDON' as const,
+      candles15m,
+      zones: [trendOb],
+      structures: [choch, bos4h],
+      atr15m: new Decimal('0.5'),
+    };
+  };
+
+  /**
+   * Creates Mitigation Chain pattern WITHOUT BOS after OB (should reject)
+   */
+  const createMitigationChainNoBosAfterOb = () => {
+    const FIXED_NOW = 1788675600000;
+    const OB_TIME = FIXED_NOW - 5 * 900000;
+
+    const trendOb = {
+      type: 'OB' as const,
+      direction: 'BULLISH' as const,
+      top: new Decimal(102),
+      bottom: new Decimal(100),
+      timestamp: OB_TIME,
+      mitigated: false,
+      timeframe: '15',
+    };
+
+    const candles15m: any[] = [];
+    for (let i = 0; i < 6; i++) {
+      const ts = FIXED_NOW - (5 - i) * 900000;
+      candles15m.push({
+        timestamp: ts,
+        open: '100',
+        high: '101',
+        low: '99',
+        close: '100',
+        volume: '1000',
+      });
+    }
+
+    // OB formation
+    candles15m[0] = {
+      timestamp: OB_TIME,
+      open: '101',
+      high: '102.5',
+      low: '100.5',
+      close: '101.5',
+      volume: '1000',
+    };
+
+    // NO BOS after OB - just random candles
+
+    // Current candle at OB equilibrium
+    candles15m[5] = {
+      timestamp: FIXED_NOW,
+      high: '101.5',
+      low: '100.5',
+      close: '101',
+      open: '101',
+      volume: '1000',
+    };
+
+    const choch = {
+      type: 'CHOCH' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(101),
+      timestamp: FIXED_NOW - 500,
+      isValidated: true,
+      impulseFactor: new Decimal(2.0),
+    };
+
+    const bos4h = {
+      type: 'BOS' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(102),
+      timestamp: FIXED_NOW - 2 * 60 * 60 * 1000,
+      timeframe: '240',
+      isValidated: true,
+      impulseFactor: new Decimal(2.0),
+    };
+
+    return {
+      currentKillzone: 'LONDON' as const,
+      currentSession: 'LONDON' as const,
+      candles15m,
+      zones: [trendOb],
+      structures: [choch, bos4h],
       atr15m: new Decimal('0.5'),
     };
   };
@@ -52,19 +188,27 @@ describe('Scenario4: Mitigation Chain', () => {
     scenario = new Scenario4_MitigationChain();
   });
 
-  describe('positive cases', () => {
-    it('should trigger when all conditions are met', () => {
-      const result = scenario.evaluate(createMockPatternData({}));
+  describe('SYNTHETIC TEST - Ideal Mitigation Chain Pattern', () => {
+    it('should trigger on perfect Mitigation Chain: OB + BOS + 0.5 touch + CHoCH', () => {
+      const result = scenario.evaluate(createIdealMitigationChainPatternData());
+      
+      if (!result) {
+        console.log('REJECTION REASON:', scenario.getReason());
+        console.log('LEVELS:', scenario.getLevels());
+      }
       
       expect(result).toBe(true);
       expect(scenario.getReason()).toContain('Mitigation Chain');
+      expect(scenario.getReason()).toContain('BOS validated');
       expect(scenario.getLevels().entry).toBeDefined();
     });
   });
 
   describe('negative cases - killzone', () => {
     it('should reject when killzone is NONE', () => {
-      const result = scenario.evaluate(createMockPatternData({ killzone: 'NONE' }));
+      const data = createIdealMitigationChainPatternData();
+      (data as any).currentKillzone = 'NONE';
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('Not in active killzone');
     });
@@ -72,21 +216,37 @@ describe('Scenario4: Mitigation Chain', () => {
 
   describe('negative cases - trend OB', () => {
     it('should reject when no valid OB in trend direction', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasTrendOb: false }));
+      const data = createIdealMitigationChainPatternData();
+      data.zones = [];
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('No valid OB in trend direction');
     });
 
     it('should reject when OB is mitigated', () => {
-      const result = scenario.evaluate(createMockPatternData({ obMitigated: true }));
+      const data = createIdealMitigationChainPatternData();
+      data.zones[0].mitigated = true;
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('No valid OB');
     });
   });
 
+  describe('negative cases - BOS validation', () => {
+    it('should reject when OB did not produce true BOS after formation', () => {
+      const result = scenario.evaluate(createMitigationChainNoBosAfterOb());
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('BOS');
+    });
+  });
+
   describe('negative cases - 0.5 equilibrium', () => {
     it('should reject when price has not touched 0.5 of OB', () => {
-      const result = scenario.evaluate(createMockPatternData({ priceTouchesEq: false }));
+      const data = createIdealMitigationChainPatternData();
+      data.candles15m[5].close = '94';
+      data.candles15m[5].high = '95';
+      data.candles15m[5].low = '93';
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('0.5 (Equilibrium) of OB');
     });
@@ -94,15 +254,40 @@ describe('Scenario4: Mitigation Chain', () => {
 
   describe('negative cases - CHoCH', () => {
     it('should reject when no CHoCH confirming trend direction', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasChoch: false }));
+      const data = createIdealMitigationChainPatternData();
+      data.structures = data.structures.filter(s => s.type !== 'CHOCH');
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('No CHoCH confirming trend direction');
+      expect(scenario.getReason()).toBe('No 15m CHoCH confirming trend direction');
     });
 
     it('should reject when CHoCH displacement < 1.5 ATR', () => {
-      const result = scenario.evaluate(createMockPatternData({ chochDisplacement: false }));
+      const data = createIdealMitigationChainPatternData();
+      data.structures = data.structures.map(s => 
+        s.type === 'CHOCH' ? { ...s, impulseFactor: new Decimal(1.0) } : s
+      );
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('CHoCH displacement < 1.5 ATR');
+    });
+  });
+
+  describe('negative cases - trend filter', () => {
+    it('should reject when 4H trend is not bullish', () => {
+      const data = createIdealMitigationChainPatternData();
+      // Add bearish 4H structure
+      data.structures.push({
+        type: 'CHOCH' as const,
+        direction: 'BEARISH' as const,
+        price: new Decimal(100),
+        timestamp: Date.now() - 3600000,
+        timeframe: '240',
+        isValidated: true,
+        impulseFactor: new Decimal(2.0),
+      } as any);
+      const result = scenario.evaluate(data);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('4H trend not bullish');
     });
   });
 });

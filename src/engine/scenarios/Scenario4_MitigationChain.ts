@@ -2,13 +2,63 @@ import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
 
 export class Scenario4_MitigationChain extends BaseScenario {
+  private static rejectionStats = {
+    killzone: 0,
+    noValidOb: 0,
+    noObTouch: 0,
+    noChoch: 0,
+    displacement: 0,
+    trendFilter: 0,
+    noBosAfterBounce: 0,
+    totalEvals: 0
+  };
+
+  static getRejectionStats() {
+    return { ...this.rejectionStats };
+  }
+
+  static resetStats() {
+    this.rejectionStats = {
+      killzone: 0,
+      noValidOb: 0,
+      noObTouch: 0,
+      noChoch: 0,
+      displacement: 0,
+      trendFilter: 0,
+      noBosAfterBounce: 0,
+      totalEvals: 0
+    };
+  }
+
   constructor() {
     super(4, 'Mitigation Chain');
   }
 
+  /**
+   * Check if the OB bounce led to a true BOS (Break of Structure)
+   * The OB is only valid if the candle that bounced from it triggered a BOS in the trend direction
+   */
+  private hasBosAfterBounce(patternData: any, ob: any): boolean {
+    const { structures } = patternData;
+    if (!structures?.length) return false;
+
+    // Look for BOS in trend direction (BULLISH for long) that occurred AFTER the OB timestamp
+    const bosAfterOb = structures.find((s: any) => 
+      s.type === 'BOS' && 
+      s.direction === 'BULLISH' &&
+      s.timestamp > ob.timestamp &&
+      s.timestamp <= ob.timestamp + 24 * 60 * 60 * 1000 // within 24H after OB formation
+    );
+
+    return !!bosAfterOb;
+  }
+
   override evaluate(patternData: any): boolean {
+    Scenario4_MitigationChain.rejectionStats.totalEvals++;
+
     if (!patternData.currentKillzone || patternData.currentKillzone === 'NONE') {
       this.logRejection('Not in active killzone');
+      Scenario4_MitigationChain.rejectionStats.killzone++;
       return false;
     }
 
@@ -25,13 +75,21 @@ export class Scenario4_MitigationChain extends BaseScenario {
 
     if (!trendObs.length) {
       this.logRejection('No valid OB in trend direction');
+      Scenario4_MitigationChain.rejectionStats.noValidOb++;
       return false;
     }
 
     // Get the most recent OB
     const latestOb = trendObs[0];
     
-    // Check if OB is being mitigated at EXACTLY 50% (Equilibrium)
+    // STRENGTH FILTER: OB must have produced a true BOS after its formation
+    // This validates the OB as a "strong" institutional level
+    if (!this.hasBosAfterBounce(patternData, latestOb)) {
+      this.logRejection('OB did not produce true BOS after formation - weak block');
+      Scenario4_MitigationChain.rejectionStats.noBosAfterBounce++;
+      return false;
+    }
+    
     const lastCandle = patternData.candles15m[patternData.candles15m.length - 1];
     if (!lastCandle) return false;
 
@@ -44,22 +102,41 @@ export class Scenario4_MitigationChain extends BaseScenario {
 
     if (!touched50) {
       this.logRejection(`Price has not touched 0.5 (Equilibrium) of OB. Current: ${lastCandle.close}, EQ: ${eq.toFixed(4)}`);
+      Scenario4_MitigationChain.rejectionStats.noObTouch++;
       return false;
     }
 
-    // Verify trend structure - need CHoCH in direction of trend
+    // Verify trend structure - need CHoCH in direction of trend (any valid CHoCH)
     const choch = patternData.structures?.find((s: any) => 
-      s.kind === 'CHOCH' && s.direction === 'BULLISH'
+      s.type === 'CHOCH' && s.direction === 'BULLISH'
     );
     
     if (!choch) {
-      this.logRejection('No CHoCH confirming trend direction');
+      this.logRejection('No 15m CHoCH confirming trend direction');
+      Scenario4_MitigationChain.rejectionStats.noChoch++;
       return false;
     }
 
     // Check displacement on the CHoCH
     if (!this.isValidDisplacement(choch, 1.5)) {
       this.logRejection('CHoCH displacement < 1.5 ATR');
+      Scenario4_MitigationChain.rejectionStats.displacement++;
+      return false;
+    }
+
+    // FIX: 4H Trend Filter - Only allow longs if 4H structure is BULLISH
+    const htfStructures = patternData.structures?.filter((s: any) => 
+      (s.timeframe === '240' || s.timeframe === '4H') && 
+      (s.type === 'BOS' || s.type === 'CHOCH')
+    ) || [];
+    
+    const hasBullish4h = htfStructures.some((s: any) => s.direction === 'BULLISH');
+    const hasBearish4h = htfStructures.some((s: any) => s.direction === 'BEARISH');
+    
+    // For long entries, 4H trend must be BULLISH (no BEARISH structures)
+    if (!hasBullish4h || hasBearish4h) {
+      this.logRejection('4H trend not bullish - entry against HTF trend');
+      Scenario4_MitigationChain.rejectionStats.trendFilter++;
       return false;
     }
 
@@ -76,7 +153,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
       takeProfit: tp.toFixed(2),
     });
 
-    this.setReason(`Mitigation Chain: OB 0.5 mitigation + CHoCH continuation`);
+    this.setReason(`Mitigation Chain: OB 0.5 mitigation (BOS validated) + CHoCH continuation`);
     return true;
   }
 }

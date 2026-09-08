@@ -1,11 +1,13 @@
 import { IScenario } from '../types';
 import { ScenarioLevels } from '../types';
+import { ZoneDetails } from '../types';
 
 export abstract class BaseScenario implements IScenario {
   readonly id: number;
   readonly name: string;
   protected levels: ScenarioLevels | null = null;
   protected reason: string = '';
+  protected zoneDetails: ZoneDetails | null = null;
 
   constructor(id: number, name: string) {
     this.id = id;
@@ -24,12 +26,20 @@ export abstract class BaseScenario implements IScenario {
     return this.reason;
   }
 
+  getZoneDetails(): ZoneDetails | null {
+    return this.zoneDetails;
+  }
+
   protected setLevels(levels: ScenarioLevels): void {
     this.levels = levels;
   }
 
   protected setReason(reason: string): void {
     this.reason = reason;
+  }
+
+  protected setZoneDetails(zone: ZoneDetails): void {
+    this.zoneDetails = zone;
   }
 
   protected logRejection(reason: string): void {

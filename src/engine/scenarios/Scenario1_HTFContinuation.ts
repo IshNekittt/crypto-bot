@@ -34,9 +34,10 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       return false;
     }
 
-    // Check if price touched 4H OB
-    const lastClose = new Decimal(lastCandle.close);
-    const touched = lastClose.gte(latestOb.bottom) && lastClose.lte(latestOb.top);
+    // Check if price touched 4H OB - use candle high/low intersection (wicks can touch zone)
+    const lastHigh = new Decimal(lastCandle.high);
+    const lastLow = new Decimal(lastCandle.low);
+    const touched = lastHigh.gte(latestOb.bottom) && lastLow.lte(latestOb.top);
     if (!touched) {
       this.logRejection('Price has not touched 4H OB zone');
       return false;
@@ -44,7 +45,7 @@ export class Scenario1_HTFContinuation extends BaseScenario {
 
     // Check for 15m CHoCH with Displacement validation
     const structures15m = patternData.structures?.filter((s: any) => s.direction === 'BULLISH') || [];
-    const choch = structures15m.find((s: any) => s.kind === 'CHOCH');
+    const choch = structures15m.find((s: any) => s.type === 'CHOCH');
     if (!choch) {
       this.logRejection('No 15m CHoCH found after OB touch');
       return false;
@@ -56,12 +57,12 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       return false;
     }
 
-    // Check for fresh 15m FVG after CHoCH
-    const freshFvgs = patternData.zones?.filter((z: any) => 
-      z.type === 'FVG' && z.direction === 'BULLISH' && z.timeframe === '15' && z.index >= choch.candleIndex
+    // Check for 15m FVG after CHoCH (any valid FVG formed after CHoCH)
+    const fvgsAfterChoch = patternData.zones?.filter((z: any) => 
+      z.type === 'FVG' && z.direction === 'BULLISH' && z.timeframe === '15' && z.timestamp >= choch.timestamp
     ) || [];
     
-    const fvg = freshFvgs[0];
+    const fvg = fvgsAfterChoch[0];
     if (!fvg) {
       this.logRejection('No 15m FVG found after CHoCH');
       return false;
@@ -69,14 +70,24 @@ export class Scenario1_HTFContinuation extends BaseScenario {
 
     // Entry at 0.5 (Equilibrium) of FVG
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
-    const atr15m = 0.01; // TODO: get from patternData
-    const sl = new Decimal(choch.price).minus(new Decimal(atr15m).mul(2));
+    const atr15m = patternData.atr15m || new Decimal('0.01');
+    const sl = fvg.bottom.minus(atr15m.mul(0.5));
     const tp = entry.plus(entry.minus(sl).mul(3));
 
     this.setLevels({
       entry: entry.toFixed(2),
       stopLoss: sl.toFixed(2),
       takeProfit: tp.toFixed(2),
+    });
+
+    // Set zone details for mitigation tracking (the FVG we entered from)
+    this.setZoneDetails({
+      type: 'FVG',
+      top: fvg.top,
+      bottom: fvg.bottom,
+      timeframe: '15',
+      direction: 'BULLISH',
+      timestamp: fvg.timestamp,
     });
 
     this.setReason(`HTF Continuation: 4H OB touch + 15m CHoCH + 15m FVG entry`);

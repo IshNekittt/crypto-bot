@@ -25,6 +25,7 @@ export interface BotConfig {
   readonly autoTrading: boolean;
   readonly tradeApprovalTimeoutMinutes: number;
   readonly enableLiveTestOrders: boolean;
+  readonly activeScenarios: number[];
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -60,6 +61,15 @@ function parseSymbols(raw: string): string[] {
     throw new Error('SYMBOLS must contain at least one trading pair, e.g. SYMBOLS=SOLUSDT,BTCUSDT');
   }
   return symbols;
+}
+
+function parseActiveScenarios(raw: string | null): number[] {
+  if (!raw || !raw.trim()) return [];
+  const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n) && n >= 1 && n <= 11);
+  if (ids.length === 0) {
+    throw new Error('ACTIVE_SCENARIOS must contain valid scenario IDs (1-11), e.g. ACTIVE_SCENARIOS=3,4,5,7,8,9');
+  }
+  return [...new Set(ids)].sort((a, b) => a - b);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
@@ -132,5 +142,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     autoTrading: (optionalEnv(env, 'AUTO_TRADING') ?? 'false').toLowerCase() === 'true',
     tradeApprovalTimeoutMinutes: parseInt(optionalEnv(env, 'TRADE_APPROVAL_TIMEOUT_MINUTES') ?? '5', 10),
     enableLiveTestOrders: (optionalEnv(env, 'ENABLE_LIVE_TEST_ORDERS') ?? 'false').toLowerCase() === 'true',
+    activeScenarios: parseActiveScenarios(optionalEnv(env, 'ACTIVE_SCENARIOS')),
   };
 }

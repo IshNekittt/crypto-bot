@@ -24,6 +24,14 @@ export interface PositionPlanInput {
   readonly entryPrice: Decimal;
   readonly stopLossRaw: Decimal;
   readonly instrument: InstrumentInfo;
+  readonly zoneDetails: {
+    type: string | null;
+    top: string | null;
+    bottom: string | null;
+    timeframe: string | null;
+    direction: string | null;
+    timestamp: number | null;
+  } | null;
 }
 
 export interface PositionPlan {
@@ -38,6 +46,14 @@ export interface PositionPlan {
   readonly riskPercentApplied: string;
   readonly balanceUsdt: string;
   readonly scenarioId: number | null;
+  readonly zoneDetails: {
+    type: string | null;
+    top: string | null;
+    bottom: string | null;
+    timeframe: string | null;
+    direction: string | null;
+    timestamp: number | null;
+  } | null;
 }
 
 export type PositionPlanResult =
@@ -131,6 +147,7 @@ export class RiskManager {
         riskPercentApplied: riskPercent.toFixed(),
         balanceUsdt: balance.toFixed(),
         scenarioId: null,
+        zoneDetails: input.zoneDetails,
       },
     };
   }

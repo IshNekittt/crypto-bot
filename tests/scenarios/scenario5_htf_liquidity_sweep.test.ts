@@ -26,24 +26,29 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
       points: [], isTaken: false, timestamp: Date.now() - 1000,
     };
 
+    const now = Date.now();
     const choch = config.hasChochAfterSweep ? {
-      kind: 'CHOCH', direction: 'BEARISH', price: new Decimal(103),
-      timestamp: Date.now() - 500, isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
+      type: 'CHOCH', direction: 'BEARISH', price: new Decimal(103),
+      timestamp: now - 2 * 60 * 60 * 1000, // 2 hours ago (within 4H window)
+      isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
     } : null;
 
     const freshFvg = config.hasFreshFvg ? {
       type: 'FVG', direction: 'BEARISH', top: new Decimal(103), bottom: new Decimal(101),
-      timestamp: Date.now() - 100, mitigated: false, timeframe: '15',
+      timestamp: now, // Current candle timestamp (FVG formed on current candle)
+      mitigated: false, timeframe: '15',
     } : null;
 
+    // Sweep candle: wick above PDH (105) at 106, close back below at 104 (SFP)
     const sweepCandle = config.hasLiquiditySweep ? {
-      timestamp: Date.now(), close: '104', high: '106', low: '103', open: '100', volume: '1000',
+      timestamp: now, close: '104', high: '106', low: '103', open: '100', volume: '1000',
     } : {
-      timestamp: Date.now(), close: '100', high: '101', low: '99', open: '100', volume: '1000',
+      timestamp: now, close: '100', high: '101', low: '99', open: '100', volume: '1000',
     };
 
     return {
       currentKillzone: config.killzone,
+      currentSession: 'LONDON',
       candles15m: [sweepCandle],
       structures: choch ? [choch] : [],
       zones: freshFvg ? [freshFvg] : [],

@@ -8,3 +8,4 @@ data/*.db-wal
 Крипто-бот SMC.md
 smc_full_guide.md
 Крипто-бот SMC эволюция.md
+data/*

@@ -8,7 +8,13 @@ export class Scenario6_SMS extends BaseScenario {
 
   override evaluate(patternData: any): boolean {
     // SMS can happen in any session, but CHoCH confirmation needs killzone
-    if (!this.isInKillzone(patternData)) {
+    // Check explicit killzone override first
+    if (patternData.currentKillzone === 'NONE') {
+      this.logRejection('Not in active killzone for CHoCH confirmation');
+      return false;
+    }
+    const candleTimestamp = patternData.candles15m?.[patternData.candles15m.length - 1]?.timestamp ?? Date.now();
+    if (!this.isInKillzone(candleTimestamp)) {
       this.logRejection('Not in active killzone for CHoCH confirmation');
       return false;
     }
@@ -30,7 +36,7 @@ export class Scenario6_SMS extends BaseScenario {
 
     // CRITICAL: Verify aggressive CHoCH in SMS direction
     const choch = structures.find((s: any) => 
-      s.kind === 'CHOCH' && 
+      s.type === 'CHOCH' && 
       s.direction === expectedDirection &&
       s.timestamp > sms.timestamp
     );

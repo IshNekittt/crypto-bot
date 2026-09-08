@@ -117,12 +117,22 @@ export interface ScenarioLevels {
   readonly takeProfit: string;
 }
 
+export interface ZoneDetails {
+  readonly type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION';
+  readonly top: Decimal;
+  readonly bottom: Decimal;
+  readonly timeframe: string;
+  readonly direction: Direction;
+  readonly timestamp: number;
+}
+
 export interface IScenario {
   readonly id: number;
   readonly name: string;
   evaluate(patternData: any): boolean;
   getLevels(): ScenarioLevels;
   getReason(): string;
+  getZoneDetails(): ZoneDetails | null;
 }
 
 export type ScenarioConstructor = new (deps: ScenarioDeps) => IScenario;

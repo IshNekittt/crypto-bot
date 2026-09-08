@@ -9,6 +9,7 @@ const mockNotifier = {
 const mockPatternRecognizer = {
   buildPatternData: jest.fn().mockResolvedValue({
     currentKillzone: 'LONDON',
+    currentSession: 'LONDON',
     candles15m: [],
     candles4h: [],
     zones: [],
@@ -26,6 +27,8 @@ describe('ScenarioRouter', () => {
   let router: ScenarioRouter;
 
   beforeEach(() => {
+    // Set ACTIVE_SCENARIOS to include all 11 scenarios for testing
+    process.env.ACTIVE_SCENARIOS = '1,2,3,4,5,6,7,8,9,10,11';
     router = new ScenarioRouter({
       symbol: 'SOLUSDT',
       patternRecognizer: mockPatternRecognizer,
@@ -34,23 +37,27 @@ describe('ScenarioRouter', () => {
     jest.clearAllMocks();
   });
 
+  afterEach(() => {
+    delete process.env.ACTIVE_SCENARIOS;
+  });
+
   describe('scenario registration', () => {
-    it('should have all 11 scenarios registered in order', () => {
+    it('should have all 11 scenarios registered in order (priority order: complex first)', () => {
       const scenarios = (router as any).scenarios;
       expect(scenarios.length).toBe(11);
-      expect(scenarios.map((s: IScenario) => s.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(scenarios.map((s: IScenario) => s.id)).toEqual([5, 7, 9, 10, 11, 1, 3, 6, 8, 2, 4]);
       expect(scenarios.map((s: IScenario) => s.name)).toEqual([
-        'HTF Continuation',
-        'FVG Fill',
-        'Inducement (IDM)',
-        'Mitigation Chain',
         'HTF Liquidity Sweep',
-        'Failure Swing (SMS)',
         'AMD (Accumulation-Manipulation-Distribution)',
-        'Range Deviation & Reclaim',
         'Turtle Soup (Range SFP)',
         'Breaker Block Entry',
         'Mitigation Block',
+        'HTF Continuation',
+        'Inducement (IDM)',
+        'Failure Swing (SMS)',
+        'Range Deviation & Reclaim',
+        'FVG Fill',
+        'Mitigation Chain',
       ]);
     });
   });
@@ -59,9 +66,9 @@ describe('ScenarioRouter', () => {
     it('should evaluate scenarios in registration order', async () => {
       
       const mockScenarios = [
-        { id: 1, name: 'Test1', evaluate: jest.fn().mockReturnValue(false) },
-        { id: 2, name: 'Test2', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test2 reason' },
-        { id: 3, name: 'Test3', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test3 reason' },
+        { id: 1, name: 'Test1', evaluate: jest.fn().mockReturnValue(false), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test1 reason', getZoneDetails: () => null },
+        { id: 2, name: 'Test2', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test2 reason', getZoneDetails: () => null },
+        { id: 3, name: 'Test3', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test3 reason', getZoneDetails: () => null },
       ] as unknown as IScenario[];
 
       const testRouter = new ScenarioRouter({
@@ -74,7 +81,7 @@ describe('ScenarioRouter', () => {
 
       (testRouter as any).scenarios = mockScenarios;
 
-      const result = await testRouter.evaluate([], []);
+      const result = await testRouter.evaluate([], [], Date.now());
 
       expect(result.triggered).toBe(true);
       expect(result.scenario?.id).toBe(2);
@@ -85,8 +92,8 @@ describe('ScenarioRouter', () => {
 
     it('should return first matching scenario when multiple match', async () => {
       const mockScenarios = [
-        { id: 5, name: 'Scenario5', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario5 reason' },
-        { id: 1, name: 'Scenario1', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario1 reason' },
+        { id: 5, name: 'Scenario5', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario5 reason', getZoneDetails: () => null },
+        { id: 1, name: 'Scenario1', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario1 reason', getZoneDetails: () => null },
       ] as unknown as IScenario[];
 
       const testRouter = new ScenarioRouter({
@@ -97,7 +104,7 @@ describe('ScenarioRouter', () => {
 
       (testRouter as any).scenarios = mockScenarios;
 
-      const result = await testRouter.evaluate([], []);
+      const result = await testRouter.evaluate([], [], Date.now());
 
       expect(result.triggered).toBe(true);
       expect(result.scenario?.id).toBe(5);
@@ -119,7 +126,7 @@ describe('ScenarioRouter', () => {
 
       (testRouter as any).scenarios = mockScenarios;
 
-      const result = await testRouter.evaluate([], []);
+      const result = await testRouter.evaluate([], [], Date.now());
 
       expect(result.triggered).toBe(false);
       expect(result.scenario).toBeNull();
@@ -135,7 +142,7 @@ describe('ScenarioRouter', () => {
         notifier: mockNotifier,
       });
 
-      const result = await testRouter.evaluate([], []);
+      const result = await testRouter.evaluate([], [], Date.now());
 
       expect(result.triggered).toBe(false);
       expect(result.reason).toBe('Pattern recognition error');
@@ -147,9 +154,9 @@ describe('ScenarioRouter', () => {
       const candles15m = [{ timestamp: 1, open: '100', high: '101', low: '99', close: '100', volume: '100' }];
       const candles4h = [{ timestamp: 1, open: '100', high: '101', low: '99', close: '100', volume: '100' }];
 
-      await router.evaluate(candles15m, candles4h);
+      await router.evaluate(candles15m, candles4h, Date.now());
 
-      expect(mockPatternRecognizer.buildPatternData).toHaveBeenCalledWith('SOLUSDT', candles15m, candles4h);
+      expect(mockPatternRecognizer.buildPatternData).toHaveBeenCalledWith('SOLUSDT', candles15m, candles4h, expect.any(Number));
     });
   });
 });

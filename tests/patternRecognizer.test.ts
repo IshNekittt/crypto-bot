@@ -200,7 +200,8 @@ describe('PatternRecognizer', () => {
       candles[8] = { timestamp: 8, open: '100', high: '104', low: '99', close: '100', volume: '100' };
       candles.push({ timestamp: 11, open: '104', high: '104', low: '95', close: '95.5', volume: '100' });
       
-      recognizer.detectSMS(candles);
+      const atr = new Decimal('0.5');
+      recognizer.detectSMS(candles, atr);
       expect(typeof recognizer.detectSMS).toBe('function');
     });
   });

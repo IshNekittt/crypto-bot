@@ -4,6 +4,9 @@ import { Decimal } from 'decimal.js';
 describe('Scenario6: Failure Swing (SMS)', () => {
   let scenario: Scenario6_SMS;
 
+  // Fixed timestamp: 2026-09-06 07:00:00 UTC (03:00 NY time, in LONDON killzone 02:00-05:00 NY)
+  const FIXED_TIMESTAMP = 1788675600000;
+
   const createMockPatternData = (overrides: Partial<{
     killzone: string;
     hasSms: boolean;
@@ -21,27 +24,30 @@ describe('Scenario6: Failure Swing (SMS)', () => {
       hasSmsOb: overrides.hasSmsOb !== false,
     };
 
+    const now = FIXED_TIMESTAMP;
     const sms = config.hasSms ? {
       type: 'SMS', direction: config.smsDirection, price: new Decimal(104),
-      timestamp: Date.now() - 2000, isValidated: true,
+      timestamp: now - 3 * 60 * 60 * 1000, isValidated: true,
     } : null;
 
     const chochAfterSms = config.hasChochAfterSms ? {
-      kind: 'CHOCH', direction: config.smsDirection === 'BEARISH' ? 'BEARISH' : 'BULLISH',
-      price: new Decimal(102), timestamp: Date.now() - 1000, isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
+      type: 'CHOCH', direction: config.smsDirection === 'BEARISH' ? 'BEARISH' : 'BULLISH',
+      price: new Decimal(102), timestamp: now - 2 * 60 * 60 * 1000, // 2 hours ago (after SMS, within 4H)
+      isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
     } : null;
 
     const smsOb = config.hasSmsOb ? {
       type: 'OB', direction: config.smsDirection === 'BEARISH' ? 'BULLISH' : 'BEARISH',
-      top: new Decimal(103), bottom: new Decimal(102), timestamp: Date.now() - 3000, mitigated: false, timeframe: '15',
+      top: new Decimal(103), bottom: new Decimal(102), timestamp: now - 3 * 60 * 60 * 1000 - 1000, mitigated: false, timeframe: '15',
     } : null;
 
     const lastCandle = {
-      timestamp: Date.now(), close: '102.5', high: '103', low: '102', open: '102', volume: '1000',
+      timestamp: now, close: '102.5', high: '103', low: '102', open: '102', volume: '1000',
     };
 
     return {
       currentKillzone: config.killzone,
+      currentSession: 'LONDON',
       candles15m: [lastCandle],
       structures: [sms, chochAfterSms].filter(Boolean),
       zones: smsOb ? [smsOb] : [],

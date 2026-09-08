@@ -4,46 +4,218 @@ import { Decimal } from 'decimal.js';
 describe('Scenario2: FVG Fill', () => {
   let scenario: Scenario2_FVGFill;
 
-  const createMockPatternData = (overrides: Partial<{
-    killzone: string;
-    hasHtfFvg: boolean;
-    priceTouchesEq: boolean;
-    hasChoch: boolean;
-    chochDisplacement: boolean;
-  }> = {}) => {
-    const config = {
-      killzone: overrides.killzone || 'LONDON',
-      hasHtfFvg: overrides.hasHtfFvg !== false,
-      priceTouchesEq: overrides.priceTouchesEq !== false,
-      hasChoch: overrides.hasChoch !== false,
-      chochDisplacement: overrides.chochDisplacement !== false,
+  /**
+   * Creates IDEAL synthetic pattern data for FVG Fill:
+   * - HTF (4H) BULLISH FVG formed 15 candles ago
+   * - 10-15 candles BEFORE FVG: liquidity sweep + CHoCH/BOS (confluence)
+   * - Current candle: price at FVG 0.5 (equilibrium)
+   * - Fresh 15m BULLISH CHoCH with displacement >= 1.5 ATR
+   * - 4H trend is BULLISH (BOS present, no BEARISH)
+   */
+  const createIdealFvgFillPatternData = () => {
+    const FIXED_NOW = 1788675600000; // 2026-09-06 03:00 UTC (LONDON killzone)
+    const FVG_TIME = FIXED_NOW - 15 * 900000; // 15 candles ago (225 min ago)
+
+    // HTF FVG (4H): top=105, bottom=103, eq=104
+    const htfFvg = {
+      type: 'FVG' as const,
+      direction: 'BULLISH' as const,
+      top: new Decimal(105),
+      bottom: new Decimal(103),
+      timestamp: FVG_TIME,
+      mitigated: false,
+      timeframe: '240',
     };
 
-    const htfFvg = config.hasHtfFvg ? {
-      type: 'FVG', direction: 'BULLISH', top: new Decimal(105), bottom: new Decimal(103),
-      timestamp: Date.now() - 100000, mitigated: false, timeframe: '240',
-    } : null;
+    // Create 30 candles: 15 before FVG, 15 after FVG
+    // Candles 0-14: before FVG formation
+    // Candle 5 (index 5): LIQUIDITY SWEEP (wick below level, close back inside)
+    // Candle 7 (index 7): CHoCH/BOS confirming direction
+    // Candle 15 (index 15): FVG formation (timestamp = FVG_TIME)
+    // Candles 16-29: after FVG
+    // Current candle (index 29): price at FVG equilibrium (104)
+    const candles15m: any[] = [];
+    for (let i = 0; i < 30; i++) {
+      const ts = FIXED_NOW - (29 - i) * 900000;
+      candles15m.push({
+        timestamp: ts,
+        open: '100',
+        high: '101',
+        low: '99',
+        close: '100',
+        volume: '1000',
+      });
+    }
 
-    const choch = config.hasChoch ? {
-      kind: 'CHOCH', direction: 'BULLISH', price: new Decimal(104),
-      timestamp: Date.now() - 1000, isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
-    } : null;
+    // Candle 5 (index 5): LIQUIDITY SWEEP at ~100 min before FVG
+    // Wick below 98, close back above 98
+    candles15m[5] = {
+      ...candles15m[5],
+      timestamp: FIXED_NOW - 24 * 900000,
+      high: '101',
+      low: '97.5', // wicked below 98
+      close: '98.5', // closed back above 98
+      open: '100',
+    };
 
-    const eq = htfFvg ? htfFvg.top.plus(htfFvg.bottom).dividedBy(2) : new Decimal(104);
+    // Candle 7 (index 7): BOS confirming bullish direction
+    candles15m[7] = {
+      ...candles15m[7],
+      timestamp: FIXED_NOW - 22 * 900000,
+      high: '102',
+      low: '99',
+      close: '101.5', // bullish close
+      open: '100',
+    };
 
-    const lastCandle = {
-      timestamp: Date.now(),
-      close: config.priceTouchesEq ? eq.toFixed(2) : '95',
-      high: config.priceTouchesEq ? (eq.plus(0.5)).toFixed(2) : '101',
-      low: config.priceTouchesEq ? (eq.minus(0.5)).toFixed(2) : '99',
-      open: '100', volume: '1000',
+    // FVG formation candle (index 15) - this creates the FVG
+    // FVG: gap between candle 14 high and candle 16 low
+    // Candle 14: high=101, Candle 16: low=104 -> FVG 101-104
+    // But we already have htfFvg with top=105, bottom=103, so let's align
+    candles15m[14] = {
+      ...candles15m[14],
+      timestamp: FVG_TIME + 900000, // 1 candle after FVG
+      high: '101',
+      low: '99',
+      close: '100',
+    };
+    candles15m[15] = { // FVG formation candle (4H candle)
+      ...candles15m[15],
+      timestamp: FVG_TIME,
+      high: '105',
+      low: '103',
+      close: '104',
+      open: '103',
+    };
+    candles15m[16] = {
+      ...candles15m[16],
+      timestamp: FVG_TIME - 900000, // 1 candle before FVG
+      high: '106',
+      low: '104',
+      close: '105',
+    };
+
+    // Current candle (index 29): price at FVG equilibrium (104)
+    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 104
+    candles15m[29] = {
+      timestamp: FIXED_NOW,
+      high: '104.5',
+      low: '103.5',
+      close: eq.toFixed(2), // exactly at equilibrium
+      open: '104',
+      volume: '1000',
+    };
+
+    // 15m CHoCH after FVG touch (current candle area)
+    const choch = {
+      type: 'CHOCH' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(104),
+      timestamp: FIXED_NOW - 500, // very recent
+      isValidated: true,
+      impulseFactor: new Decimal(2.0), // > 1.5
+    };
+
+    // 4H structures: BULLISH BOS (trend confirmation)
+    const bos4h = {
+      type: 'BOS' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(102),
+      timestamp: FIXED_NOW - 2 * 60 * 60 * 1000, // 2 hours ago
+      timeframe: '240',
+      isValidated: true,
+      impulseFactor: new Decimal(2.0),
+    };
+
+    // Liquidity pools: one sweep pool (taken)
+    const sweepPool = {
+      type: 'SSL' as const,
+      priceLevel: new Decimal(98),
+      timestamp: FIXED_NOW - 24 * 900000, // same as sweep candle
+      isTaken: true,
+      points: [],
     };
 
     return {
-      currentKillzone: config.killzone,
-      candles15m: [lastCandle],
-      zones: htfFvg ? [htfFvg] : [],
-      structures: choch ? [choch] : [],
+      currentKillzone: 'LONDON' as const,
+      currentSession: 'LONDON' as const,
+      candles15m,
+      zones: [htfFvg],
+      structures: [choch, bos4h],
+      liquidityPools: [sweepPool],
+      atr15m: new Decimal('0.5'),
+    };
+  };
+
+  /**
+   * Creates FVG Fill pattern WITHOUT liquidity context (should reject)
+   */
+  const createFvgFillNoLiquidityContext = () => {
+    const FIXED_NOW = 1788675600000;
+    const FVG_TIME = FIXED_NOW - 15 * 900000;
+
+    const htfFvg = {
+      type: 'FVG' as const,
+      direction: 'BULLISH' as const,
+      top: new Decimal(105),
+      bottom: new Decimal(103),
+      timestamp: FVG_TIME,
+      mitigated: false,
+      timeframe: '240',
+    };
+
+    const candles15m: any[] = [];
+    for (let i = 0; i < 30; i++) {
+      const ts = FIXED_NOW - (29 - i) * 900000;
+      candles15m.push({
+        timestamp: ts,
+        open: '100',
+        high: '101',
+        low: '99',
+        close: '100',
+        volume: '1000',
+      });
+    }
+
+    // NO sweep, NO CHoCH/BOS before FVG - just random candles
+
+    // Current candle at FVG equilibrium
+    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 104
+    candles15m[29] = {
+      timestamp: FIXED_NOW,
+      high: '104.5',
+      low: '103.5',
+      close: eq.toFixed(2),
+      open: '104',
+      volume: '1000',
+    };
+
+    const choch = {
+      type: 'CHOCH' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(104),
+      timestamp: FIXED_NOW - 500,
+      isValidated: true,
+      impulseFactor: new Decimal(2.0),
+    };
+
+    const bos4h = {
+      type: 'BOS' as const,
+      direction: 'BULLISH' as const,
+      price: new Decimal(102),
+      timestamp: FIXED_NOW - 2 * 60 * 60 * 1000,
+      timeframe: '240',
+      isValidated: true,
+      impulseFactor: new Decimal(2.0),
+    };
+
+    return {
+      currentKillzone: 'LONDON' as const,
+      currentSession: 'LONDON' as const,
+      candles15m,
+      zones: [htfFvg],
+      structures: [choch, bos4h],
+      liquidityPools: [], // NO liquidity context
       atr15m: new Decimal('0.5'),
     };
   };
@@ -52,19 +224,27 @@ describe('Scenario2: FVG Fill', () => {
     scenario = new Scenario2_FVGFill();
   });
 
-  describe('positive cases', () => {
-    it('should trigger when all conditions are met', () => {
-      const result = scenario.evaluate(createMockPatternData({}));
+  describe('SYNTHETIC TEST - Ideal FVG Fill Pattern', () => {
+    it('should trigger on perfect FVG Fill: HTF FVG + liquidity context + CHoCH', () => {
+      const result = scenario.evaluate(createIdealFvgFillPatternData());
+      
+      if (!result) {
+        console.log('REJECTION REASON:', scenario.getReason());
+        console.log('LEVELS:', scenario.getLevels());
+      }
       
       expect(result).toBe(true);
       expect(scenario.getReason()).toContain('FVG Fill');
+      expect(scenario.getReason()).toContain('liquidity context');
       expect(scenario.getLevels().entry).toBeDefined();
     });
   });
 
   describe('negative cases - killzone', () => {
     it('should reject when killzone is NONE', () => {
-      const result = scenario.evaluate(createMockPatternData({ killzone: 'NONE' }));
+      const data = createIdealFvgFillPatternData();
+      (data as any).currentKillzone = 'NONE';
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('Not in active killzone');
     });
@@ -72,7 +252,9 @@ describe('Scenario2: FVG Fill', () => {
 
   describe('negative cases - HTF FVG', () => {
     it('should reject when no HTF FVG found', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasHtfFvg: false }));
+      const data = createIdealFvgFillPatternData();
+      data.zones = [];
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('No HTF FVG found');
     });
@@ -80,23 +262,60 @@ describe('Scenario2: FVG Fill', () => {
 
   describe('negative cases - 0.5 equilibrium', () => {
     it('should reject when price has not touched 0.5 of HTF FVG', () => {
-      const result = scenario.evaluate(createMockPatternData({ priceTouchesEq: false }));
+      const data = createIdealFvgFillPatternData();
+      data.candles15m[29].close = '95'; // far from eq
+      data.candles15m[29].high = '96';
+      data.candles15m[29].low = '94';
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('0.5 (Equilibrium) of HTF FVG');
     });
   });
 
+  describe('negative cases - liquidity context', () => {
+    it('should reject when no liquidity context (sweep/CHoCH/BOS) before FVG', () => {
+      const result = scenario.evaluate(createFvgFillNoLiquidityContext());
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('liquidity context');
+    });
+  });
+
   describe('negative cases - CHoCH', () => {
     it('should reject when no 15m CHoCH after FVG touch', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasChoch: false }));
+      const data = createIdealFvgFillPatternData();
+      data.structures = data.structures.filter(s => s.type !== 'CHOCH');
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('No 15m CHoCH after FVG touch');
     });
 
     it('should reject when CHoCH displacement < 1.5 ATR', () => {
-      const result = scenario.evaluate(createMockPatternData({ chochDisplacement: false }));
+      const data = createIdealFvgFillPatternData();
+      data.structures = data.structures.map(s => 
+        s.type === 'CHOCH' ? { ...s, impulseFactor: new Decimal(1.0) } : s
+      );
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('15m CHoCH displacement < 1.5 ATR');
+    });
+  });
+
+  describe('negative cases - trend filter', () => {
+    it('should reject when 4H trend is not bullish', () => {
+      const data = createIdealFvgFillPatternData();
+      // Add bearish 4H structure - need to use type assertion to avoid TS error
+      data.structures.push({
+        type: 'CHOCH' as const,
+        direction: 'BEARISH' as const,
+        price: new Decimal(100),
+        timestamp: Date.now() - 3600000,
+        timeframe: '240',
+        isValidated: true,
+        impulseFactor: new Decimal(2.0),
+      } as any);
+      const result = scenario.evaluate(data);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('4H trend not bullish');
     });
   });
 });

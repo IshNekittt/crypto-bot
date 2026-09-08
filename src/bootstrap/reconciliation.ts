@@ -1,6 +1,7 @@
 import { PositionListSource } from '../api/bybitClient';
 import { PostgresDatabase } from '../db/database';
 import { logger } from '../utils/logger';
+import { Decimal } from 'decimal.js';
 
 export const RECONCILIATION_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -16,6 +17,14 @@ export interface ReconcilableEngine {
     side: 'Buy' | 'Sell';
     openedAt: number;
     orderId: string | null;
+    zoneDetails: {
+      type: string | null;
+      top: Decimal | null;
+      bottom: Decimal | null;
+      timeframe: string | null;
+      direction: string | null;
+      timestamp: number | null;
+    } | null;
   }): Promise<boolean>;
 }
 
@@ -84,9 +93,10 @@ export class ReconciliationLoop {
               symbol: trade.symbol,
               entryPrice: trade.entryPrice,
               qty: trade.qty,
-              side: trade.side,
+              side: trade.side as 'Buy' | 'Sell',
               openedAt: trade.openedAt,
               orderId: trade.orderId,
+              zoneDetails: trade.zoneDetails,
             });
             if (changed) resets += 1;
           }

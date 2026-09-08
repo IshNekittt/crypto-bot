@@ -1,5 +1,8 @@
 import { IScenario } from '../types';
 import { logger } from '../utils/logger';
+import { loadConfig } from '../config/env';
+import { Decimal } from 'decimal.js';
+import { ZoneDetails } from '../types';
 import { Scenario1_HTFContinuation } from './scenarios/Scenario1_HTFContinuation';
 import { Scenario2_FVGFill } from './scenarios/Scenario2_FVGFill';
 import { Scenario3_IDM } from './scenarios/Scenario3_IDM';
@@ -18,6 +21,23 @@ export interface ScenarioRouterDeps {
   readonly notifier: any;
 }
 
+export interface MitigatedZone {
+  type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION';
+  top: string;
+  bottom: string;
+  timeframe: string;
+  direction: string;
+  timestamp: number;
+}
+
+export interface RouterResult {
+  triggered: boolean;
+  scenario: IScenario | null;
+  levels: any | null;
+  reason: string;
+  zoneDetails: ZoneDetails | null;
+}
+
 export class ScenarioRouter {
   private readonly symbol: string;
   private readonly patternRecognizer: any;
@@ -32,32 +52,69 @@ export class ScenarioRouter {
     this.symbol = deps.symbol;
     this.patternRecognizer = deps.patternRecognizer;
     this._notifier = deps.notifier;
-    this.scenarios = [
-      new Scenario1_HTFContinuation(),
-      new Scenario2_FVGFill(),
-      new Scenario3_IDM(),
-      new Scenario4_MitigationChain(),
-      new Scenario5_HTFLiquiditySweep(),
-      new Scenario6_SMS(),
-      new Scenario7_AMD(),
-      new Scenario8_RangeDeviationReclaim(),
-      new Scenario9_TurtleSoup(),
-      new Scenario10_BreakerBlock(),
-      new Scenario11_MitigationBlock(),
+
+    // Load active scenarios from config (env ACTIVE_SCENARIOS)
+    const config = loadConfig();
+    const allScenarios: IScenario[] = [
+      // Priority 1: Complex, high-precision scenarios (checked first)
+      new Scenario5_HTFLiquiditySweep(),    // 5: HTF Liquidity Sweep
+      new Scenario7_AMD(),                   // 7: AMD
+      new Scenario9_TurtleSoup(),            // 9: Turtle Soup
+      new Scenario10_BreakerBlock(),         // 10: Breaker Block
+      new Scenario11_MitigationBlock(),      // 11: Mitigation Block
+      // Priority 2: Trend continuation scenarios
+      new Scenario1_HTFContinuation(),       // 1: HTF Continuation
+      new Scenario3_IDM(),                   // 3: IDM
+      new Scenario6_SMS(),                   // 6: Failure Swing (SMS)
+      new Scenario8_RangeDeviationReclaim(), // 8: Range Deviation & Reclaim
+      // Priority 3: Simple, greedy scenarios (checked last)
+      new Scenario2_FVGFill(),               // 2: FVG Fill
+      new Scenario4_MitigationChain(),       // 4: Mitigation Chain
     ];
+
+    if (config.activeScenarios && config.activeScenarios.length > 0) {
+      this.scenarios = allScenarios.filter(s => config.activeScenarios.includes(s.id));
+      logger.info(`Active scenarios: ${this.scenarios.map(s => `${s.id}:${s.name}`).join(', ')}`);
+    } else {
+      this.scenarios = allScenarios;
+      logger.info('All 11 scenarios active (ACTIVE_SCENARIOS not set)');
+    }
   }
 
-  async evaluate(candles15m: any[], candles4h: any[]): Promise<{ triggered: boolean; scenario: IScenario | null; levels: any | null; reason: string }> {
+  private filterMitigatedZones(zones: any[], mitigatedZones: MitigatedZone[]): any[] {
+    if (!mitigatedZones.length) return zones;
+    return zones.filter(zone => {
+      // Check if this zone matches any mitigated zone (by price levels and type)
+      return !mitigatedZones.some(mz => 
+        mz.type === zone.type &&
+        mz.timeframe === zone.timeframe &&
+        mz.direction === zone.direction &&
+        new Decimal(mz.top).eq(zone.top) &&
+        new Decimal(mz.bottom).eq(zone.bottom)
+      );
+    });
+  }
+
+  async evaluate(
+    candles15m: any[], 
+    candles4h: any[], 
+    currentCandleTimestamp: number,
+    mitigatedZones: MitigatedZone[] = []
+  ): Promise<RouterResult> {
     if (!this.scenarios.length) {
-      return { triggered: false, scenario: null, levels: null, reason: 'No scenarios configured' };
+      return { triggered: false, scenario: null, levels: null, reason: 'No scenarios configured', zoneDetails: null };
     }
 
     try {
       const patternData = await this.patternRecognizer.buildPatternData(
         this.symbol,
         candles15m,
-        candles4h
+        candles4h,
+        currentCandleTimestamp
       );
+
+      // Filter out mitigated zones from pattern data
+      patternData.zones = this.filterMitigatedZones(patternData.zones, mitigatedZones);
 
       for (const scenario of this.scenarios) {
         try {
@@ -66,6 +123,7 @@ export class ScenarioRouter {
           if (matches) {
             const levels = scenario.getLevels();
             const reason = scenario.getReason();
+            const zoneDetails = scenario.getZoneDetails();
             
             logger.info(`Scenario ${scenario.name} triggered`, {
               symbol: this.symbol,
@@ -80,6 +138,7 @@ export class ScenarioRouter {
               scenario,
               levels,
               reason,
+              zoneDetails,
             };
           }
         } catch (err) {
@@ -91,13 +150,13 @@ export class ScenarioRouter {
         }
       }
 
-      return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched' };
+      return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched', zoneDetails: null };
     } catch (err) {
       logger.error('Pattern recognition failed', {
         symbol: this.symbol,
         error: err instanceof Error ? err.message : String(err),
       });
-      return { triggered: false, scenario: null, levels: null, reason: 'Pattern recognition error' };
+      return { triggered: false, scenario: null, levels: null, reason: 'Pattern recognition error', zoneDetails: null };
     }
   }
 }

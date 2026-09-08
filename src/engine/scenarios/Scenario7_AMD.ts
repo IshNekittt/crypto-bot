@@ -2,85 +2,149 @@ import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
 
 export class Scenario7_AMD extends BaseScenario {
+  private static rejectionStats = {
+    killzone: 0,
+    noAsianRange: 0,
+    asianRangeTooWide: 0,
+    noSweep: 0,
+    noChoch: 0,
+    displacement: 0,
+    noFvg: 0,
+    totalEvals: 0
+  };
+
+  static getRejectionStats() {
+    return { ...this.rejectionStats };
+  }
+
+  static resetStats() {
+    this.rejectionStats = {
+      killzone: 0,
+      noAsianRange: 0,
+      asianRangeTooWide: 0,
+      noSweep: 0,
+      noChoch: 0,
+      displacement: 0,
+      noFvg: 0,
+      totalEvals: 0
+    };
+  }
+
   constructor() {
     super(7, 'AMD (Accumulation-Manipulation-Distribution)');
   }
 
   override evaluate(patternData: any): boolean {
+    Scenario7_AMD.rejectionStats.totalEvals++;
+
     // CRITICAL: AMD works at session transitions
-    // Accumulation: Asian session (00:00-06:00 NY) 
+    // Accumulation: Asian session (20:00-24:00 NY) 
     // Manipulation: London open (02:00-05:00 NY) sweep of Asian Low
     // Distribution: Reversal and move to Asian High
     const currentKillzone = patternData.currentKillzone;
     if (!currentKillzone || (currentKillzone !== 'LONDON' && currentKillzone !== 'NY')) {
       this.logRejection('AMD requires London or NY killzone (Manipulation/Distribution phase)');
+      Scenario7_AMD.rejectionStats.killzone++;
       return false;
     }
 
     const { sessionRanges, candles15m, structures, zones } = patternData;
     if (!candles15m?.length || !sessionRanges?.length) return false;
 
-    // Find Asian Range
+    // Find Asian Range (most recent)
     const asianRange = sessionRanges.find((r: any) => r.name === 'ASIAN');
     if (!asianRange) {
       this.logRejection('No Asian Range detected');
+      Scenario7_AMD.rejectionStats.noAsianRange++;
       return false;
     }
 
     const asianHigh = asianRange.high;
     const asianLow = asianRange.low;
 
-    // Check if price is currently testing/has swept Asian Low (Manipulation phase)
-    const lastCandle = candles15m[candles15m.length - 1];
-    if (!lastCandle) return false;
-
-    const lastLow = new Decimal(lastCandle.low);
-    const lastClose = new Decimal(lastCandle.close);
-
-    // Manipulation: Wick below Asian Low, close back inside (SFP)
-    const sweptAsianLow = lastLow.lt(asianLow) && lastClose.gt(asianLow);
-
-    if (!sweptAsianLow) {
-      this.logRejection('Asian Low not swept (no manipulation detected)');
+    // FILTER: Asian Range must be Accumulation (tight range), not trending
+    // Height must be < 1.5 * ATR(4H)
+    const atr4h = patternData.atr4h || new Decimal('0.01');
+    const asianRangeHeight = asianHigh.minus(asianLow);
+    const maxAllowedHeight = atr4h.mul(1.5);
+    if (asianRangeHeight.gt(maxAllowedHeight)) {
+      this.logRejection(`Asian Range too wide for accumulation: ${asianRangeHeight.toFixed(2)} > 1.5*ATR4H (${maxAllowedHeight.toFixed(2)})`);
+      Scenario7_AMD.rejectionStats.asianRangeTooWide++;
       return false;
     }
 
-    // CRITICAL: Verify aggressive CHoCH UP after Asian Low sweep
-    // Must be a BULLISH CHoCH immediately after the sweep
+    // Check for Asian Low sweep in last 8 candles (sweep candle + reaction candles)
+    // SFP: wick below Asian Low, close back above Asian Low
+    const atr15m = patternData.atr15m || new Decimal('0.01');
+    const sweepTolerance = atr15m.mul(2.0); // 2 ATR tolerance for wick penetration (more permissive)
+    
+    let sweepCandle: any = null;
+    
+    // Check last 8 candles for sweep (sweep could be 1-7 candles ago, CHoCH follows)
+    const checkWindow = Math.min(8, candles15m.length);
+    for (let i = candles15m.length - checkWindow; i < candles15m.length; i++) {
+      const c = candles15m[i];
+      const low = new Decimal(c.low);
+      const close = new Decimal(c.close);
+      
+      // Sweep: wick pierces below Asian Low (within tolerance), close back above Asian Low (with tolerance)
+      const wickedBelow = low.lt(asianLow.plus(sweepTolerance));
+      const closedAbove = close.gt(asianLow.minus(sweepTolerance)); // Allow close within tolerance of asianLow
+      
+      if (wickedBelow && closedAbove) {
+        sweepCandle = c;
+        break;
+      }
+    }
+
+    if (!sweepCandle) {
+      this.logRejection('Asian Low not swept in last 8 candles (no SFP manipulation)');
+      Scenario7_AMD.rejectionStats.noSweep++;
+      return false;
+    }
+
+    // CRITICAL: Verify aggressive CHoCH UP after the sweep candle
+    // CHoCH can form within 8H window after sweep (price reaction time)
+    const sweepTime = sweepCandle.timestamp;
     const recentChoch = structures?.find((s: any) => 
-      s.kind === 'CHOCH' && 
+      s.type === 'CHOCH' && 
       s.direction === 'BULLISH' &&
-      s.timestamp >= lastCandle.timestamp - 15 * 60 * 1000
+      s.timestamp > sweepTime && // CHoCH MUST be AFTER sweep
+      s.timestamp <= sweepTime + 8 * 60 * 60 * 1000 // within 8H after sweep
     );
 
     if (!recentChoch) {
       this.logRejection('No aggressive BULLISH CHoCH after Asian Low sweep');
+      Scenario7_AMD.rejectionStats.noChoch++;
       return false;
     }
 
     // MUST check Displacement - body >= 1.5 * ATR
     if (!this.isValidDisplacement(recentChoch, 1.5)) {
       this.logRejection('CHoCH after Asian Low sweep displacement < 1.5 ATR');
+      Scenario7_AMD.rejectionStats.displacement++;
       return false;
     }
 
-    // Check for fresh 15m FVG in bullish direction after CHoCH
-    const freshFvgs = zones?.filter((z: any) => 
+    // Check for 15m FVG in bullish direction after CHoCH
+    // Allow FVG to form within 8H after CHoCH
+    const fvgsAfterChoch = zones?.filter((z: any) => 
       z.type === 'FVG' && 
       z.direction === 'BULLISH' && 
       z.timeframe === '15' &&
-      z.timestamp >= recentChoch.timestamp
+      z.timestamp >= recentChoch.timestamp &&
+      z.timestamp <= recentChoch.timestamp + 8 * 60 * 60 * 1000 // within 8H after CHoCH
     ) || [];
 
-    const fvg = freshFvgs[0];
+    const fvg = fvgsAfterChoch[0];
     if (!fvg) {
       this.logRejection('No 15m bullish FVG after CHoCH');
+      Scenario7_AMD.rejectionStats.noFvg++;
       return false;
     }
 
     // Entry at 0.5 (Equilibrium) of FVG
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
-    const atr15m = patternData.atr15m || new Decimal('0.01');
     const sl = fvg.bottom.minus(atr15m.mul(0.5));
     const tp = asianHigh; // Target: Asian High
 
@@ -98,7 +162,17 @@ export class Scenario7_AMD extends BaseScenario {
       takeProfit: tp.toFixed(2),
     });
 
-    this.setReason(`AMD: Asian Low swept in ${currentKillzone} killzone + CHoCH + FVG 0.5 entry, target Asian High`);
+    // Set zone details for mitigation tracking (the FVG we entered from)
+    this.setZoneDetails({
+      type: 'FVG',
+      top: fvg.top,
+      bottom: fvg.bottom,
+      timeframe: '15',
+      direction: 'BULLISH',
+      timestamp: fvg.timestamp,
+    });
+
+    this.setReason(`AMD: Asian Low swept in ${currentKillzone} killzone (Asian Range height ${asianRangeHeight.toFixed(2)} < 1.5*ATR4H) + CHoCH + FVG 0.5 entry, target Asian High`);
     return true;
   }
 }

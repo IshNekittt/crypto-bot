@@ -92,6 +92,7 @@ export class TelegramNotifier {
           entryPrice: entryDecimal,
           stopLossRaw: slDecimal,
           instrument,
+          zoneDetails: null,
         });
         if (!qtyResult.ok) {
           await ctx.reply(

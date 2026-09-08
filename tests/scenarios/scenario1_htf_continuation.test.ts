@@ -23,31 +23,37 @@ describe('Scenario1: HTF Continuation', () => {
       hasFreshFvg: overrides.hasFreshFvg !== false,
     };
 
+    const now = Date.now();
     const htfOb = config.hasHtfOb ? {
       type: 'OB', direction: 'BULLISH', top: new Decimal(102), bottom: new Decimal(101),
-      timestamp: Date.now() - 100000, mitigated: config.obMitigated, timeframe: '240',
+      timestamp: now - 100000, mitigated: config.obMitigated, timeframe: '240',
     } : null;
 
     const choch = config.hasChoch ? {
-      kind: 'CHOCH', direction: 'BULLISH', price: new Decimal(103),
-      timestamp: Date.now() - 1000, isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
-      brokenSwing: { type: 'LOW', price: new Decimal(99), timestamp: Date.now() - 2000, index: 10, isSwept: false },
+      type: 'CHOCH', direction: 'BULLISH', price: new Decimal(103),
+      timestamp: now - 2 * 60 * 60 * 1000, // 2 hours ago (within 4H window)
+      isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
+      brokenSwing: { type: 'LOW', price: new Decimal(99), timestamp: now - 3 * 60 * 60 * 1000, index: 10, isSwept: false },
       candleIndex: 20,
     } : null;
 
     const freshFvg = config.hasFreshFvg ? {
       type: 'FVG', direction: 'BULLISH', top: new Decimal(104), bottom: new Decimal(102),
-      timestamp: Date.now() - 500, mitigated: false, timeframe: '15', index: 25,
+      timestamp: now, // Current candle timestamp (FVG formed on current candle)
+      mitigated: false, timeframe: '15', index: 25,
     } : null;
 
     const lastCandle = {
-      timestamp: Date.now(),
+      timestamp: now,
       close: config.priceTouchesOb ? '101.5' : '95',
-      high: '102', low: '101', open: '100', volume: '1000',
+      high: config.priceTouchesOb ? '102' : '96',
+      low: config.priceTouchesOb ? '101' : '94',
+      open: '100', volume: '1000',
     };
 
     return {
       currentKillzone: config.killzone,
+      currentSession: 'LONDON',
       candles15m: [lastCandle],
       zones: [htfOb, freshFvg].filter(Boolean),
       structures: choch ? [choch] : [],
