@@ -1,3 +1,5 @@
+# Project description
+
 ## 💾 Database Schema (PostgreSQL / Supabase)
 
 ```sql
@@ -37,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades (closed_at DESC);
 
 - **NUMERIC(24,8)** — 8 decimal places for all prices/PnL
 - **VARCHAR(255) id** — string IDs like `BTCUSDT_1788604751264_1` (no auto-increment)
-- **zone_*** columns — entry zone details for mitigation tracking (`zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp`)
+- **zone\_\*** columns — entry zone details for mitigation tracking (`zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp`)
 - **Schema additions**: Added `zone_type VARCHAR(20)`, `zone_top NUMERIC(24,8)`, `zone_bottom NUMERIC(24,8)`, `zone_timeframe VARCHAR(10)`, `zone_direction VARCHAR(10)`, `zone_timestamp BIGINT` to `trades` table
 - **All DB queries updated**: `openTrade`, `getOpenTrade`, `getRecentClosedTrades`, `getAllOpenTrades`, `runIntegrationTest` now handle `zone_*` fields
 - **Decimal deserialization fix**: `getOpenTrade`, `getRecentClosedTrades`, `getAllOpenTrades` now convert `zone_top`/`zone_bottom` strings to `Decimal` objects on read. Integration test verifies `zoneTop.plus(zoneBottom).div(2).eq('104.875')` works on deserialized data.
@@ -56,12 +58,14 @@ docker compose down
 ```
 
 ### Dockerfile (Multi-stage)
+
 - **Base**: `node:20-alpine` (no python/make/gcc)
 - **Stage 1 (builder)**: `npm ci` → `npm run build` → `dist/`
 - **Stage 2 (runner)**: `npm ci --omit=dev` → copy `dist/` → `EXPOSE 3000` → `CMD ["node", "dist/index.js"]`
 - **Final image**: ~80-100 MB, clean JS, no dev deps
 
 ### docker-compose.yml
+
 ```yaml
 services:
   smc-bot:
@@ -73,11 +77,13 @@ services:
       - "3000:3000"
     stop_grace_period: 30s
 ```
+
 - **No volumes** — fully Stateless, `/data` unused
 - **Port 3000** for health-check (Render/load balancer)
 - **Graceful shutdown** 30s
 
 ### .dockerignore
+
 Excludes: `.git`, `node_modules`, `dist`, `data`, `.env*`, `*.md`, `tests/`, `jest.config.js`, `tsconfig.json`, `AGENTS.md`, `smc_full_guide.md`, `*.sh`
 
 ## 📋 Commands
@@ -93,11 +99,11 @@ npm run backtest -- BTCUSDT  # Single symbol
 
 ## 📊 Backtest Results (180 days, All 11 Scenarios)
 
-| Symbol | Final Balance | Net Profit | Trades | Win Rate | Max DD |
-|--------|---------------|------------|--------|----------|--------|
-| **BTCUSDT** | **$23,490** | **+2249%** | 150 | **80%** | 17.8% |
-| **ETHUSDT** | **$11,554** | **+1055%** | 118 | **64%** | 41.6% |
-| **SOLUSDT** | **$107,584** | **+10,658%** | 189 | **66%** | 31.8% |
+| Symbol      | Final Balance | Net Profit   | Trades | Win Rate | Max DD |
+| ----------- | ------------- | ------------ | ------ | -------- | ------ |
+| **BTCUSDT** | **$23,490**   | **+2249%**   | 150    | **80%**  | 17.8%  |
+| **ETHUSDT** | **$11,554**   | **+1055%**   | 118    | **64%**  | 41.6%  |
+| **SOLUSDT** | **$107,584**  | **+10,658%** | 189    | **66%**  | 31.8%  |
 
 **Total**: 457 trades | Σ PnL ≈ **$141K** | Avg Win Rate **~70%** | Max DD **< 42%**
 
@@ -152,7 +158,7 @@ npm run backtest -- BTCUSDT  # Single symbol
 
 ## 📁 Project Structure
 
-```
+```tree
 src/
 ├── index.ts                 # Entry: DB → health → Bybit preflight → engines → WS
 ├── api/bybitClient.ts       # Bybit V5 REST + WS
