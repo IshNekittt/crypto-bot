@@ -25,7 +25,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 | **Risk Management**  | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement                     |
 | **Infrastructure**   | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                           |
 | **PnL Accuracy**     | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                     |
-| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                     |
+| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                      |
 | **Telegram UI**      | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                         |
 | **Security**         | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                             |
 
@@ -63,7 +63,7 @@ public calculateLevels(
   offsetMultiplier: Decimal = new Decimal(0.5)
 ): TradeLevels {
   const offset = atr.mul(offsetMultiplier);
-  
+
   // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
   // BULLISH (Long): SL must be BELOW entry. Use min(zone.bottom, entry) - offset
   // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, entry) + offset
@@ -79,6 +79,7 @@ public calculateLevels(
 ```
 
 **Key invariants guaranteed:**
+
 - **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
 - **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
 - `Decimal.min/max` handles inverted zones automatically
@@ -467,7 +468,7 @@ src/
 
 ## 📄 License
 
-Copyright (c) 2026 @YourGitHubUsername. All rights reserved. See the [LICENSE](LICENSE.txt) file for details.
+Copyright (c) 2026 @IshNekittt. All rights reserved. See the [LICENSE](LICENSE.txt) file for details.
 
 ---
 
