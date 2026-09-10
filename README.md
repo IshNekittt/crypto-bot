@@ -468,7 +468,7 @@ src/
 
 ## 📄 License
 
-Copyright (c) 2026 @IshNekittt. All rights reserved. See the [LICENSE](LICENSE.txt) file for details.
+Copyright (c) 2026 [Nikita Ishchenko](https://github.com/IshNekittt). All rights reserved. See the [LICENSE](LICENSE.txt) file for details.
 
 ---
 
