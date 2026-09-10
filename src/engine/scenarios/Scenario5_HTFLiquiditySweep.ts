@@ -147,9 +147,15 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     // Entry at 0.5 (Equilibrium) of FVG
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
     const atr15m = patternData.atr15m || new Decimal('0.01');
-    const sl = sweepDirection === 'BULLISH' 
-      ? fvg.bottom.minus(atr15m.mul(0.5))
-      : fvg.top.plus(atr15m.mul(0.5));
+    const offset = atr15m.mul(0.5);
+
+    // CRITICAL: Ensure SL is on correct side of Entry regardless of FVG top/bottom convention
+    // BULLISH (Long): SL must be BELOW entry. Use min(fvg.bottom, entry) - offset
+    // BEARISH (Short): SL must be ABOVE entry. Use max(fvg.top, entry) + offset
+    const sl = sweepDirection === 'BULLISH'
+      ? Decimal.min(fvg.bottom, entry).minus(offset)
+      : Decimal.max(fvg.top, entry).plus(offset);
+
     const tp = sweepDirection === 'BULLISH'
       ? entry.plus(entry.minus(sl).mul(3))
       : entry.minus(sl.minus(entry).mul(3));

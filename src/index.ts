@@ -18,24 +18,34 @@ import { PendingTradeManager } from './engine/pendingTradeManager';
 import { BackupService } from './services/backupService';
 
 function setupGlobalErrorHandlers(): void {
-  process.on('uncaughtException', async (error: Error) => {
-    logger.error(`🆘 UNCAUGHT EXCEPTION: ${error.message}\n${error.stack}`);
+  async function handleFatalCrash(type: 'UNCAUGHT EXCEPTION' | 'UNHANDLED REJECTION', errorOrReason: unknown): Promise<void> {
+    const message = errorOrReason instanceof Error ? errorOrReason.message : String(errorOrReason);
+    const stack = errorOrReason instanceof Error ? errorOrReason.stack : '';
+    
+    logger.error(`🆘 ${type}: ${message}\n${stack}`);
+    
     if (notifier.enabled) {
-      await notifier.notifyCriticalError(`🆘 <b>UNCAUGHT EXCEPTION</b>\n<code>${error.message}</code>\n\nContainer will restart.`);
+      try {
+        // Give up to 2.5 seconds for guaranteed Telegram SOS delivery
+        await Promise.race([
+          notifier.notifyCriticalError(`🆘 <b>FATAL CRASH (${type}):</b>\n<code>${message}</code>\n\nProcess will restart.`),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('TG notification timeout')), 2500))
+        ]);
+      } catch (err) {
+        logger.error(`Failed to send fatal alert to Telegram: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
-    process.exit(1);
-  });
-
-  function onUnhandledRejection(reason: unknown): void {
-    const message = reason instanceof Error ? reason.message : String(reason);
-    logger.error(`🆘 UNHANDLED REJECTION: ${message}`);
-    if (notifier.enabled) {
-      notifier.notifyCriticalError(`🆘 <b>UNHANDLED REJECTION</b>\n<code>${message}</code>\n\nContainer will restart.`);
-    }
+    
     process.exit(1);
   }
-  
-  process.on('unhandledRejection', onUnhandledRejection);
+
+  process.on('uncaughtException', (err) => {
+    void handleFatalCrash('UNCAUGHT EXCEPTION', err);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    void handleFatalCrash('UNHANDLED REJECTION', reason);
+  });
 }
 
 async function main(): Promise<void> {

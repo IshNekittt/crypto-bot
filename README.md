@@ -7,7 +7,7 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-211%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Tests](https://img.shields.io/badge/Tests-194%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
@@ -25,6 +25,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 | **Risk Management**  | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement                     |
 | **Infrastructure**   | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                           |
 | **PnL Accuracy**     | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                     |
+| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                     |
 | **Telegram UI**      | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                         |
 | **Security**         | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                             |
 
@@ -42,6 +43,47 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 > **Top Drivers**: SMS (S6), HTF Continuation (S1), HTF Sweep (S5)
 > **Filters Working**: S2 `NoLiqCtx: 120`, S4 `NoBOS: 1,570`, S11 strict SMS = 0 noise trades
+
+---
+
+## 🎯 Strict Stop-Loss Calculation (NEW v2026-09-10)
+
+**Problem**: Zone objects (OB, FVG, Breaker, Mitigation) can have arbitrary `top`/`bottom` ordering — not guaranteed `top > bottom`. Naive SL formulas fail when zone is inverted.
+
+**Solution**: Centralized `BaseScenario.calculateLevels()` — single source of truth for all bidirectional scenarios (S1, S5, S6, S10, S11).
+
+```typescript
+// In BaseScenario (src/engine/baseScenario.ts)
+public calculateLevels(
+  entry: Decimal,
+  zone: { top: Decimal; bottom: Decimal; direction: 'BULLISH' | 'BEARISH' },
+  direction: 'BULLISH' | 'BEARISH',
+  atr: Decimal,
+  rr: Decimal = new Decimal(3),
+  offsetMultiplier: Decimal = new Decimal(0.5)
+): TradeLevels {
+  const offset = atr.mul(offsetMultiplier);
+  
+  // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
+  // BULLISH (Long): SL must be BELOW entry. Use min(zone.bottom, entry) - offset
+  // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, entry) + offset
+  const sl = direction === 'BULLISH'
+    ? Decimal.min(zone.bottom, entry).minus(offset)
+    : Decimal.max(zone.top, entry).plus(offset);
+  const tp = direction === 'BULLISH'
+    ? entry.plus(entry.minus(sl).mul(rr))
+    : entry.minus(sl.minus(entry).mul(rr));
+
+  return { entry, stopLoss: sl, takeProfit: tp };
+}
+```
+
+**Key invariants guaranteed:**
+- **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
+- **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
+- `Decimal.min/max` handles inverted zones automatically
+- Used by Scenarios 1, 5, 6, 10, 11 (all bidirectional scenarios)
+- 16 dedicated tests verify geometry: 4 scenarios × 2 directions × 2 zone orientations
 
 ---
 

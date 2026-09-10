@@ -180,9 +180,14 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     // Enter at market on retest candle close
     const entry = lastClose;
     const atr15m = patternData.atr15m || new Decimal('0.01');
+    const offset = atr15m.mul(0.5);
+
+    // CRITICAL: Ensure SL is on correct side of Entry regardless of MB top/bottom convention
+    // BULLISH (Long): SL must be BELOW entry. Use min(mbBottom, entry) - offset
+    // BEARISH (Short): SL must be ABOVE entry. Use max(mbTop, entry) + offset
     const sl = expectedChochDirection === 'BULLISH'
-      ? mbBottom.minus(atr15m.mul(0.5))
-      : mbTop.plus(atr15m.mul(0.5));
+      ? Decimal.min(mbBottom, entry).minus(offset)
+      : Decimal.max(mbTop, entry).plus(offset);
     const tp = expectedChochDirection === 'BULLISH'
       ? entry.plus(entry.minus(sl).mul(3))
       : entry.minus(sl.minus(entry).mul(3));

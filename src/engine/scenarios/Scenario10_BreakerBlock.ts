@@ -272,9 +272,14 @@ export class Scenario10_BreakerBlock extends BaseScenario {
     // Entry at 0.5 (Equilibrium) of Breaker Block
     const entry = breakerTop.plus(breakerBottom).dividedBy(2);
     const atr15m = patternData.atr15m || new Decimal('0.01');
+    const offset = atr15m.mul(0.5);
+
+    // CRITICAL: Ensure SL is on correct side of Entry regardless of Breaker Block top/bottom convention
+    // BULLISH (Long): SL must be BELOW entry. Use min(breakerBottom, entry) - offset
+    // BEARISH (Short): SL must be ABOVE entry. Use max(breakerTop, entry) + offset
     const sl = breakEvent.direction === 'BULLISH'
-      ? breakerBottom.minus(atr15m.mul(0.5))
-      : breakerTop.plus(atr15m.mul(0.5));
+      ? Decimal.min(breakerBottom, entry).minus(offset)
+      : Decimal.max(breakerTop, entry).plus(offset);
     // TP: 2R instead of 3R for higher hit rate on Breaker Blocks
     const tp = breakEvent.direction === 'BULLISH'
       ? entry.plus(entry.minus(sl).mul(2))

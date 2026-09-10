@@ -91,7 +91,16 @@ export class ReconciliationLoop {
       }
 
       // 2. Audit all open trades in DB - find ones where position is gone on exchange
-      const openTrades = await this.db.getAllOpenTrades();
+      let openTrades: typeof this.db extends { getAllOpenTrades: () => Promise<infer T> } ? T : never;
+      try {
+        openTrades = await this.db.getAllOpenTrades();
+      } catch (dbError) {
+        // DB connection timeout / error - log as warning, skip this cycle
+        logger.warn(`[Reconciliation] DB query timeout/error, skipping this cycle: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
+        this.running = false;
+        return resets;
+      }
+
       for (const trade of openTrades) {
         const engine = this.engines.find((e) => e.symbol === trade.symbol);
         if (!engine) continue;

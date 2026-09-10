@@ -57,6 +57,56 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
     };
   };
 
+  // Helper for BULLISH (Long) setups: PDL/SSL sweep
+  const createBullishPatternData = (overrides: Partial<{
+    killzone: string;
+    hasChochAfterSweep: boolean;
+    chochDisplacement: boolean;
+    hasFreshFvg: boolean;
+  }> = {}) => {
+    const config = {
+      killzone: overrides.killzone || 'LONDON',
+      hasChochAfterSweep: overrides.hasChochAfterSweep !== false,
+      chochDisplacement: overrides.chochDisplacement !== false,
+      hasFreshFvg: overrides.hasFreshFvg !== false,
+    };
+
+    // PDL at 95 - sweep wick below at 94, close back above at 96 (SFP bullish)
+    const liquidityPool = {
+      type: 'PDL', priceLevel: new Decimal(95),
+      points: [], isTaken: false, timestamp: Date.now() - 1000,
+    };
+
+    const now = Date.now();
+    const choch = config.hasChochAfterSweep ? {
+      type: 'CHOCH', direction: 'BULLISH', price: new Decimal(97),
+      timestamp: now - 2 * 60 * 60 * 1000,
+      isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
+    } : null;
+
+    // BULLISH FVG: top > bottom
+    const freshFvg = config.hasFreshFvg ? {
+      type: 'FVG', direction: 'BULLISH', top: new Decimal(97), bottom: new Decimal(95),
+      timestamp: now,
+      mitigated: false, timeframe: '15',
+    } : null;
+
+    // Sweep candle: wick below PDL (95) at 94, close back above at 96
+    const sweepCandle = {
+      timestamp: now, close: '96', high: '98', low: '94', open: '100', volume: '1000',
+    };
+
+    return {
+      currentKillzone: config.killzone,
+      currentSession: 'LONDON',
+      candles15m: [sweepCandle],
+      structures: choch ? [choch] : [],
+      zones: freshFvg ? [freshFvg] : [],
+      liquidityPools: [liquidityPool],
+      atr15m: new Decimal('0.5'),
+    };
+  };
+
   beforeEach(() => {
     scenario = new Scenario5_HTFLiquiditySweep();
   });
@@ -64,6 +114,14 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
   describe('positive cases', () => {
     it('should trigger when PDH swept in killzone with CHoCH and FVG', () => {
       const result = scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true }));
+      
+      expect(result).toBe(true);
+      expect(scenario.getReason()).toContain('HTF Liquidity Sweep');
+      expect(scenario.getLevels().entry).toBeDefined();
+    });
+
+    it('should trigger when PDL swept in killzone with BULLISH CHoCH and FVG (Long setup)', () => {
+      const result = scenario.evaluate(createBullishPatternData({}));
       
       expect(result).toBe(true);
       expect(scenario.getReason()).toContain('HTF Liquidity Sweep');
@@ -111,6 +169,106 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
       const result = scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true, hasFreshFvg: false }));
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('FVG');
+    });
+  });
+
+  describe('getLevels() geometry checks', () => {
+    it('should return SL < Entry < TP for BULLISH (Long) setup', () => {
+      scenario.evaluate(createBullishPatternData({}));
+      
+      const levels = scenario.getLevels();
+      const entry = new Decimal(levels.entry);
+      const sl = new Decimal(levels.stopLoss);
+      const tp = new Decimal(levels.takeProfit);
+      
+      // BULLISH: SL < Entry < TP
+      expect(sl.lt(entry)).toBe(true);
+      expect(tp.gt(entry)).toBe(true);
+    });
+
+    it('should return SL > Entry > TP for BEARISH (Short) setup', () => {
+      scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true }));
+      
+      const levels = scenario.getLevels();
+      const entry = new Decimal(levels.entry);
+      const sl = new Decimal(levels.stopLoss);
+      const tp = new Decimal(levels.takeProfit);
+      
+      // BEARISH: SL > Entry > TP
+      expect(sl.gt(entry)).toBe(true);
+      expect(tp.lt(entry)).toBe(true);
+    });
+
+    it('should handle inverted FVG zone (top < bottom) correctly for Long', () => {
+      // Create inverted zone: top < bottom (swapped coordinates)
+      const invertedFvgPatternData = {
+        currentKillzone: 'LONDON',
+        currentSession: 'LONDON',
+        candles15m: [{
+          timestamp: Date.now(), close: '96', high: '98', low: '94', open: '100', volume: '1000',
+        }],
+        structures: [{
+          type: 'CHOCH', direction: 'BULLISH', price: new Decimal(97),
+          timestamp: Date.now() - 2 * 60 * 60 * 1000,
+          isValidated: true, impulseFactor: new Decimal(2.0),
+        }],
+        zones: [{
+          type: 'FVG', direction: 'BULLISH', 
+          top: new Decimal(95), bottom: new Decimal(97), // INVERTED: top < bottom
+          timestamp: Date.now(), mitigated: false, timeframe: '15',
+        }],
+        liquidityPools: [{
+          type: 'PDL', priceLevel: new Decimal(95),
+          points: [], isTaken: false, timestamp: Date.now() - 1000,
+        }],
+        atr15m: new Decimal('0.5'),
+      };
+      
+      const result = scenario.evaluate(invertedFvgPatternData);
+      
+      expect(result).toBe(true);
+      const levels = scenario.getLevels();
+      const entry = new Decimal(levels.entry);
+      const sl = new Decimal(levels.stopLoss);
+      
+      // Even with inverted zone, SL must be < Entry for BULLISH
+      expect(sl.lt(entry)).toBe(true);
+    });
+
+    it('should handle inverted FVG zone (top < bottom) correctly for Short', () => {
+      // Create inverted zone for BEARISH: top < bottom
+      const invertedFvgPatternData = {
+        currentKillzone: 'LONDON',
+        currentSession: 'LONDON',
+        candles15m: [{
+          timestamp: Date.now(), close: '104', high: '106', low: '103', open: '100', volume: '1000',
+        }],
+        structures: [{
+          type: 'CHOCH', direction: 'BEARISH', price: new Decimal(103),
+          timestamp: Date.now() - 2 * 60 * 60 * 1000,
+          isValidated: true, impulseFactor: new Decimal(2.0),
+        }],
+        zones: [{
+          type: 'FVG', direction: 'BEARISH', 
+          top: new Decimal(101), bottom: new Decimal(103), // INVERTED: top < bottom
+          timestamp: Date.now(), mitigated: false, timeframe: '15',
+        }],
+        liquidityPools: [{
+          type: 'PDH', priceLevel: new Decimal(105),
+          points: [], isTaken: false, timestamp: Date.now() - 1000,
+        }],
+        atr15m: new Decimal('0.5'),
+      };
+      
+      const result = scenario.evaluate(invertedFvgPatternData);
+      
+      expect(result).toBe(true);
+      const levels = scenario.getLevels();
+      const entry = new Decimal(levels.entry);
+      const sl = new Decimal(levels.stopLoss);
+      
+      // Even with inverted zone, SL must be > Entry for BEARISH
+      expect(sl.gt(entry)).toBe(true);
     });
   });
 });
