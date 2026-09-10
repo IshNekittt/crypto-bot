@@ -139,8 +139,6 @@ export function generateReport(
   return lines.join('\n');
 }
 
-import { logger } from '../utils/logger';
-
 export function printReport(
   symbol: string,
   initialBalance: Decimal,
@@ -151,5 +149,5 @@ export function printReport(
   totalDays: number,
   maxDrawdown: Decimal
 ): void {
-  logger.info(generateReport(symbol, initialBalance, finalBalance, trades, periodStart, periodEnd, totalDays, maxDrawdown));
+  console.log(generateReport(symbol, initialBalance, finalBalance, trades, periodStart, periodEnd, totalDays, maxDrawdown));
 }
