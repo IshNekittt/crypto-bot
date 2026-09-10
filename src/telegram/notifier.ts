@@ -307,7 +307,7 @@ export class TelegramNotifier {
       }
     });
 
-    // Register /test_db command for database integration test
+// Register /test_db command for database integration test
     this.bot.command("test_db", async (ctx) => {
       try {
         const { db } = await import("../db/database.js");
@@ -321,7 +321,63 @@ export class TelegramNotifier {
           `❌ DB Test Failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-});
+    });
+
+    // Register /status command for system diagnostics
+    this.bot.command("status", async (ctx) => {
+      if (!this.engines || this.engines.length === 0) {
+        await ctx.reply("❌ No strategy engines initialized");
+        return;
+      }
+
+      const statusLines: string[] = ["📊 <b>SYSTEM STATUS REPORT</b>", ""];
+
+      try {
+        for (const engine of this.engines) {
+        try {
+          const diagnostics = await engine.getDiagnostics();
+          
+          // Format last candle time
+          const lastCandleTimeStr = diagnostics.lastCandleTime
+            ? new Date(diagnostics.lastCandleTime).toISOString().replace('T', ' ').substring(0, 19)
+            : 'N/A';
+
+          // Macro distance
+          const macroDist = diagnostics.nearestMacroDistancePct
+            ? `${diagnostics.nearestMacroDistancePct}%`
+            : 'N/A';
+
+          statusLines.push(
+            `🔸 <b>Symbol:</b> ${diagnostics.symbol}`,
+            `📈 <b>Live Price:</b> ${diagnostics.livePrice ?? 'N/A'}`,
+            `⏱ <b>Last Candle:</b> ${lastCandleTimeStr}`,
+            `🧭 <b>4H Trend:</b> ${diagnostics.trend4h}`,
+            `🧱 <b>Zones in Memory:</b> ${diagnostics.zonesCount}`,
+            `💧 <b>Nearest Macro:</b> ${macroDist}`,
+            `💼 <b>State:</b> ${diagnostics.state}`,
+            ""
+          );
+        } catch (error) {
+          logger.error(
+            `Failed to get diagnostics for ${engine.symbol}: ${error instanceof Error ? error.message : String(error)}`
+          );
+          statusLines.push(
+            `🔸 <b>Symbol:</b> ${engine.symbol}`,
+            `❌ <b>Error getting diagnostics:</b> ${error instanceof Error ? error.message : String(error)}`,
+            ""
+          );
+        }
+    }
+
+    const text = statusLines.join("\n");
+    await ctx.reply(text, { parse_mode: "HTML" });
+  } catch (error) {
+      logger.error(
+        `Failed to generate status report: ${error instanceof Error ? error.message : String(error)}`
+      );
+      await ctx.reply("❌ Failed to generate status report");
+    }
+  });
 
   }
 

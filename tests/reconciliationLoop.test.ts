@@ -1,0 +1,143 @@
+import { ReconciliationLoop, CLOCK_DRIFT_SYNC_INTERVAL_MS } from '../src/bootstrap/reconciliation';
+import { PositionListSource, TimeSyncResult } from '../src/api/bybitClient';
+import { PostgresDatabase } from '../src/db/database';
+import { ReconcilableEngine } from '../src/bootstrap/reconciliation';
+import { StrategyState } from '../src/types';
+import { Decimal } from 'decimal.js';
+
+jest.useFakeTimers();
+
+describe('ReconciliationLoop', () => {
+  let mockSource: jest.Mocked<PositionListSource>;
+  let mockDb: jest.Mocked<PostgresDatabase>;
+  let mockEngines: jest.Mocked<ReconcilableEngine>[];
+  let mockEngine: jest.Mocked<ReconcilableEngine>;
+  let reconciliation: ReconciliationLoop;
+
+  const mockTimeSync: TimeSyncResult = { offsetMs: 5, roundTripMs: 100 };
+
+  beforeEach(() => {
+    mockSource = {
+      getOpenPositions: jest.fn().mockResolvedValue([]),
+      syncServerTime: jest.fn().mockResolvedValue(mockTimeSync),
+    } as jest.Mocked<PositionListSource>;
+
+    mockDb = {
+      getAllOpenTrades: jest.fn().mockResolvedValue([]),
+    } as unknown as jest.Mocked<PostgresDatabase>;
+
+    mockEngine = {
+      symbol: 'SOLUSDT',
+      getState: jest.fn().mockReturnValue(StrategyState.SCANNING),
+      reconcile: jest.fn().mockResolvedValue(false),
+      reconcileWithTrade: jest.fn().mockResolvedValue(false),
+    } as jest.Mocked<ReconcilableEngine>;
+
+    mockEngines = [mockEngine];
+
+    reconciliation = new ReconciliationLoop(mockSource, mockDb, mockEngines);
+  });
+
+  afterEach(() => {
+    reconciliation.stop();
+  });
+
+  describe('Clock Drift Prevention', () => {
+    it('should call syncServerTime on first tick', async () => {
+      await reconciliation.tick();
+      
+      expect(mockSource.syncServerTime).toHaveBeenCalledTimes(1);
+    });
+
+    it('should NOT call syncServerTime again within 1 hour', async () => {
+      await reconciliation.tick();
+      expect(mockSource.syncServerTime).toHaveBeenCalledTimes(1);
+      
+      // Advance time by 30 minutes (less than 1 hour)
+      jest.advanceTimersByTime(30 * 60 * 1000);
+      
+      await reconciliation.tick();
+      expect(mockSource.syncServerTime).toHaveBeenCalledTimes(1);
+    });
+
+    it('should call syncServerTime again after 1 hour', async () => {
+      await reconciliation.tick();
+      expect(mockSource.syncServerTime).toHaveBeenCalledTimes(1);
+      
+      // Advance time by 1 hour + 1 minute
+      jest.advanceTimersByTime(CLOCK_DRIFT_SYNC_INTERVAL_MS + 60000);
+      
+      await reconciliation.tick();
+      expect(mockSource.syncServerTime).toHaveBeenCalledTimes(2);
+    });
+
+    it('should continue when syncServerTime fails', async () => {
+      mockSource.syncServerTime.mockRejectedValueOnce(new Error('Network error'));
+      
+      // Should not throw
+      await expect(reconciliation.tick()).resolves.not.toThrow();
+    });
+  });
+
+  describe('Reconciliation', () => {
+    it('should check engines with IN_TRADE state', async () => {
+      mockEngine.getState.mockReturnValue(StrategyState.IN_TRADE);
+      
+      await reconciliation.tick();
+      
+      expect(mockEngine.reconcile).toHaveBeenCalledWith([]);
+    });
+
+    it('should NOT check engines NOT in IN_TRADE state', async () => {
+      mockEngine.getState.mockReturnValue(StrategyState.SCANNING);
+      
+      await reconciliation.tick();
+      
+      expect(mockEngine.reconcile).not.toHaveBeenCalled();
+    });
+
+    it('should audit open trades from DB', async () => {
+      const mockTrade = {
+        id: 'trade_1',
+        symbol: 'SOLUSDT',
+        entryPrice: '100',
+        qty: '10',
+        side: 'Buy' as const,
+        openedAt: Date.now(),
+        orderId: 'order_1',
+        zoneDetails: null,
+      };
+      
+      mockDb.getAllOpenTrades.mockResolvedValueOnce([mockTrade as any]);
+      mockSource.getOpenPositions.mockResolvedValueOnce([]); // No position on exchange
+      
+      await reconciliation.tick();
+      
+      expect(mockEngine.reconcileWithTrade).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'trade_1', symbol: 'SOLUSDT' })
+      );
+    });
+
+    it('should NOT call reconcileWithTrade when position exists on exchange', async () => {
+      const mockTrade = {
+        id: 'trade_1',
+        symbol: 'SOLUSDT',
+        entryPrice: '100',
+        qty: '10',
+        side: 'Buy' as const,
+        openedAt: Date.now(),
+        orderId: 'order_1',
+        zoneDetails: null,
+      };
+      
+      mockDb.getAllOpenTrades.mockResolvedValueOnce([mockTrade as any]);
+      mockSource.getOpenPositions.mockResolvedValueOnce([
+        { symbol: 'SOLUSDT', side: 'Buy', size: new Decimal('10'), avgPrice: new Decimal('100') }
+      ]); // Position exists
+      
+      await reconciliation.tick();
+      
+      expect(mockEngine.reconcileWithTrade).not.toHaveBeenCalled();
+    });
+  });
+});

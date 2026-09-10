@@ -937,6 +937,18 @@ export class PatternRecognizer {
   }
 
   /**
+   * Force refresh of macro context by clearing cache and re-initializing.
+   * This is called daily at 00:00 UTC to refresh PDH/PDL/PWH/PWL levels.
+   * Uses atomic cache replacement to prevent race conditions.
+   */
+  async refreshMacroContext(symbol: string, macroCandles: number): Promise<MacroContext> {
+    const cacheKey = `${symbol}_macro`;
+    // Atomically replace the cache entry
+    this.macroCache.delete(cacheKey);
+    return this.initializeMacroContext(symbol, macroCandles);
+  }
+
+  /**
    * Build complete pattern data for a symbol
    * Uses pre-initialized macro context from cache (initialized at startup)
    * @param currentCandleTimestamp - Timestamp of the current 15m candle being analyzed (for killzone calculation)

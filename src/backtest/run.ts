@@ -261,12 +261,12 @@ async function main(): Promise<void> {
 
     // Print Scenario 5 rejection stats
     const stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
-    console.log(`[DEBUG] Scenario 5 Rejection Stats: ${JSON.stringify(stats, null, 2)}`);
+    logger.info(`Scenario 5 Rejection Stats: ${JSON.stringify(stats, null, 2)}`);
     Scenario5_HTFLiquiditySweep.resetStats();
 
     // Print PatternRecognizer displacement rejection stats
     const displacementRejections = recognizer.getDisplacementRejections();
-    console.log(`[DEBUG] PatternRecognizer Displacement Rejections: ${displacementRejections}`);
+    logger.info(`PatternRecognizer Displacement Rejections: ${displacementRejections}`);
     recognizer.resetDisplacementRejections();
 
     // Force cleanup between symbols to prevent memory leak

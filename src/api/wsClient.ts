@@ -1,10 +1,37 @@
-import { WebsocketClient } from 'bybit-api';
+import { WebsocketClient, DefaultLogger } from 'bybit-api';
 import { BotConfig } from '../config/env';
 import { Candle, Timeframe } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 
 const WS_HEARTBEAT_INTERVAL_MS = 20000;
+const WS_WATCHDOG_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes of silence = dead socket
+const WS_RECONNECT_DELAY_MS = 5000; // 5 seconds between reconnection attempts
+
+// Custom logger for bybit-api WebsocketClient to suppress verbose stack traces
+const wsLogger: DefaultLogger = {
+  trace: () => {
+    // Suppress trace logs (ping/pong, raw messages) - they're too noisy
+  },
+  info: (...params: unknown[]) => {
+    // Only log actual connection events, not internal noise
+    const msg = params.map(p => (typeof p === 'object' ? JSON.stringify(p) : String(p))).join(' ');
+    if (msg.includes('connected') || msg.includes('authenticated') || msg.includes('reconnect')) {
+      logger.info(`[WS] ${msg}`);
+    }
+  },
+  error: (...params: unknown[]) => {
+    // Single-line warning for network errors instead of huge stack traces
+    const msg = params.map(p => (typeof p === 'object' ? JSON.stringify(p) : String(p))).join(' ');
+    if (msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED') || msg.includes('timeout') || msg.includes('network')) {
+      logger.warn(`[WS] Network error, retrying in ${WS_RECONNECT_DELAY_MS}ms...`);
+    } else if (msg.includes('exception') || msg.includes('Exception')) {
+      logger.warn(`[WS] Exception: ${msg.slice(0, 200)}`);
+    } else {
+      logger.error(`[WS] ${msg}`);
+    }
+  },
+};
 
 export interface KlineUpdate {
   readonly symbol: string;
@@ -74,6 +101,8 @@ export class BybitWebsocket {
   private executionHandler: ((payload: unknown) => void) | null = null;
   private positionHandler: ((payload: unknown) => void) | null = null;
   private resyncHandler: (() => Promise<void>) | null = null;
+  private watchdogTimer: NodeJS.Timeout | null = null;
+  private lastMessageTime = Date.now();
 
   constructor(config: BotConfig) {
     this.ws = new WebsocketClient({
@@ -82,21 +111,62 @@ export class BybitWebsocket {
       testnet: config.testnet,
       demoTrading: config.demoTrading,
       pingInterval: WS_HEARTBEAT_INTERVAL_MS,
-    });
+      reconnectTimeout: WS_RECONNECT_DELAY_MS, // 5 seconds between reconnection attempts
+    }, wsLogger);
     this.registerLifecycleHandlers();
+    this.startWatchdog();
+  }
+
+  private startWatchdog(): void {
+    this.watchdogTimer = setInterval(() => {
+      const silenceMs = Date.now() - this.lastMessageTime;
+      if (silenceMs >= WS_WATCHDOG_TIMEOUT_MS) {
+        logger.error(`[WS Watchdog] ${silenceMs}ms of silence (threshold: ${WS_WATCHDOG_TIMEOUT_MS}ms) — forcing reconnect`);
+        this.forceReconnect();
+      }
+    }, 30000); // Check every 30 seconds
+    this.watchdogTimer.unref();
+  }
+
+  private forceReconnect(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+    try {
+      this.ws.close('v5LinearPublic');
+      this.ws.close('v5Private');
+    } catch (error) {
+      logger.warn(`WS force-close error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // The 'close' event will trigger reconnect logic in registerLifecycleHandlers
+  }
+
+  private resetWatchdog(): void {
+    this.lastMessageTime = Date.now();
   }
 
   private registerLifecycleHandlers(): void {
-    this.ws.on('update', (event) => this.routeUpdate(event));
+    this.ws.on('update', (event) => {
+      this.resetWatchdog();
+      this.routeUpdate(event);
+    });
 
-    this.ws.on('open', ({ wsKey }) => logger.info(`WS connected: ${String(wsKey)}`));
+    this.ws.on('open', ({ wsKey }) => {
+      logger.info(`WS connected: ${String(wsKey)}`);
+      this.resetWatchdog();
+    });
 
-    this.ws.on('authenticated', () => logger.info('WS private channel authenticated'));
+    this.ws.on('authenticated', () => {
+      logger.info('WS private channel authenticated');
+      this.resetWatchdog();
+    });
 
     this.ws.on('reconnect', ({ wsKey }) => logger.warn(`WS reconnecting: ${String(wsKey)}`));
 
     this.ws.on('reconnected', ({ wsKey }) => {
       logger.warn(`WS reconnected: ${String(wsKey)}, running resync`);
+      this.resetWatchdog();
       const resync = this.resyncHandler;
       if (resync) {
         resync().catch((error: unknown) => logger.error(
@@ -164,6 +234,10 @@ export class BybitWebsocket {
   }
 
   close(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     try {
       this.ws.close('v5LinearPublic');
       this.ws.close('v5Private');

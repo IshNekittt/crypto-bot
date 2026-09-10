@@ -206,4 +206,93 @@ describe('PendingTradeManager', () => {
       await promise2;
     });
   });
+
+  describe('Slippage Guard', () => {
+    beforeEach(() => {
+      // Set a price provider that returns a fixed price
+      manager.setPriceProvider(() => '100.21'); // Current price = 100.21 (0.21% above entry 100) - exceeds 0.2% threshold
+    });
+
+    it('should REJECT approval when price moved > 0.2% towards TP (Long)', async () => {
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      
+      // Price is 100.21 (0.21% above entry 100) - exceeds 0.2% threshold
+      // Should reject because slippage > 0.2%
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result).toBe(true); // handleApproval returns true (trade handled)
+      await expect(promise).resolves.toBe(false); // but resolves to false (rejected)
+      expect(manager.getPendingCount()).toBe(0);
+    });
+
+    it('should ACCEPT approval when price moved <= 0.2% towards TP (Long)', async () => {
+      // Update price provider to return price within threshold
+      manager.setPriceProvider(() => '100.19'); // 0.19% above entry
+      
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result).toBe(true);
+      await expect(promise).resolves.toBe(true);
+      expect(manager.getPendingCount()).toBe(0);
+    });
+
+    it('should REJECT approval when price moved > 0.2% towards TP (Short)', async () => {
+      // For short: entry=100, tp=97, current=99.79 (0.21% below entry) - exceeds threshold
+      manager.setPriceProvider(() => '99.79'); // 0.21% below entry
+      
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '101', '97', 1, 'Test', 'Sell', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result).toBe(true);
+      await expect(promise).resolves.toBe(false);
+      expect(manager.getPendingCount()).toBe(0);
+    });
+
+    it('should REJECT approval when price already reached TP', async () => {
+      // Price at TP (103) - should reject
+      manager.setPriceProvider(() => '103');
+      
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result).toBe(true);
+      await expect(promise).resolves.toBe(false);
+      expect(manager.getPendingCount()).toBe(0);
+    });
+
+    it('should ACCEPT approval when no price provider is set', async () => {
+      // Create new manager without price provider
+      const managerNoPrice = new PendingTradeManager(mockNotifier, 5);
+      
+      const promise = managerNoPrice.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+      );
+
+      const tradeId = Array.from((managerNoPrice as any).pendingTrades.keys())[0] as string;
+      const result = managerNoPrice.handleApproval(tradeId, true);
+
+      expect(result).toBe(true);
+      await expect(promise).resolves.toBe(true);
+      expect(managerNoPrice.getPendingCount()).toBe(0);
+      
+      managerNoPrice.cancelAll();
+    });
+  });
 });

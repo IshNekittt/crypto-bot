@@ -54,6 +54,8 @@ async function main(): Promise<void> {
   await startHealthServer();
 
   const client = BybitClient.create(config);
+  // Set Telegram notifier for global rate limit alerts
+  client.setTelegramNotifier(notifier);
   const instruments = await runPreflight(config, client);
 
   if (!notifier.enabled) {
@@ -199,6 +201,7 @@ async function main(): Promise<void> {
   }
   logger.info('Macro context initialization complete for all symbols');
 
+  // STRICTLY ONE loop for creating new StrategyEngine(...) and adding to engines array
   for (const symbol of config.symbols) {
     const instrument = instruments.get(symbol);
     if (!instrument) throw new Error(`No instrument info for ${symbol}, aborting`);
@@ -215,6 +218,14 @@ async function main(): Promise<void> {
       pendingTradeManager,
     }));
   }
+
+  // Set price provider for slippage guard (PendingTradeManager)
+  pendingTradeManager.setPriceProvider((symbol: string) => {
+    const engine = engines.find((e) => e.symbol === symbol);
+    return engine?.getLastClosedCandle()?.close.toString() ?? null;
+  });
+
+  // STRICTLY ONE loop for calling engine.initialize()
   for (const engine of engines) {
     await db.setSymbolState(engine.symbol, StrategyState.SCANNING);
     await engine.initialize();
@@ -267,6 +278,50 @@ async function main(): Promise<void> {
   reconciliation.start();
 
   backupService.start();
+
+  // Daily macro context refresh at 00:00 UTC
+  const startMacroContextRefresher = (): NodeJS.Timeout => {
+    const now = Date.now();
+    const tomorrow = new Date(now);
+    tomorrow.setUTCHours(0, 0, 0, 0);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    const msUntilMidnight = tomorrow.getTime() - now;
+
+    logger.info(`Next macro context refresh scheduled in ${Math.round(msUntilMidnight / 60000)} minutes`);
+
+    const timeout = setTimeout(async () => {
+      try {
+        logger.info('Starting daily macro context refresh...');
+        
+        // Sync server time before macro refresh to prevent clock drift
+        try {
+          const timeSync = await client.syncServerTime();
+          logger.info(`[Clock Drift] Time synced: offset=${timeSync.offsetMs}ms, roundTrip=${timeSync.roundTripMs}ms`);
+        } catch (timeError) {
+          logger.warn(`[Clock Drift] Failed to sync server time: ${timeError instanceof Error ? timeError.message : String(timeError)}`);
+        }
+        
+        for (const symbol of config.symbols) {
+          try {
+            // Atomically replace the macro cache for this symbol
+            await patternRecognizer.refreshMacroContext(symbol, config.macroCandles);
+            logger.info(`Macro context refreshed for ${symbol}`);
+          } catch (error) {
+            logger.error(`Failed to refresh macro context for ${symbol}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      } catch (error) {
+        logger.error(`Error during macro context refresh: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        // Schedule next refresh (24 hours)
+        startMacroContextRefresher();
+      }
+    }, msUntilMidnight);
+
+    return timeout;
+  };
+
+  startMacroContextRefresher();
 
   // Graceful shutdown handler
   let shuttingDown = false;

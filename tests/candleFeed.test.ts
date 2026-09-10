@@ -78,4 +78,40 @@ describe('CandleFeed', () => {
     expect(feed().getLastClosed()).toBeNull();
     expect(feed().getCandles()).toHaveLength(0);
   });
+
+  it('enforces capacity limit by shifting oldest candles (FIFO)', () => {
+    const capacity = 5;
+    const f = new CandleFeed('TEST', '15', capacity);
+    // Push 8 candles (capacity + 3)
+    for (let i = 1; i <= 8; i++) {
+      f.applyKline({ symbol: 'TEST', interval: '15', confirmed: true, candle: { timestamp: i * 1000, open: '100', high: '101', low: '99', close: '100.5', volume: '10' } });
+    }
+    const candles = f.getCandles();
+    expect(candles).toHaveLength(capacity);
+    // Oldest 3 should be dropped (1, 2, 3)
+    expect(candles[0].timestamp).toBe(4 * 1000);
+    expect(candles[candles.length - 1].timestamp).toBe(8 * 1000);
+  });
+
+  it('getCurrentFormingCandle returns unconfirmed candle', () => {
+    const f = new CandleFeed('TEST', '15', 100);
+    f.applyKline({ symbol: 'TEST', interval: '15', confirmed: false, candle: { timestamp: 1000, open: '100', high: '101', low: '99', close: '100.5', volume: '10' } });
+    expect(f.getCurrentFormingCandle()?.timestamp).toBe(1000);
+    // After confirmation, forming candle should be cleared
+    f.applyKline({ symbol: 'TEST', interval: '15', confirmed: true, candle: { timestamp: 1000, open: '100', high: '101', low: '99', close: '100.5', volume: '10' } });
+    expect(f.getCurrentFormingCandle()).toBeNull();
+  });
+
+  it('loadHistory replaces buffer with history data', async () => {
+    const f = feed();
+    await f.loadHistory(historySource);
+    expect(f.getCandles()).toHaveLength(3);
+    // Add more candles
+    f.applyKline({ symbol: 'SOLUSDT', interval: '15', confirmed: true, candle: { timestamp: 400, open: '100', high: '101', low: '99', close: '100.5', volume: '10' } });
+    f.applyKline({ symbol: 'SOLUSDT', interval: '15', confirmed: true, candle: { timestamp: 500, open: '100', high: '101', low: '99', close: '100.5', volume: '10' } });
+    // loadHistory should replace, not append
+    await f.loadHistory({ getKlines: async () => [candle(600), candle(700), candle(800), candle(900)] });
+    expect(f.getCandles()).toHaveLength(4);
+    expect(f.getCandles().map(c => c.timestamp)).toEqual([600, 700, 800, 900]);
+  });
 });

@@ -73,8 +73,9 @@ export class StrategyEngine {
   constructor(deps: StrategyEngineDeps) {
     this.symbol = deps.symbol;
     this.deps = deps;
-    this.feed15m = new CandleFeed(deps.symbol, '15', 200);
-    this.feed4h = new CandleFeed(deps.symbol, '240', 200);
+    const historyCandles = deps.client.config?.historyCandles ?? 200;
+    this.feed15m = new CandleFeed(deps.symbol, '15', historyCandles);
+    this.feed4h = new CandleFeed(deps.symbol, '240', historyCandles);
 
     this.scenarioRouter = new ScenarioRouter({
       symbol: deps.symbol,
@@ -95,6 +96,85 @@ export class StrategyEngine {
     const candle = this.feed15m.getLastClosed();
     if (!candle) return null;
     return { close: new Decimal(candle.close), timestamp: candle.timestamp };
+  }
+
+  async getDiagnostics(): Promise<{
+    symbol: string;
+    livePrice: string | null;
+    lastCandleTime: number | null;
+    trend4h: 'BULLISH' | 'BEARISH' | 'NONE';
+    zonesCount: number;
+    nearestMacroDistancePct: string | null;
+    state: StrategyState;
+  }> {
+    // Last closed 15m candle time
+    const lastClosed = this.feed15m.getLastClosed();
+    const lastCandleTime = lastClosed ? lastClosed.timestamp : null;
+
+    // 4H Trend from structures (we need to get this from patternRecognizer)
+    // For now, we'll get it from the latest patternData or compute from 4H candles
+    let trend4h: 'BULLISH' | 'BEARISH' | 'NONE' = 'NONE';
+    const candles4h = this.feed4h.getCandles() as any[];
+    if (candles4h.length >= 2) {
+      const last4h = candles4h[candles4h.length - 1];
+      const prev4h = candles4h[candles4h.length - 2];
+      const lastClose = new Decimal(last4h.close);
+      const prevClose = new Decimal(prev4h.close);
+      if (lastClose.gt(prevClose)) trend4h = 'BULLISH';
+      else if (lastClose.lt(prevClose)) trend4h = 'BEARISH';
+    }
+
+    // Count zones in memory (OB + FVG from 15m and 4H)
+    const candles15m = this.feed15m.getCandles() as any[];
+    const candles4hAll = this.feed4h.getCandles() as any[];
+    let zonesCount = 0;
+    if (candles15m.length >= 20 && candles4hAll.length >= 20) {
+      try {
+        // Generate pattern data to count zones
+        const patternData = await this.deps.patternRecognizer.buildPatternData(
+          this.symbol,
+          candles15m,
+          candles4hAll,
+          Date.now()
+        );
+        zonesCount = patternData.zones?.length || 0;
+      } catch {
+        zonesCount = 0;
+      }
+    }
+
+    // Nearest macro level distance (PDH or PDL) - use LIVE price
+    let nearestMacroDistancePct: string | null = null;
+    try {
+      const macroContext = await this.deps.patternRecognizer['macroCache'].get(`${this.symbol}_macro`);
+      if (macroContext) {
+        // Use LIVE price for nearest macro calculation
+        const livePriceStr = this.feed15m.getCurrentLivePrice();
+        if (livePriceStr) {
+          const currentPrice = new Decimal(livePriceStr);
+          const pdh = macroContext.dailyLevels.pdh;
+          const pdl = macroContext.dailyLevels.pdl;
+          
+          const distToPdh = pdh.gt(currentPrice) ? pdh.minus(currentPrice).div(currentPrice).mul(100) : currentPrice.minus(pdh).div(currentPrice).mul(100);
+          const distToPdl = pdl.gt(currentPrice) ? pdl.minus(currentPrice).div(currentPrice).mul(100) : currentPrice.minus(pdl).div(currentPrice).mul(100);
+          
+          const nearestDist = Decimal.min(pdh.gt(currentPrice) ? distToPdh : distToPdl);
+          nearestMacroDistancePct = nearestDist.toFixed(2);
+        }
+      }
+    } catch {
+      nearestMacroDistancePct = null;
+    }
+
+    return {
+      symbol: this.symbol,
+      livePrice: this.feed15m.getCurrentLivePrice(),
+      lastCandleTime,
+      trend4h,
+      zonesCount,
+      nearestMacroDistancePct,
+      state: this.state,
+    };
   }
 
   async initialize(): Promise<void> {
@@ -199,15 +279,73 @@ export class StrategyEngine {
 
   private async onExchangePositionClosed(pnl: string | null): Promise<void> {
     const trade = await this.deps.db.getOpenTrade(this.symbol);
-    if (trade) {
-      await this.deps.db.closeTrade(trade.id, pnl, null, Date.now());
-      // Add the zone used for entry to mitigated zones
-      if (trade.zoneDetails) {
-        this.addMitigatedZone(trade.zoneDetails);
-      }
+    if (!trade) {
+      logger.warn(`${this.symbol}: position close event but no open trade found`);
+      this.transition(StrategyState.SCANNING);
+      return;
     }
-    if (pnl !== null) {
-      await this.deps.notifier.notifyTradeClosed(this.symbol, pnl, '0%');
+
+    // === ACCURATE PNL: Fetch real closed PnL from Bybit (includes fees + funding) ===
+    // Wait 2-3 seconds for exchange to finalize data
+    await new Promise(resolve => setTimeout(resolve, 2500));
+    
+    let finalPnlString = pnl;
+    let finalExitPrice: string | null = null;
+    
+    try {
+      const endTime = Date.now();
+      const startTime = trade.openedAt;
+      const closedPnls = await this.deps.client.getClosedPnl(trade.symbol, startTime, endTime);
+      
+      // Find matching closed PnL record by orderId or time proximity
+      let matchedPnl: { closedPnl: Decimal; exitPrice: Decimal } | null = null;
+      
+      if (trade.orderId) {
+        // Try exact orderId match first
+        matchedPnl = closedPnls
+          .filter(p => p.orderId === trade.orderId)
+          .map(p => ({ closedPnl: p.closedPnl, exitPrice: p.exitPrice }))[0] ?? null;
+      }
+      
+      if (!matchedPnl && closedPnls.length > 0) {
+        // Fallback: find by closest closedTime to now
+        const now = Date.now();
+        let bestMatch = closedPnls[0];
+        let minTimeDiff = Math.abs(Number(bestMatch.closedTime) - now);
+        
+        for (const pnlRecord of closedPnls) {
+          const diff = Math.abs(Number(pnlRecord.closedTime) - now);
+          if (diff < minTimeDiff) {
+            minTimeDiff = diff;
+            bestMatch = pnlRecord;
+          }
+        }
+        
+        // Only use if time diff is reasonable (< 5 minutes)
+        if (minTimeDiff < 5 * 60 * 1000) {
+          matchedPnl = { closedPnl: bestMatch.closedPnl, exitPrice: bestMatch.exitPrice };
+        }
+      }
+      
+      if (matchedPnl) {
+        finalPnlString = matchedPnl.closedPnl.toFixed(8);
+        finalExitPrice = matchedPnl.exitPrice.toFixed(8);
+        logger.info(`${this.symbol}: Using exchange closedPnl (with funding/fees): ${finalPnlString} vs WS pnl: ${pnl ?? 'null'}`);
+      } else {
+        logger.warn(`${this.symbol}: No matching closedPnl found, using WS PnL`);
+      }
+    } catch (pnlError) {
+      logger.warn(`${this.symbol}: Failed to fetch closedPnl, using WS PnL: ${pnlError instanceof Error ? pnlError.message : String(pnlError)}`);
+    }
+
+    await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now());
+
+    // Add the zone used for entry to mitigated zones
+    if (trade.zoneDetails) {
+      this.addMitigatedZone(trade.zoneDetails);
+    }
+    if (finalPnlString !== null) {
+      await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0%');
     } else {
       logger.warn(`${this.symbol}: position closed by exchange event, PnL unknown`);
     }
@@ -441,15 +579,66 @@ export class StrategyEngine {
         foundClosingExecution = true;
       }
 
-      const pnlString = foundClosingExecution ? totalPnl.toFixed(8) : null;
+      const calculatedPnlString = foundClosingExecution ? totalPnl.toFixed(8) : null;
+
+      // === ACCURATE PNL: Fetch real closed PnL from Bybit (includes fees + funding) ===
+      // Wait 2-3 seconds for exchange to finalize data
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      
+      let finalPnlString = calculatedPnlString;
+      let finalExitPrice = exitPrice;
+      
+      try {
+        const closedPnls = await this.deps.client.getClosedPnl(trade.symbol, startTime, endTime);
+        
+        // Find matching closed PnL record by orderId or time proximity
+        let matchedPnl: { closedPnl: Decimal; exitPrice: Decimal } | null = null;
+        
+        if (trade.orderId) {
+          // Try exact orderId match first
+          matchedPnl = closedPnls
+            .filter(p => p.orderId === trade.orderId)
+            .map(p => ({ closedPnl: p.closedPnl, exitPrice: p.exitPrice }))[0] ?? null;
+        }
+        
+        if (!matchedPnl && closedPnls.length > 0) {
+          // Fallback: find by closest closedTime to now
+          const now = Date.now();
+          let bestMatch = closedPnls[0];
+          let minTimeDiff = Math.abs(Number(bestMatch.closedTime) - now);
+          
+          for (const pnl of closedPnls) {
+            const diff = Math.abs(Number(pnl.closedTime) - now);
+            if (diff < minTimeDiff) {
+              minTimeDiff = diff;
+              bestMatch = pnl;
+            }
+          }
+          
+          // Only use if time diff is reasonable (< 5 minutes)
+          if (minTimeDiff < 5 * 60 * 1000) {
+            matchedPnl = { closedPnl: bestMatch.closedPnl, exitPrice: bestMatch.exitPrice };
+          }
+        }
+        
+        if (matchedPnl) {
+          finalPnlString = matchedPnl.closedPnl.toFixed(8);
+          finalExitPrice = matchedPnl.exitPrice.toFixed(8);
+          logger.info(`${this.symbol}: Using exchange closedPnl (with funding/fees): ${finalPnlString} vs calculated: ${calculatedPnlString}`);
+        } else {
+          logger.warn(`${this.symbol}: No matching closedPnl found, using calculated PnL`);
+        }
+      } catch (pnlError) {
+        logger.warn(`${this.symbol}: Failed to fetch closedPnl, using calculated: ${pnlError instanceof Error ? pnlError.message : String(pnlError)}`);
+      }
 
       // Close the trade in DB
-      await this.deps.db.closeTrade(trade.id, pnlString, exitPrice, Date.now());
+      await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now());
 
       // Notify Telegram
-      if (pnlString !== null) {
-        await this.deps.notifier.notifyTradeClosed(this.symbol, pnlString, '0%');
-        logger.info(`${this.symbol}: reconciliation closed trade ${trade.id} with PnL ${pnlString}`);
+      if (finalPnlString !== null) {
+        await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0%');
+        logger.info(`${this.symbol}: reconciliation closed trade ${trade.id} with PnL ${finalPnlString}`);
       } else {
         logger.warn(`${this.symbol}: reconciliation closed trade ${trade.id} but PnL unknown (no closing execution found)`);
       }

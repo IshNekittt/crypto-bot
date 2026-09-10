@@ -35,14 +35,6 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
   override evaluate(patternData: any): boolean {
     Scenario5_HTFLiquiditySweep.rejectionStats.totalEvals++;
 
-    // Debug: log ATR once
-    if (Scenario5_HTFLiquiditySweep.rejectionStats.totalEvals === 1) {
-      console.log(`[DEBUG] atr15m = ${patternData.atr15m?.toString()}, atr4h = ${patternData.atr4h?.toString()}`);
-      console.log(`[DEBUG] currentKillzone = ${patternData.currentKillzone}, currentSession = ${patternData.currentSession}`);
-      console.log(`[DEBUG] liquidityPools count = ${patternData.liquidityPools?.length}, structures count = ${patternData.structures?.length}, zones count = ${patternData.zones?.length}`);
-      console.log(`[DEBUG] last candle: O=${patternData.candles15m?.[patternData.candles15m.length - 1]?.open} H=${patternData.candles15m?.[patternData.candles15m.length - 1]?.high} L=${patternData.candles15m?.[patternData.candles15m.length - 1]?.low} C=${patternData.candles15m?.[patternData.candles15m.length - 1]?.close}`);
-    }
-
     // CRITICAL: Killzone check - sweep must happen in London/NY killzone only (not ASIAN)
     const killzone = patternData.currentKillzone;
     if (!killzone || (killzone !== 'LONDON' && killzone !== 'NY')) {

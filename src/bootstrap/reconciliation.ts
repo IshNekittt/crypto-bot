@@ -4,6 +4,7 @@ import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 
 export const RECONCILIATION_INTERVAL_MS = 10 * 60 * 1000;
+export const CLOCK_DRIFT_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 export interface ReconcilableEngine {
   readonly symbol: string;
@@ -34,6 +35,7 @@ export class ReconciliationLoop {
   private readonly engines: readonly ReconcilableEngine[];
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private lastTimeSync = 0;
 
   constructor(source: PositionListSource, db: PostgresDatabase, engines: readonly ReconcilableEngine[]) {
     this.source = source;
@@ -62,6 +64,18 @@ export class ReconciliationLoop {
     this.running = true;
     let resets = 0;
     try {
+      // Clock drift prevention: sync server time every hour
+      const now = Date.now();
+      if (now - this.lastTimeSync >= CLOCK_DRIFT_SYNC_INTERVAL_MS) {
+        try {
+          const timeSync = await this.source.syncServerTime();
+          logger.info(`[Clock Drift] Reconciliation time synced: offset=${timeSync.offsetMs}ms, roundTrip=${timeSync.roundTripMs}ms`);
+          this.lastTimeSync = now;
+        } catch (timeError) {
+          logger.warn(`[Clock Drift] Reconciliation failed to sync server time: ${timeError instanceof Error ? timeError.message : String(timeError)}`);
+        }
+      }
+
       // 1. Check engines with IN_TRADE state
       for (const engine of this.engines) {
         if (engine.getState() !== 'IN_TRADE') continue;

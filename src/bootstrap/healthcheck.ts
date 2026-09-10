@@ -1,4 +1,5 @@
 import express from 'express';
+import { logger } from '../utils/logger';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,7 +15,7 @@ app.get('/health', (_req, res) => {
 export function startHealthServer(): Promise<void> {
   return new Promise((resolve) => {
     app.listen(PORT, () => {
-      console.log(`Health check server listening on port ${PORT}`);
+      logger.info(`Health check server listening on port ${PORT}`);
       resolve();
     });
   });

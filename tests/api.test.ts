@@ -15,7 +15,29 @@ function makeRest(): Record<string, jest.Mock> {
 }
 
 function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: BybitClient; rest: Record<string, jest.Mock> } {
-  return { client: new BybitClient(rest as unknown as RestClientV5), rest };
+  const config = {
+    apiKey: 'test',
+    apiSecret: 'test',
+    testnet: true,
+    demoTrading: false,
+    symbols: ['BTCUSDT'],
+    riskPercent: '2',
+    reducedRiskPercent: '1',
+    leverage: '10',
+    dataDir: 'data',
+    historyCandles: 200,
+    ltfTimeframe: '15',
+    htfTimeframe: '240',
+    macroCandles: 1000,
+    telegramBotToken: null,
+    telegramChatId: null,
+    databaseUrl: null,
+    autoTrading: false,
+    tradeApprovalTimeoutMinutes: 5,
+    enableLiveTestOrders: false,
+    activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+  };
+  return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }
 
 describe('parseRestKlines', () => {

@@ -1,6 +1,7 @@
 import { TelegramNotifier } from '../telegram/notifier';
 import { logger } from '../utils/logger';
 import { Markup } from 'telegraf';
+import { Decimal } from 'decimal.js';
 
 export interface PendingTrade {
   id: string;
@@ -24,10 +25,16 @@ export class PendingTradeManager {
   private readonly approvalTimeoutMs: number;
   private readonly pendingTrades: Map<string, PendingTrade> = new Map();
   private tradeIdCounter = 0;
+  private readonly slippageThresholdPct = new Decimal('0.002'); // 0.2%
+  private getCurrentPrice?: (symbol: string) => string | null;
 
   constructor(notifier: TelegramNotifier, approvalTimeoutMinutes: number) {
     this.notifier = notifier;
     this.approvalTimeoutMs = approvalTimeoutMinutes * 60 * 1000;
+  }
+
+  setPriceProvider(getCurrentPrice: (symbol: string) => string | null): void {
+    this.getCurrentPrice = getCurrentPrice;
   }
 
   generateTradeId(symbol: string): string {
@@ -118,6 +125,48 @@ export class PendingTradeManager {
     const pending = this.pendingTrades.get(tradeId);
     if (!pending) {
       return false;
+    }
+
+    if (approved && this.getCurrentPrice) {
+      const currentPriceStr = this.getCurrentPrice(pending.symbol);
+      if (currentPriceStr) {
+        const currentPrice = new Decimal(currentPriceStr);
+        const entryPrice = new Decimal(pending.entry);
+        const tpPrice = new Decimal(pending.tp);
+        
+        const isLong = pending.side === 'Buy';
+        let slippagePct: Decimal;
+        
+        if (isLong) {
+          // For long: if price moved UP towards TP
+          if (currentPrice.gte(tpPrice)) {
+            logger.warn(`[Slippage Guard] ${tradeId}: current price ${currentPriceStr} >= TP ${pending.tp}, rejecting`);
+            clearTimeout(pending.timeoutHandle);
+            this.pendingTrades.delete(tradeId);
+            pending.resolve(false);
+            return true;
+          }
+          slippagePct = currentPrice.minus(entryPrice).div(entryPrice).abs();
+        } else {
+          // For short: if price moved DOWN towards TP
+          if (currentPrice.lte(tpPrice)) {
+            logger.warn(`[Slippage Guard] ${tradeId}: current price ${currentPriceStr} <= TP ${pending.tp}, rejecting`);
+            clearTimeout(pending.timeoutHandle);
+            this.pendingTrades.delete(tradeId);
+            pending.resolve(false);
+            return true;
+          }
+          slippagePct = entryPrice.minus(currentPrice).div(entryPrice).abs();
+        }
+
+        if (slippagePct.gt(this.slippageThresholdPct)) {
+          logger.warn(`[Slippage Guard] ${tradeId}: slippage ${slippagePct.mul(100).toFixed(4)}% > ${this.slippageThresholdPct.mul(100).toFixed(1)}% threshold, rejecting`);
+          clearTimeout(pending.timeoutHandle);
+          this.pendingTrades.delete(tradeId);
+          pending.resolve(false);
+          return true;
+        }
+      }
     }
 
     clearTimeout(pending.timeoutHandle);

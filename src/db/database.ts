@@ -99,6 +99,19 @@ export class PostgresDatabase {
     });
   }
 
+  /**
+   * CONNECTION LEAK PREVENTION:
+   * Every method that acquires a client from the pool MUST use the pattern:
+   *   const client = await this.pool.connect();
+   *   try {
+   *     // ... queries ...
+   *   } finally {
+   *     client.release(); // ALWAYS release, even on error
+   *   }
+   * This ensures connections are returned to the pool under ALL circumstances.
+   * Current pool config: max=5, idleTimeout=10s, keepAlive=true for Supabase compatibility.
+   */
+
   async initialize(): Promise<void> {
     const client = await this.pool.connect();
     try {
