@@ -25,8 +25,9 @@ export class NewsService {
       const response = await fetch(FOREX_FACTORY_URL, {
         method: 'GET',
         headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
           'Accept': 'application/json',
-          'User-Agent': 'crypto-bot-smc/1.0',
+          'Cache-Control': 'no-cache',
         },
       });
 

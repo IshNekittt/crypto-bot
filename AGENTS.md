@@ -263,6 +263,7 @@ public calculateLevels(
 | **Embargo Window** | ±30 minutes (configurable via `EMBARGO_WINDOW_MS = 30 * 60 * 1000`) |
 | **Method** | `isNewsEmbargo(ts: number): boolean` — returns `true` if `ts` within ±30 min of any cached high-impact USD event |
 | **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws |
+| **Cloudflare 429 Fix** | Browser headers (`User-Agent`, `Accept`, `Cache-Control: no-cache`) to bypass Cloudflare 429 rate limiting on ForexFactory | `src/services/newsService.ts:25-31` |
 
 **Integration Points**:
 
