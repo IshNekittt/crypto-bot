@@ -246,6 +246,45 @@ public calculateLevels(
 - Used by Scenarios 1, 5, 6, 10, 11 (all bidirectional scenarios)
 - Tests call this method directly — no full pattern recognition needed
 
+### 6.6 News Filter (News Embargo) — `src/services/newsService.ts` — **NEW v2026-09-12**
+
+**Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
+
+**Solution**: **News Embargo Filter** — blocks all trade scanning ±30 minutes around high-impact USD news.
+
+**Implementation** (`src/services/newsService.ts`):
+
+| Component | Detail |
+|-----------|--------|
+| **Source** | ForexFactory public JSON: `https://nfs.faireconomy.media/ff_calendar_thisweek.json` |
+| **Filter** | `country === 'USD'` AND `impact === 'High'` |
+| **Cache** | In-memory array of `NewsEvent { title, timestamp }` for current week (±7 days) |
+| **Refresh** | Daily at 00:00 UTC (via macro context refresher) + at startup |
+| **Embargo Window** | ±30 minutes (configurable via `EMBARGO_WINDOW_MS = 30 * 60 * 1000`) |
+| **Method** | `isNewsEmbargo(ts: number): boolean` — returns `true` if `ts` within ±30 min of any cached high-impact USD event |
+| **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws |
+
+**Integration Points**:
+
+1. **Bootstrap** (`src/index.ts`):
+   - `newsService.fetchNews()` at startup
+   - Daily 00:00 UTC: `newsService.fetchNews()` in `startMacroContextRefresher()`
+   - Injected into all `StrategyEngine` instances
+
+2. **StrategyEngine** (`src/engine/strategyEngine.ts`):
+   - In `process()` (15m candle close): **embargo check BEFORE `scenarioRouter.evaluate()`**
+   - If `newsService.isNewsEmbargo(candleTimestamp)` → logs `[SYMBOL] 15m candle closed, but HIGH IMPACT NEWS EMBARGO is active. Skipping scan.` → returns early
+   - **4H timeframe** bypasses check (early return)
+
+3. **Telegram /status**:
+   - `getNextHighImpactNews()` → shows next USD high-impact event or "None for today"
+
+**Tests** (`tests/newsService.test.ts`, `tests/strategyEngine.test.ts`):
+- Filtering: only USD High impact events stored
+- Boundary checks: 13:29:59→false, 13:30:00→true, 14:30:00→true, 14:30:01→false
+- Resilience: network/HTTP/parse errors → empty cache + warn, no crash
+- Engine integration: embargo blocks scan, logs message, doesn't call evaluate
+
 ---
 
 ## 7. THE 11 SCENARIOS — `src/engine/scenarios/`
