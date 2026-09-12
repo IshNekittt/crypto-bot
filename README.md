@@ -112,6 +112,30 @@ or `None for today` / error state.
 
 ---
 
+## 📰 News Filter (News Embargo) — NEW v2026-09-12
+
+**Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
+
+**Solution**: **News Embargo Filter** — blocks all trade scanning ±30 minutes around high-impact USD news.
+
+| Component | Detail |
+|-----------|--------|
+| **Source** | **FXMacroData API**: `https://api.fxmacrodata.com/v1/calendar/usd` (free, no API key, 100 req/day) |
+| **Filter** | `event_importance === 'high'` AND `release_date_confirmed === true` (or `market_tier === 1`) |
+| **Cache** | In-memory array of `NewsEvent { name, timestamp }` for current week (±7 days) |
+| **Refresh** | Daily at 00:00 UTC (via macro context refresher) + at startup |
+| **Embargo Window** | ±30 minutes (configurable via `EMBARGO_WINDOW_MS = 30 * 60 * 1000`) |
+| **Check** | In `StrategyEngine.process()` (15m candle close): `if (newsService.isNewsEmbargo(candleTimestamp)) → skip scan` |
+| **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws (fail-open) |
+
+**Telegram /status**:
+```
+📰 Next USD High-Impact News: NFP at 2026-09-15 14:00:00 UTC
+```
+or `None for today` / error state.
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites

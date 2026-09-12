@@ -1,16 +1,28 @@
 import { logger } from '../utils/logger';
 
-const FOREX_FACTORY_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+const FXMACRODATA_URL = 'https://api.fxmacrodata.com/v1/calendar/usd';
 const EMBARGO_WINDOW_MS = 30 * 60 * 1000;
+
+interface FXMacroResponse {
+  currency: string;
+  timezone: string;
+  data: FXMacroEvent[];
+}
+
+interface FXMacroEvent {
+  release: string;
+  name: string;
+  announcement_datetime?: number;
+  announcement_datetime_utc?: string;
+  release_date_confirmed: boolean;
+  event_importance: string;
+  market_tier: number;
+  id?: string;
+}
 
 export interface NewsEvent {
   id: string;
-  title: string;
-  country: string;
-  date: string;
-  impact: string;
-  forecast: string;
-  previous: string;
+  name: string;
   timestamp: number;
 }
 
@@ -21,13 +33,11 @@ export class NewsService {
 
   async fetchNews(): Promise<void> {
     try {
-      logger.info('Fetching economic calendar from ForexFactory...');
-      const response = await fetch(FOREX_FACTORY_URL, {
+      logger.info('Fetching economic calendar from FXMacroData...');
+      const response = await fetch(FXMACRODATA_URL, {
         method: 'GET',
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
           'Accept': 'application/json',
-          'Cache-Control': 'no-cache',
         },
       });
 
@@ -35,50 +45,55 @@ export class NewsService {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as FXMacroResponse;
 
-      if (!Array.isArray(data)) {
-        throw new Error('Invalid response format: expected array');
+      if (!data?.data || !Array.isArray(data.data)) {
+        throw new Error('Invalid response format: expected data array');
       }
 
       const now = Date.now();
       const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
 
-      this.highImpactNews = data
-        .filter((event: any) => {
-          return event.country === 'USD' && 
-                 event.impact === 'High' &&
-                 event.date &&
-                 !isNaN(new Date(event.date).getTime());
+      this.highImpactNews = data.data
+        .filter((event: FXMacroEvent) => {
+          const isHighImpact = event.event_importance === 'high' || event.market_tier === 1;
+          const isConfirmed = event.release_date_confirmed === true;
+          const hasValidTime = event.announcement_datetime || event.announcement_datetime_utc;
+          return isHighImpact && isConfirmed && hasValidTime;
         })
-        .map((event: any) => ({
-          id: event.id || Math.random().toString(36).substring(7),
-          title: event.title || event.event || 'Unknown Event',
-          country: event.country,
-          date: event.date,
-          impact: event.impact,
-          forecast: event.forecast || '',
-          previous: event.previous || '',
-          timestamp: new Date(event.date).getTime(),
-        }))
+        .map((event: FXMacroEvent) => {
+          let timestamp: number;
+          if (event.announcement_datetime) {
+            timestamp = event.announcement_datetime * 1000;
+          } else if (event.announcement_datetime_utc) {
+            timestamp = new Date(event.announcement_datetime_utc).getTime();
+          } else {
+            timestamp = now;
+          }
+          return {
+            id: event.id || event.release || Math.random().toString(36).substring(7),
+            name: event.name || event.release || 'Unknown Event',
+            timestamp,
+          };
+        })
         .filter((event: NewsEvent) => {
           return event.timestamp >= now && event.timestamp <= now + oneWeekMs;
         });
 
       this.highImpactNews.sort((a, b) => a.timestamp - b.timestamp);
-      this.lastFetchTime = now;
+      this.lastFetchTime = Date.now();
       this.fetchError = null;
 
       logger.info(`Loaded ${this.highImpactNews.length} high-impact USD news events for this week`);
       if (this.highImpactNews.length > 0) {
         const nextNews = this.highImpactNews[0];
-        logger.info(`Next high-impact news: ${nextNews.title} at ${new Date(nextNews.timestamp).toISOString()}`);
+        logger.info(`Next high-impact news: ${nextNews.name} at ${new Date(nextNews.timestamp).toISOString()}`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.fetchError = message;
       this.highImpactNews = [];
-      logger.warn(`Failed to fetch economic calendar: ${message}. News embargo disabled.`);
+      logger.warn(`[WARN] FXMacroData API unavailable: ${message}. News embargo disabled.`);
     }
   }
 
@@ -98,13 +113,14 @@ export class NewsService {
     return false;
   }
 
-  getNextHighImpactNews(): { title: string; timestamp: number } | null {
-    if (this.highImpactNews.length === 0) {
+  getNextHighImpactNews(): { name: string; timestamp: number } | null {
+    const confirmed = this.highImpactNews.filter(n => n.timestamp > Date.now());
+    if (confirmed.length === 0) {
       return null;
     }
-    const next = this.highImpactNews[0];
+    const next = confirmed[0];
     return {
-      title: next.title,
+      name: next.name,
       timestamp: next.timestamp,
     };
   }

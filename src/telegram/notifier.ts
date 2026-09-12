@@ -380,7 +380,7 @@ export class TelegramNotifier {
         const nextNews = this.newsService.getNextHighImpactNews();
         if (nextNews) {
           const nextNewsTime = new Date(nextNews.timestamp).toISOString().replace('T', ' ').substring(0, 19);
-          statusLines.push(`📰 <b>Next USD High-Impact News:</b> ${nextNews.title} at ${nextNewsTime} UTC`);
+          statusLines.push(`📰 <b>Next USD High-Impact News:</b> ${nextNews.name} at ${nextNewsTime} UTC`);
         } else {
           const fetchError = this.newsService.getFetchError();
           if (fetchError) {

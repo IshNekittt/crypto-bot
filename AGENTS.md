@@ -256,14 +256,14 @@ public calculateLevels(
 
 | Component | Detail |
 |-----------|--------|
-| **Source** | ForexFactory public JSON: `https://nfs.faireconomy.media/ff_calendar_thisweek.json` |
-| **Filter** | `country === 'USD'` AND `impact === 'High'` |
-| **Cache** | In-memory array of `NewsEvent { title, timestamp }` for current week (±7 days) |
+| **Source** | FXMacroData API: `https://api.fxmacrodata.com/v1/calendar/usd` (no API key, 100 req/day free) |
+| **Filter** | `event_importance === 'high'` AND `release_date_confirmed === true` (or `market_tier === 1`) |
+| **Cache** | In-memory array of `NewsEvent { name, timestamp }` for current week (±7 days) |
 | **Refresh** | Daily at 00:00 UTC (via macro context refresher) + at startup |
 | **Embargo Window** | ±30 minutes (configurable via `EMBARGO_WINDOW_MS = 30 * 60 * 1000`) |
+| **Time Source** | `event.announcement_datetime * 1000` (Unix seconds) or `event.announcement_datetime_utc` (ISO string) |
 | **Method** | `isNewsEmbargo(ts: number): boolean` — returns `true` if `ts` within ±30 min of any cached high-impact USD event |
-| **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws |
-| **Cloudflare 429 Fix** | Browser headers (`User-Agent`, `Accept`, `Cache-Control: no-cache`) to bypass Cloudflare 429 rate limiting on ForexFactory | `src/services/newsService.ts:25-31` |
+| **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws (fail-open) |
 
 **Integration Points**:
 
@@ -281,7 +281,7 @@ public calculateLevels(
    - `getNextHighImpactNews()` → shows next USD high-impact event or "None for today"
 
 **Tests** (`tests/newsService.test.ts`, `tests/strategyEngine.test.ts`):
-- Filtering: only USD High impact events stored
+- Filtering: only high impact, confirmed events stored
 - Boundary checks: 13:29:59→false, 13:30:00→true, 14:30:00→true, 14:30:01→false
 - Resilience: network/HTTP/parse errors → empty cache + warn, no crash
 - Engine integration: embargo blocks scan, logs message, doesn't call evaluate
