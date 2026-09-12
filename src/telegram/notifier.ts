@@ -7,6 +7,7 @@ import { BybitClient } from "../api/bybitClient";
 import { RiskManager } from "../risk/riskManager";
 import { ExecutionEngine } from "../execution/executionEngine";
 import { StrategyEngine } from "../engine/strategyEngine";
+import { NewsService } from "../services/newsService";
 
 export class TelegramNotifier {
   readonly bot: Telegraf;
@@ -18,6 +19,7 @@ export class TelegramNotifier {
   private riskManager: RiskManager | null = null;
   private executionEngine: ExecutionEngine | null = null;
   private engines: StrategyEngine[] | null = null;
+  private newsService: NewsService | null = null;
 
   setPendingTradeManager(manager: PendingTradeManager): void {
     this.pendingTradeManager = manager;
@@ -25,6 +27,10 @@ export class TelegramNotifier {
 
   setBackupService(service: BackupService): void {
     this.backupService = service;
+  }
+
+  setNewsService(service: NewsService): void {
+    this.newsService = service;
   }
 
   setLiveTestDependencies(deps: {
@@ -323,7 +329,7 @@ export class TelegramNotifier {
       }
     });
 
-    // Register /status command for system diagnostics
+// Register /status command for system diagnostics
     this.bot.command("status", async (ctx) => {
       if (!this.engines || this.engines.length === 0) {
         await ctx.reply("❌ No strategy engines initialized");
@@ -367,11 +373,27 @@ export class TelegramNotifier {
             ""
           );
         }
-    }
+      }
 
-    const text = statusLines.join("\n");
-    await ctx.reply(text, { parse_mode: "HTML" });
-  } catch (error) {
+      // News Embargo info
+      if (this.newsService) {
+        const nextNews = this.newsService.getNextHighImpactNews();
+        if (nextNews) {
+          const nextNewsTime = new Date(nextNews.timestamp).toISOString().replace('T', ' ').substring(0, 19);
+          statusLines.push(`📰 <b>Next USD High-Impact News:</b> ${nextNews.title} at ${nextNewsTime} UTC`);
+        } else {
+          const fetchError = this.newsService.getFetchError();
+          if (fetchError) {
+            statusLines.push(`📰 <b>News:</b> Calendar unavailable (${fetchError})`);
+          } else {
+            statusLines.push(`📰 <b>Next USD High-Impact News:</b> None for today`);
+          }
+        }
+      }
+
+      const text = statusLines.join("\n");
+      await ctx.reply(text, { parse_mode: "HTML" });
+    } catch (error) {
       logger.error(
         `Failed to generate status report: ${error instanceof Error ? error.message : String(error)}`
       );

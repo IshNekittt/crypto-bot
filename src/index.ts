@@ -16,6 +16,7 @@ import { logger } from './utils/logger';
 import { PatternRecognizer } from './smc/patternRecognizer';
 import { PendingTradeManager } from './engine/pendingTradeManager';
 import { BackupService } from './services/backupService';
+import { NewsService } from './services/newsService';
 
 function setupGlobalErrorHandlers(): void {
   async function handleFatalCrash(type: 'UNCAUGHT EXCEPTION' | 'UNHANDLED REJECTION', errorOrReason: unknown): Promise<void> {
@@ -88,6 +89,11 @@ async function main(): Promise<void> {
   // Initialize BackupService early for DI into TelegramNotifier
   const backupService = new BackupService(db, notifier);
   notifier.setBackupService(backupService);
+
+  // Initialize NewsService for economic calendar and embargo
+  const newsService = new NewsService();
+  await newsService.fetchNews();
+  notifier.setNewsService(newsService);
 
   // Register Telegram action handlers for approve/reject
   notifier.bot.action(/^approve_(.+)$/, async (ctx) => {
@@ -226,6 +232,7 @@ async function main(): Promise<void> {
       patternRecognizer,
       autoTrading: config.autoTrading,
       pendingTradeManager,
+      newsService,
     }));
   }
 
@@ -301,7 +308,7 @@ async function main(): Promise<void> {
 
     const timeout = setTimeout(async () => {
       try {
-        logger.info('Starting daily macro context refresh...');
+        logger.info('Starting daily macro context and news refresh...');
         
         // Sync server time before macro refresh to prevent clock drift
         try {
@@ -309,6 +316,14 @@ async function main(): Promise<void> {
           logger.info(`[Clock Drift] Time synced: offset=${timeSync.offsetMs}ms, roundTrip=${timeSync.roundTripMs}ms`);
         } catch (timeError) {
           logger.warn(`[Clock Drift] Failed to sync server time: ${timeError instanceof Error ? timeError.message : String(timeError)}`);
+        }
+        
+        // Refresh news calendar
+        try {
+          await newsService.fetchNews();
+          logger.info('Economic calendar refreshed');
+        } catch (newsError) {
+          logger.warn(`Failed to refresh economic calendar: ${newsError instanceof Error ? newsError.message : String(newsError)}`);
         }
         
         for (const symbol of config.symbols) {
@@ -321,7 +336,7 @@ async function main(): Promise<void> {
           }
         }
       } catch (error) {
-        logger.error(`Error during macro context refresh: ${error instanceof Error ? error.message : String(error)}`);
+        logger.error(`Error during daily refresh: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
         // Schedule next refresh (24 hours)
         startMacroContextRefresher();

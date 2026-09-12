@@ -7,6 +7,7 @@ import { PositionPlan, RiskManager } from '../risk/riskManager';
 import { ScenarioRouter } from './scenarioRouter';
 import { TelegramNotifier } from '../telegram/notifier';
 import { PendingTradeManager } from './pendingTradeManager';
+import { NewsService } from '../services/newsService';
 import { InstrumentInfo, StrategyState, Timeframe } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
@@ -33,6 +34,7 @@ export interface StrategyEngineDeps {
   readonly patternRecognizer: any;
   readonly autoTrading: boolean;
   readonly pendingTradeManager: PendingTradeManager;
+  readonly newsService: NewsService;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -400,6 +402,12 @@ export class StrategyEngine {
       return;
     }
     this.lastProcessedCandleTimestamp = candleTimestamp;
+
+    // News Embargo check: skip scan if high-impact USD news is within 30 minutes
+    if (this.deps.newsService.isNewsEmbargo(candleTimestamp)) {
+      logger.info(`[${this.symbol}] 15m candle closed, but HIGH IMPACT NEWS EMBARGO is active. Skipping scan.`);
+      return;
+    }
 
     const result = await this.scenarioRouter.evaluate(candles15m, candles4h, candleTimestamp, this.mitigatedZones);
 
