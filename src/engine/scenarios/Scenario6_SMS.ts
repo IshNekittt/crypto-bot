@@ -71,23 +71,23 @@ export class Scenario6_SMS extends BaseScenario {
 
     // Entry at 0.5 (Equilibrium) of the SMS Order Block
     const entry = smsOb.top.plus(smsOb.bottom).dividedBy(2);
-    const atr15m = patternData.atr15m || new Decimal('0.01');
-    const offset = atr15m.mul(0.5);
 
-    // CRITICAL: Ensure SL is on correct side of Entry regardless of OB top/bottom convention
-    // BULLISH (Long): SL must be BELOW entry. Use min(smsOb.bottom, entry) - offset
-    // BEARISH (Short): SL must be ABOVE entry. Use max(smsOb.top, entry) + offset
-    const sl = expectedDirection === 'BULLISH'
-      ? Decimal.min(smsOb.bottom, entry).minus(offset)
-      : Decimal.max(smsOb.top, entry).plus(offset);
-    const tp = expectedDirection === 'BULLISH'
-      ? entry.plus(entry.minus(sl).mul(3))
-      : entry.minus(sl.minus(entry).mul(3));
+    // Use base class calculateLevels with correct trade direction (expectedDirection)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: smsOb.top,
+        bottom: smsOb.bottom,
+        direction: expectedDirection, // zone direction = trade direction
+      },
+      expectedDirection, // trade direction = CHoCH direction
+      patternData.atr15m || new Decimal('0.01'),
+    );
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     this.setReason(`SMS: ${sms.direction} failure swing + ${expectedDirection} CHoCH + SMS OB 0.5 entry`);

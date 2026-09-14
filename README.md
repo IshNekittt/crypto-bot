@@ -83,36 +83,12 @@ public calculateLevels(
 - **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
 - **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
 - `Decimal.min/max` handles inverted zones automatically
-- Used by Scenarios 1, 5, 6, 10, 11 (all bidirectional scenarios)
+- Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - 16 dedicated tests verify geometry: 4 scenarios × 2 directions × 2 zone orientations
 
 ---
 
-## 📰 News Filter (News Embargo) — NEW v2026-09-12
-
-**Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
-
-**Solution**: **News Embargo Filter** — blocks all trade scanning ±30 minutes around high-impact USD news.
-
-| Component | Detail |
-|-----------|--------|
-| **Source** | ForexFactory public JSON: `https://nfs.faireconomy.media/ff_calendar_thisweek.json` |
-| **Filter** | `country === 'USD'` AND `impact === 'High'` |
-| **Cache** | In-memory array of `NewsEvent { title, timestamp }` for current week (±7 days) |
-| **Refresh** | Daily at 00:00 UTC (via macro context refresher) + at startup |
-| **Embargo Window** | ±30 minutes (configurable via `EMBARGO_WINDOW_MS = 30 * 60 * 1000`) |
-| **Check** | In `StrategyEngine.process()` (15m candle close): `if (newsService.isNewsEmbargo(candleTimestamp)) → skip scan` |
-| **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws |
-
-**Telegram /status**:
-```
-📰 Next USD High-Impact News: NFP at 2026-09-15 14:00:00 UTC
-```
-or `None for today` / error state.
-
----
-
-## 📰 News Filter (News Embargo) — NEW v2026-09-12
+## 📰 News Filter (News Embargo) — v2026-09-12
 
 **Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
 

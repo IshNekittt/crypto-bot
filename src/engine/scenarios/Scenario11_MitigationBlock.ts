@@ -174,28 +174,27 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       return false;
     }
 
-    const lastClose = new Decimal(retestCandle.close);
+const lastClose = new Decimal(retestCandle.close);
 
-    // Entry at 0.5 (Equilibrium) of Mitigation Block
-    // Enter at market on retest candle close
+    // Entry at market on retest candle close
     const entry = lastClose;
-    const atr15m = patternData.atr15m || new Decimal('0.01');
-    const offset = atr15m.mul(0.5);
 
-    // CRITICAL: Ensure SL is on correct side of Entry regardless of MB top/bottom convention
-    // BULLISH (Long): SL must be BELOW entry. Use min(mbBottom, entry) - offset
-    // BEARISH (Short): SL must be ABOVE entry. Use max(mbTop, entry) + offset
-    const sl = expectedChochDirection === 'BULLISH'
-      ? Decimal.min(mbBottom, entry).minus(offset)
-      : Decimal.max(mbTop, entry).plus(offset);
-    const tp = expectedChochDirection === 'BULLISH'
-      ? entry.plus(entry.minus(sl).mul(3))
-      : entry.minus(sl.minus(entry).mul(3));
+    // Use base class calculateLevels with correct trade direction
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: mbTop,
+        bottom: mbBottom,
+        direction: expectedChochDirection, // zone direction = trade direction
+      },
+      expectedChochDirection, // trade direction = CHoCH direction after SMS
+      patternData.atr15m || new Decimal('0.01'),
+    );
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     this.setReason(`Mitigation Block: ${sms.direction} SMS (strict) + ${expectedChochDirection} CHoCH + MB 0.5 retest`);

@@ -243,10 +243,49 @@ public calculateLevels(
 - **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
 - **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
 - `Decimal.min/max` handles inverted zones automatically
-- Used by Scenarios 1, 5, 6, 10, 11 (all bidirectional scenarios)
+- Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - Tests call this method directly — no full pattern recognition needed
 
-### 6.6 News Filter (News Embargo) — `src/services/newsService.ts` — **NEW v2026-09-12**
+### 6.6 Strict Stop-Loss Calculation — `BaseScenario.calculateLevels()` — **NEW v2026-09-10**
+
+**Problem**: Zone objects (OB, FVG, Breaker, MB) can have arbitrary `top`/`bottom` ordering (not guaranteed `top > bottom`). Naive SL formulas like `zone.bottom - offset` fail when zone is inverted.
+
+**Solution**: Centralized `BaseScenario.calculateLevels()` method — single source of truth for all scenarios with zone-based entries.
+
+```typescript
+// In BaseScenario (src/engine/baseScenario.ts)
+public calculateLevels(
+  entry: Decimal,
+  zone: { top: Decimal; bottom: Decimal; direction: 'BULLISH' | 'BEARISH' },
+  direction: 'BULLISH' | 'BEARISH',
+  atr: Decimal,
+  rr: Decimal = new Decimal(3),
+  offsetMultiplier: Decimal = new Decimal(0.5)
+): TradeLevels {
+  const offset = atr.mul(offsetMultiplier);
+  
+  // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
+  // BULLISH (Long): SL must be BELOW entry. Use min(zone.bottom, entry) - offset
+  // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, entry) + offset
+  const sl = direction === 'BULLISH'
+    ? Decimal.min(zone.bottom, entry).minus(offset)
+    : Decimal.max(zone.top, entry).plus(offset);
+  const tp = direction === 'BULLISH'
+    ? entry.plus(entry.minus(sl).mul(rr))
+    : entry.minus(sl.minus(entry).mul(rr));
+
+  return { entry, stopLoss: sl, takeProfit: tp };
+}
+```
+
+**Key invariants guaranteed by this formula:**
+- **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
+- **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
+- `Decimal.min/max` handles inverted zones automatically
+- Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
+- Tests call this method directly — no full pattern recognition needed
+
+### 6.7 News Filter (News Embargo) — `src/services/newsService.ts` — **NEW v2026-09-12** — `src/services/newsService.ts` — **NEW v2026-09-12**
 
 **Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
 

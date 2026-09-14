@@ -271,24 +271,24 @@ export class Scenario10_BreakerBlock extends BaseScenario {
 
     // Entry at 0.5 (Equilibrium) of Breaker Block
     const entry = breakerTop.plus(breakerBottom).dividedBy(2);
-    const atr15m = patternData.atr15m || new Decimal('0.01');
-    const offset = atr15m.mul(0.5);
 
-    // CRITICAL: Ensure SL is on correct side of Entry regardless of Breaker Block top/bottom convention
-    // BULLISH (Long): SL must be BELOW entry. Use min(breakerBottom, entry) - offset
-    // BEARISH (Short): SL must be ABOVE entry. Use max(breakerTop, entry) + offset
-    const sl = breakEvent.direction === 'BULLISH'
-      ? Decimal.min(breakerBottom, entry).minus(offset)
-      : Decimal.max(breakerTop, entry).plus(offset);
-    // TP: 2R instead of 3R for higher hit rate on Breaker Blocks
-    const tp = breakEvent.direction === 'BULLISH'
-      ? entry.plus(entry.minus(sl).mul(2))
-      : entry.minus(sl.minus(entry).mul(2));
+    // Use base class calculateLevels with correct trade direction (breakEvent.direction)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: breakerTop,
+        bottom: breakerBottom,
+        direction: breakEvent.direction, // zone direction = trade direction
+      },
+      breakEvent.direction, // trade direction = BOS direction
+      patternData.atr15m || new Decimal('0.01'),
+      new Decimal(2), // TP: 2R instead of 3R for higher hit rate on Breaker Blocks
+    );
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     this.setReason(`Breaker Block: ${brokenObDirection} OB (liquidity swept, fresh) broken by ${breakEvent.direction} BOS + FVG + mirror test at 0.5, target 2R`);

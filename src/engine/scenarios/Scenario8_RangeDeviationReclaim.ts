@@ -134,25 +134,32 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
 
     // SHORT entry at 0.5 (Equilibrium) of FVG
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
-    const atr15m = patternData.atr15m || new Decimal('0.01');
-    const sl = fvg.top.plus(atr15m.mul(0.5));
-    // For SHORT: TP = Entry - (SL - Entry) * 3 (target below entry)
-    const tp = entry.minus(sl.minus(entry).mul(3));
+
+    // Use base class calculateLevels with BEARISH direction (Short only)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: fvg.top,
+        bottom: fvg.bottom,
+        direction: 'BEARISH',
+      },
+      'BEARISH',
+      patternData.atr15m || new Decimal('0.01'),
+    );
 
     // Verify R:R >= 1:3
-    const risk = sl.minus(entry);
-    const reward = entry.minus(tp);
+    const risk = levels.stopLoss.minus(entry);
+    const reward = entry.minus(levels.takeProfit);
     if (reward.div(risk).lt(3)) {
       this.logRejection(`R:R < 1:3`);
       Scenario8_RangeDeviationReclaim.rejectionStats.rr++;
       return false;
     }
 
-    // First target: 0.5 Range (equilibrium), Second target: Range Low
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     // Set zone details for mitigation tracking (the FVG we entered from)

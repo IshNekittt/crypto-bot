@@ -151,13 +151,23 @@ export class Scenario2_FVGFill extends BaseScenario {
 
     // Entry at 0.5 of HTF FVG
     const entry = htfFvg.top.plus(htfFvg.bottom).dividedBy(2);
-    const sl = htfFvg.bottom.minus(new Decimal('0.001'));
-    const tp = entry.plus(entry.minus(sl).mul(3));
+
+    // Use base class calculateLevels with BULLISH direction (Long only)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: htfFvg.top,
+        bottom: htfFvg.bottom,
+        direction: 'BULLISH',
+      },
+      'BULLISH',
+      patternData.atr15m || new Decimal('0.01'),
+    );
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     this.setReason(`FVG Fill: HTF FVG 0.5 touch + liquidity context + 15m CHoCH`);

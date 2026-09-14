@@ -54,13 +54,23 @@ export class Scenario3_IDM extends BaseScenario {
 
     // Entry at 0.5 of the real OB
     const entry = realObs[0].top.plus(realObs[0].bottom).dividedBy(2);
-    const sl = realObs[0].bottom.minus(new Decimal('0.001'));
-    const tp = entry.plus(entry.minus(sl).mul(3));
+
+    // Use base class calculateLevels with BULLISH direction (Long only)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: realObs[0].top,
+        bottom: realObs[0].bottom,
+        direction: 'BULLISH',
+      },
+      'BULLISH',
+      patternData.atr15m || new Decimal('0.01'),
+    );
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     // Set zone details for mitigation tracking (the OB we entered from)

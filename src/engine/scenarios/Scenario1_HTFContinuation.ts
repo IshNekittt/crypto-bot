@@ -70,14 +70,23 @@ export class Scenario1_HTFContinuation extends BaseScenario {
 
     // Entry at 0.5 (Equilibrium) of FVG
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
-    const atr15m = patternData.atr15m || new Decimal('0.01');
-    const sl = fvg.bottom.minus(atr15m.mul(0.5));
-    const tp = entry.plus(entry.minus(sl).mul(3));
+
+    // Use base class calculateLevels with BULLISH direction (Long only)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: fvg.top,
+        bottom: fvg.bottom,
+        direction: 'BULLISH',
+      },
+      'BULLISH',
+      patternData.atr15m || new Decimal('0.01'),
+    );
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     // Set zone details for mitigation tracking (the FVG we entered from)

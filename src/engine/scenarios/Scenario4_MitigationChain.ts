@@ -143,14 +143,23 @@ export class Scenario4_MitigationChain extends BaseScenario {
     // Entry at 0.5 of OB
     const entry = patternData.tradingRange?.equilibrium || 
       trendObs[0].top.plus(trendObs[0].bottom).dividedBy(2);
-    
-    const sl = trendObs[0].bottom.minus(new Decimal('0.001'));
-    const tp = entry.plus(entry.minus(sl).mul(3));
+
+    // Use base class calculateLevels with BULLISH direction (Long only)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: trendObs[0].top,
+        bottom: trendObs[0].bottom,
+        direction: 'BULLISH',
+      },
+      'BULLISH',
+      patternData.atr15m || new Decimal('0.01'),
+    );
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry: levels.entry.toFixed(2),
+      stopLoss: levels.stopLoss.toFixed(2),
+      takeProfit: levels.takeProfit.toFixed(2),
     });
 
     this.setReason(`Mitigation Chain: OB 0.5 mitigation (BOS validated) + CHoCH continuation`);
