@@ -7,7 +7,7 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-194%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Tests](https://img.shields.io/badge/Tests-231%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
@@ -18,16 +18,16 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ## 🎯 Features at a Glance
 
-| Category             | Capability                                                                                                                                      |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| **11 SMC Scenarios** | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block |
-| **Risk Management**  | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement                     |
-| **Infrastructure**   | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                           |
-| **PnL Accuracy**     | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                     |
-| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                     |
+| Category             | Capability                                                                                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **11 SMC Scenarios** | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block    |
+| **Risk Management**  | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement                        |
+| **Infrastructure**   | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                              |
+| **PnL Accuracy**     | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                        |
+| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                         |
 | **News Filter**      | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via ForexFactory calendar, auto-refreshed daily at 00:00 UTC |
-| **Telegram UI**      | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                         |
-| **Security**         | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                             |
+| **Telegram UI**      | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                            |
+| **Security**         | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                                |
 
 ---
 
@@ -94,20 +94,22 @@ public calculateLevels(
 
 **Solution**: **News Embargo Filter** — blocks all trade scanning ±30 minutes around high-impact USD news.
 
-| Component | Detail |
-|-----------|--------|
-| **Source** | **FXMacroData API**: `https://api.fxmacrodata.com/v1/calendar/usd` (free, no API key, 100 req/day) |
-| **Filter** | `event_importance === 'high'` AND `release_date_confirmed === true` (or `market_tier === 1`) |
-| **Cache** | In-memory array of `NewsEvent { name, timestamp }` for current week (±7 days) |
-| **Refresh** | Daily at 00:00 UTC (via macro context refresher) + at startup |
-| **Embargo Window** | ±30 minutes (configurable via `EMBARGO_WINDOW_MS = 30 * 60 * 1000`) |
-| **Check** | In `StrategyEngine.process()` (15m candle close): `if (newsService.isNewsEmbargo(candleTimestamp)) → skip scan` |
-| **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws (fail-open) |
+| Component          | Detail                                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| **Source**         | **FXMacroData API**: `https://api.fxmacrodata.com/v1/calendar/usd` (free, no API key, 100 req/day)              |
+| **Filter**         | `event_importance === 'high'` AND `release_date_confirmed === true` (or `market_tier === 1`)                    |
+| **Cache**          | In-memory array of `NewsEvent { name, timestamp }` for current week (±7 days)                                   |
+| **Refresh**        | Daily at 00:00 UTC (via macro context refresher) + at startup                                                   |
+| **Embargo Window** | ±30 minutes (configurable via `EMBARGO_WINDOW_MS = 30 * 60 * 1000`)                                             |
+| **Check**          | In `StrategyEngine.process()` (15m candle close): `if (newsService.isNewsEmbargo(candleTimestamp)) → skip scan` |
+| **Resilience**     | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws (fail-open)                               |
 
 **Telegram /status**:
+
 ```
 📰 Next USD High-Impact News: NFP at 2026-09-15 14:00:00 UTC
 ```
+
 or `None for today` / error state.
 
 ---
@@ -118,19 +120,20 @@ or `None for today` / error state.
 
 **Solution**: **FundingMonitorService** — independent passive service polling Bybit tickers every 30 min for funding rates.
 
-| Component | Detail |
-|-----------|--------|
-| **Source** | Bybit V5 `getTickers({ category: 'linear' })` |
-| **Poll Interval** | 30 minutes |
-| **Tracked Symbols** | `FUNDING_MONITOR_SYMBOLS` (default: `BTCUSDT,ETHUSDT,SOLUSDT`) |
-| **Alert Threshold** | `FUNDING_ALERT_THRESHOLD=0.0` — rate ≤ 0 triggers alert |
-| **Restore Threshold** | `FUNDING_RESTORE_THRESHOLD=0.0001` — rate ≥ +0.01% triggers restore |
-| **State Tracking** | Per-symbol `isAlerted` boolean to prevent spam |
-| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nМонета: {symbol}\nСтавка: {rate}%\nРекомендуется закрыть арбитраж!` |
-| **Telegram Alert (Restore)** | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate}% (APY: ~{apy}%)\nМожно снова открывать арбитраж!` |
-| **Public API** | `getCurrentRates(): Map<string, Decimal>` for `/status` command |
+| Component                     | Detail                                                                                                      |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **Source**                    | Bybit V5 `getTickers({ category: 'linear' })`                                                               |
+| **Poll Interval**             | 30 minutes                                                                                                  |
+| **Tracked Symbols**           | `FUNDING_MONITOR_SYMBOLS` (default: `BTCUSDT,ETHUSDT,SOLUSDT`)                                              |
+| **Alert Threshold**           | `FUNDING_ALERT_THRESHOLD=0.0` — rate ≤ 0 triggers alert                                                     |
+| **Restore Threshold**         | `FUNDING_RESTORE_THRESHOLD=0.0001` — rate ≥ +0.01% triggers restore                                         |
+| **State Tracking**            | Per-symbol `isAlerted` boolean to prevent spam                                                              |
+| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nМонета: {symbol}\nСтавка: {rate}%\nРекомендуется закрыть арбитраж!`                    |
+| **Telegram Alert (Restore)**  | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate}% (APY: ~{apy}%)\nМожно снова открывать арбитраж!` |
+| **Public API**                | `getCurrentRates(): Map<string, Decimal>` for `/status` command                                             |
 
 **Integration**:
+
 - Conditionally created if `ENABLE_FUNDING_MONITOR=true` and symbols configured
 - Started via `fundingMonitor.start()` in bootstrap
 - Graceful shutdown via `fundingMonitor.stop()`
@@ -188,33 +191,33 @@ docker compose up -d
 
 ## ⚙️ Environment Variables
 
-| Variable                           | Required | Default | Description                                      |
-| ---------------------------------- | :------: | :-----: | ------------------------------------------------ |
-| **BYBIT_API_KEY**                  |    ✅    |    —    | Bybit API Key                                    |
-| **BYBIT_API_SECRET**               |    ✅    |    —    | Bybit API Secret                                 |
-| **SYMBOLS**                        |    ✅    |    —    | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`       |
-| **DATABASE_URL**                   |    ✅    |    —    | Supabase Direct Connection string                |
-| **TELEGRAM_BOT_TOKEN**             |    ✅    |    —    | BotFather token                                  |
-| **TELEGRAM_CHAT_ID**               |    ✅    |    —    | Your numeric chat ID (security)                  |
-| **DEMO_TRADING**                   |          | `true`  | `true` = Demo, `false` = Mainnet                 |
-| **TESTNET**                        |          | `false` | Ignored if `DEMO_TRADING=true`                   |
-| **RISK_PERCENT**                   |          |   `2`   | Base risk per trade (%)                          |
-| **REDUCED_RISK_PERCENT**           |          |   `1`   | Risk after 3 consecutive losses (%)              |
-| **LEVERAGE**                       |          |  `10`   | Isolated margin leverage                         |
-| **AUTO_TRADING**                   |          | `false` | `true` = auto-execute, `false` = manual approval |
-| **TRADE_APPROVAL_TIMEOUT_MINUTES** |          |   `5`   | Approval window for manual trades                |
-| **HISTORY_CANDLES**                |          |  `200`  | 15m/4H history (max 1000)                        |
-| **MACRO_CANDLES**                  |          | `1000`  | 1W/1D macro context (max 1000)                   |
-| **LTF_TIMEFRAME**                  |          |  `15`   | Lower timeframe (15m)                            |
-| **HTF_TIMEFRAME**                  |          |  `240`  | Higher timeframe (4H)                            |
-| **ENABLE_LIVE_TEST_ORDERS**        |          | `false` | Enable `/test_live_order` (real Demo orders)     |
-| **ACTIVE_SCENARIOS**               |          | `1-11`  | Comma-separated: `1,2,3,5,7`                     |
-| **LOG_LEVEL**                      |          | `info`  | `debug`, `info`, `warn`, `error`                 |
-| **BACKUP_PASSWORD**                |          |    —    | AES-256-CBC encryption password for backups      |
-| **ENABLE_FUNDING_MONITOR**         |          | `false` | Enable funding rate monitoring                   |
-| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates |
-| **FUNDING_ALERT_THRESHOLD**        |          | `0.0`   | Alert when funding rate ≤ this value             |
-| **FUNDING_RESTORE_THRESHOLD**      |          | `0.0001`| Restore alert when funding rate ≥ this value     |
+| Variable                           | Required |          Default          | Description                                      |
+| ---------------------------------- | :------: | :-----------------------: | ------------------------------------------------ |
+| **BYBIT_API_KEY**                  |    ✅    |             —             | Bybit API Key                                    |
+| **BYBIT_API_SECRET**               |    ✅    |             —             | Bybit API Secret                                 |
+| **SYMBOLS**                        |    ✅    |             —             | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`       |
+| **DATABASE_URL**                   |    ✅    |             —             | Supabase Direct Connection string                |
+| **TELEGRAM_BOT_TOKEN**             |    ✅    |             —             | BotFather token                                  |
+| **TELEGRAM_CHAT_ID**               |    ✅    |             —             | Your numeric chat ID (security)                  |
+| **DEMO_TRADING**                   |          |          `true`           | `true` = Demo, `false` = Mainnet                 |
+| **TESTNET**                        |          |          `false`          | Ignored if `DEMO_TRADING=true`                   |
+| **RISK_PERCENT**                   |          |            `2`            | Base risk per trade (%)                          |
+| **REDUCED_RISK_PERCENT**           |          |            `1`            | Risk after 3 consecutive losses (%)              |
+| **LEVERAGE**                       |          |           `10`            | Isolated margin leverage                         |
+| **AUTO_TRADING**                   |          |          `false`          | `true` = auto-execute, `false` = manual approval |
+| **TRADE_APPROVAL_TIMEOUT_MINUTES** |          |            `5`            | Approval window for manual trades                |
+| **HISTORY_CANDLES**                |          |           `200`           | 15m/4H history (max 1000)                        |
+| **MACRO_CANDLES**                  |          |          `1000`           | 1W/1D macro context (max 1000)                   |
+| **LTF_TIMEFRAME**                  |          |           `15`            | Lower timeframe (15m)                            |
+| **HTF_TIMEFRAME**                  |          |           `240`           | Higher timeframe (4H)                            |
+| **ENABLE_LIVE_TEST_ORDERS**        |          |          `false`          | Enable `/test_live_order` (real Demo orders)     |
+| **ACTIVE_SCENARIOS**               |          |          `1-11`           | Comma-separated: `1,2,3,5,7`                     |
+| **LOG_LEVEL**                      |          |          `info`           | `debug`, `info`, `warn`, `error`                 |
+| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups      |
+| **ENABLE_FUNDING_MONITOR**         |          |          `false`          | Enable funding rate monitoring                   |
+| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates             |
+| **FUNDING_ALERT_THRESHOLD**        |          |           `0.0`           | Alert when funding rate ≤ this value             |
+| **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value     |
 
 ---
 
@@ -243,6 +246,7 @@ docker compose pull && docker compose up -d  # Update base image + restart
 ```
 
 **docker-compose.yml** (single service with resource limits):
+
 ```yaml
 services:
   smc-bot:
@@ -256,7 +260,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 512M
 ```
 
