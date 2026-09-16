@@ -2,6 +2,7 @@ import { PostgresDatabase } from '../db/database';
 import { TelegramNotifier } from '../telegram/notifier';
 import { logger } from '../utils/logger';
 import { gzipSync } from 'zlib';
+import { createCipheriv, randomBytes } from 'crypto';
 
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -39,9 +40,22 @@ export class BackupService {
     return gzipSync(Buffer.from(csv, 'utf8'));
   }
 
+  private encryptBuffer(buffer: Buffer): Buffer {
+    const password = process.env.BACKUP_PASSWORD;
+    if (!password) {
+      throw new Error('BACKUP_PASSWORD not configured');
+    }
+    const key = Buffer.from(password.padEnd(32).slice(0, 32));
+    const iv = randomBytes(16);
+    const cipher = createCipheriv('aes-256-cbc', key, iv);
+    const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
+    return Buffer.concat([iv, encrypted]);
+  }
+
   private getBackupFilename(): string {
-    const date = new Date();
-    return `trades_backup_${date.getFullYear()}_${String(date.getMonth() + 1).padStart(2, '0')}_${String(date.getDate()).padStart(2, '0')}.csv.gz`;
+    const now = new Date();
+    const timestamp = now.toISOString().replace('T', '_').replace(/:/g, '-').split('.')[0];
+    return `trades_backup_${timestamp}.csv.enc`;
   }
 
   async runManualBackup(): Promise<void> {
@@ -72,13 +86,14 @@ export class BackupService {
     this.running = true;
     try {
       const buffer = await this.generateBackupBuffer();
+      const encryptedBuffer = this.encryptBuffer(buffer);
       const filename = this.getBackupFilename();
 
-      const success = await this.notifier.sendDocument(buffer, filename);
+      const success = await this.notifier.sendDocument(encryptedBuffer, filename);
       
       if (success) {
         const trades = await this.db.getAllTrades();
-        logger.info(`Backup completed: ${trades.length} trades, ${buffer.length} bytes compressed`);
+        logger.info(`Backup completed: ${trades.length} trades, ${buffer.length} bytes compressed, ${encryptedBuffer.length} bytes encrypted`);
       } else {
         throw new Error('Telegram sendDocument returned false');
       }
@@ -174,4 +189,8 @@ export class BackupService {
 
     return [headers.join(','), ...rows].join('\n');
   }
+}
+
+export function createBackupService(db: PostgresDatabase, notifier: TelegramNotifier): BackupService {
+  return new BackupService(db, notifier);
 }

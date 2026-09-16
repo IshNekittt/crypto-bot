@@ -5,6 +5,4 @@ data/*.db-shm
 data/*.db-wal
 .env
 .DS_Store
-Крипто-бот SMC.md
-Крипто-бот SMC эволюция.md
 data/*

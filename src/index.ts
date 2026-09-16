@@ -17,6 +17,7 @@ import { PatternRecognizer } from './smc/patternRecognizer';
 import { PendingTradeManager } from './engine/pendingTradeManager';
 import { BackupService } from './services/backupService';
 import { NewsService } from './services/newsService';
+import { FundingMonitorService } from './services/fundingMonitorService';
 
 function setupGlobalErrorHandlers(): void {
   async function handleFatalCrash(type: 'UNCAUGHT EXCEPTION' | 'UNHANDLED REJECTION', errorOrReason: unknown): Promise<void> {
@@ -296,6 +297,20 @@ async function main(): Promise<void> {
 
   backupService.start();
 
+  let fundingMonitor: FundingMonitorService | null = null;
+  if (config.enableFundingMonitor && config.fundingMonitorSymbols.length > 0) {
+    fundingMonitor = new FundingMonitorService(
+      client,
+      notifier,
+      config.fundingMonitorSymbols,
+      config.fundingAlertThreshold,
+      config.fundingRestoreThreshold
+    );
+    fundingMonitor.start();
+    notifier.setFundingMonitor(fundingMonitor);
+    logger.info('Funding monitor service started');
+  }
+
   // Daily macro context refresh at 00:00 UTC
   const startMacroContextRefresher = (): NodeJS.Timeout => {
     const now = Date.now();
@@ -361,6 +376,11 @@ async function main(): Promise<void> {
 
       backupService.stop();
       logger.info('Backup service stopped');
+
+      if (fundingMonitor) {
+        fundingMonitor.stop();
+        logger.info('Funding monitor service stopped');
+      }
 
       pendingTradeManager.cancelAll();
       logger.info('Pending trade manager cleared');

@@ -26,6 +26,10 @@ export interface BotConfig {
   readonly tradeApprovalTimeoutMinutes: number;
   readonly enableLiveTestOrders: boolean;
   readonly activeScenarios: number[];
+  readonly enableFundingMonitor: boolean;
+  readonly fundingMonitorSymbols: string[];
+  readonly fundingAlertThreshold: string;
+  readonly fundingRestoreThreshold: string;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -70,6 +74,26 @@ function parseActiveScenarios(raw: string | null): number[] {
     throw new Error('ACTIVE_SCENARIOS must contain valid scenario IDs (1-11), e.g. ACTIVE_SCENARIOS=3,4,5,7,8,9');
   }
   return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+function parseFundingSymbols(raw: string | null): string[] {
+  if (!raw || !raw.trim()) return [];
+  const symbols = [...new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter((s) => s.length > 0),
+  )];
+  return symbols;
+}
+
+function parseDecimalOrDefault(value: string | null, defaultValue: string, label: string): string {
+  const raw = value ?? defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} must be a valid number, got: "${raw}"`);
+  }
+  return raw;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
@@ -122,6 +146,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     throw new Error('DEMO_TRADING and TESTNET cannot both be true. DEMO_TRADING forces TESTNET=false.');
   }
 
+  const enableFundingMonitor = (optionalEnv(env, 'ENABLE_FUNDING_MONITOR') ?? 'false').toLowerCase() === 'true';
+  const fundingMonitorSymbols = parseFundingSymbols(optionalEnv(env, 'FUNDING_MONITOR_SYMBOLS'));
+  const fundingAlertThreshold = parseDecimalOrDefault(optionalEnv(env, 'FUNDING_ALERT_THRESHOLD'), '0.0', 'FUNDING_ALERT_THRESHOLD');
+  const fundingRestoreThreshold = parseDecimalOrDefault(optionalEnv(env, 'FUNDING_RESTORE_THRESHOLD'), '0.0001', 'FUNDING_RESTORE_THRESHOLD');
+
   return {
     apiKey: requireEnv(env, 'BYBIT_API_KEY'),
     apiSecret: requireEnv(env, 'BYBIT_API_SECRET'),
@@ -143,5 +172,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     tradeApprovalTimeoutMinutes: parseInt(optionalEnv(env, 'TRADE_APPROVAL_TIMEOUT_MINUTES') ?? '5', 10),
     enableLiveTestOrders: (optionalEnv(env, 'ENABLE_LIVE_TEST_ORDERS') ?? 'false').toLowerCase() === 'true',
     activeScenarios: parseActiveScenarios(optionalEnv(env, 'ACTIVE_SCENARIOS')),
+    enableFundingMonitor,
+    fundingMonitorSymbols,
+    fundingAlertThreshold,
+    fundingRestoreThreshold,
   };
 }

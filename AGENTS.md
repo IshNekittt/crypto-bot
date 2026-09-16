@@ -285,7 +285,35 @@ public calculateLevels(
 - Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - Tests call this method directly — no full pattern recognition needed
 
-### 6.7 News Filter (News Embargo) — `src/services/newsService.ts` — **NEW v2026-09-12** — `src/services/newsService.ts` — **NEW v2026-09-12**
+### 6.7 Dynamic Backtester Architecture — `src/backtest/run.ts` — **NEW v2026-09-15**
+
+**Problem**: Hardcoded '15m'/'240' timeframes and fixed 17280 candle count (180 days of 15m) prevented testing other timeframes. Cache filenames were hardcoded to '15', causing 5m cache to overwrite 15m cache.
+
+**Solution**: Fully dynamic backtester using config-driven timeframes.
+
+| Component | Detail |
+|-----------|--------|
+| **LTF/HTF Timeframes** | Read from `config.ltfTimeframe` / `config.htfTimeframe` (strings like '5', '15', '60') |
+| **Dynamic Candle Count** | `Math.ceil((180 * 24 * 60) / ltfMinutes)` → 51840 for 5m, 17280 for 15m, 7200 for 60m |
+| **Cache Filenames** | Dynamic: `BTCUSDT_5.json`, `BTCUSDT_15.json` (includes timeframe) |
+| **Dynamic Timeframes in API** | `config.ltfTimeframe as Timeframe` / `config.htfTimeframe as Timeframe` |
+| **Cache Key** | `getCachePath(symbol, timeframe)` uses timeframe in filename |
+| **ScenarioRouter** | Receives LTF/HTF candle arrays + candleTimestamp; no hardcoded '15'/'240' |
+
+**Removed Hardcoded Values:**
+- ❌ `'15'` / `'240'` strings everywhere
+- ❌ `17280` fixed candle count (180 days × 96 candles/day for 15m)
+- ❌ `'15'` in cache filenames (`BTCUSDT_15.json`)
+- ❌ Hardcoded '15m' / '4H' strings in log messages
+
+**Added Dynamic Calculations:**
+- ✅ `totalCandles = Math.ceil((180 * 24 * 60) / ltfMinutes)`
+- ✅ Cache filename: `getCachePath(symbol, timeframe)` → `BTCUSDT_5.json` / `BTCUSDT_60.json`
+- ✅ Dynamic log: `[SYMBOL] Starting backtest loop over 51840 5m candles...`
+- ✅ Progress: `candle ${i}/${candlesLtf.length} (${((i / candlesLtf.length) * 100).toFixed(1)}%)`
+- ✅ `runBacktestForSymbol` receives `ltfMinutes` parameter for dynamic calculations
+
+### 6.8 News Filter (News Embargo) — `src/services/newsService.ts` — **NEW v2026-09-12**
 
 **Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
 
@@ -324,6 +352,47 @@ public calculateLevels(
 - Boundary checks: 13:29:59→false, 13:30:00→true, 14:30:00→true, 14:30:01→false
 - Resilience: network/HTTP/parse errors → empty cache + warn, no crash
 - Engine integration: embargo blocks scan, logs message, doesn't call evaluate
+
+---
+
+### 6.9 Funding Monitor (Delta-Neutral Arbitrage) — `src/services/fundingMonitorService.ts` — **NEW v2026-09-16**
+
+**Problem**: Delta-neutral arbitrage positions (long spot + short perp) earn funding when rates are positive but lose money when rates turn negative. Need passive monitoring with alerts.
+
+**Solution**: **FundingMonitorService** — independent passive service polling Bybit tickers every 30 min for funding rates.
+
+**Implementation** (`src/services/fundingMonitorService.ts`):
+
+| Component | Detail |
+|-----------|--------|
+| **Source** | Bybit V5 `getTickers({ category: 'linear' })` |
+| **Poll Interval** | 30 minutes (`FUNDING_POLL_INTERVAL_MS = 30 * 60 * 1000`) |
+| **Tracked Symbols** | `FUNDING_MONITOR_SYMBOLS` (default: BTCUSDT,ETHUSDT,SOLUSDT) |
+| **Alert Threshold** | `FUNDING_ALERT_THRESHOLD=0.0` — rate ≤ 0 triggers alert |
+| **Restore Threshold** | `FUNDING_RESTORE_THRESHOLD=0.0001` — rate ≥ +0.01% triggers restore |
+| **State Tracking** | Per-symbol `isAlerted` boolean to prevent spam |
+| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nМонета: {symbol}\nСтавка: {rate*100}%\nРекомендуется закрыть арбитраж!` |
+| **Telegram Alert (Restore)** | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate*100}% (APY: ~{rate*3*365*100}%)\nМожно снова открывать арбитраж!` |
+| **Public API** | `getCurrentRates(): Map<string, Decimal>` for `/status` command |
+
+**Integration Points**:
+
+1. **Bootstrap** (`src/index.ts`):
+   - Conditionally created if `ENABLE_FUNDING_MONITOR=true` and symbols configured
+   - Started via `fundingMonitor.start()`
+   - Injected into `TelegramNotifier` via `notifier.setFundingMonitor()`
+
+2. **Graceful Shutdown** (`src/index.ts`):
+   - `fundingMonitor.stop()` in `shutdown()` handler
+
+3. **Telegram /status** (`src/telegram/notifier.ts`):
+   - Shows `📊 Funding: BTC: +0.0100% | ETH: +0.0150% | SOL: +0.0200%` or `Disabled`
+
+**Tests** (`tests/services/fundingMonitor.test.ts`):
+- Alert triggers when rate ≤ threshold and not already alerted
+- Restore triggers when rate ≥ restore threshold and was alerted
+- No duplicate alerts (state tracking)
+- `getCurrentRates()` returns cloned map
 
 ---
 
@@ -439,6 +508,12 @@ HTF_TIMEFRAME=240
 ENABLE_LIVE_TEST_ORDERS=false
 ACTIVE_SCENARIOS=1,2,3,4,5,6,7,8,9,10,11
 
+# Funding Monitor (delta-neutral arbitrage)
+ENABLE_FUNDING_MONITOR=false
+FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+FUNDING_ALERT_THRESHOLD=0.0
+FUNDING_RESTORE_THRESHOLD=0.0001
+
 # Logging
 LOG_LEVEL=info             # debug, info, warn, error
 ```
@@ -449,7 +524,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (194 tests, all green)
+npm test             # jest (221 tests, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -472,6 +547,7 @@ docker compose up -d
 9. **WS Watchdog** 3-min silence = force reconnect.
 10. **Daily clock sync** at 00:00 UTC + hourly in reconciliation.
 11. **SL calculation** uses `Decimal.min(zone.bottom, entry)` for Longs and `Decimal.max(zone.top, entry)` for Shorts — guarantees correct SL side regardless of zone top/bottom ordering.
+12. **Backtester is fully dynamic** — no hardcoded timeframes or candle counts; all derived from `config.ltfTimeframe` / `config.htfTimeframe`; cache filenames include timeframe.
 
 ---
 
@@ -509,7 +585,7 @@ CMD ["node", "dist/index.js"]
 - `TZ=UTC` — consistent timestamps for SMC killzones
 - `EXPOSE 3000` — health check endpoint for Render/load balancer
 
-### 13.2 docker-compose.yml
+### 13.2 docker-compose.yml (Single Service for Render/Oracle Cloud)
 
 ```yaml
 services:
@@ -521,11 +597,18 @@ services:
     ports:
       - "3000:3000"
     stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
 ```
 
 - **No volumes** — fully stateless (Supabase for persistence)
-- **Port 3000** — health check (`GET /health`) for Render
+- **Port 3000** — health check (`GET /health`) for Render/load balancer
 - **stop_grace_period: 30s** — matches `SIGTERM` handler in `index.ts`
+- **Resource limits**: 0.5 CPU / 512MB — fits Oracle Cloud Free Tier (ARM) or Render free tier
+- **Single `.env` file** with all configuration
 
 ### 13.3 Render Deployment (Recommended)
 
@@ -624,4 +707,4 @@ docker compose up -d --build
 
 ---
 
-_Last updated: 2026-09-10. All 211 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-09-16. All 221 tests green. Build passes. Enterprise-ready._

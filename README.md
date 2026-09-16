@@ -112,6 +112,32 @@ or `None for today` / error state.
 
 ---
 
+## 📊 Funding Monitor (Delta-Neutral Arbitrage) — v2026-09-16
+
+**Problem**: Delta-neutral arbitrage positions (long spot + short perp) earn funding when rates are positive but lose money when rates turn negative. Need passive monitoring with alerts.
+
+**Solution**: **FundingMonitorService** — independent passive service polling Bybit tickers every 30 min for funding rates.
+
+| Component | Detail |
+|-----------|--------|
+| **Source** | Bybit V5 `getTickers({ category: 'linear' })` |
+| **Poll Interval** | 30 minutes |
+| **Tracked Symbols** | `FUNDING_MONITOR_SYMBOLS` (default: `BTCUSDT,ETHUSDT,SOLUSDT`) |
+| **Alert Threshold** | `FUNDING_ALERT_THRESHOLD=0.0` — rate ≤ 0 triggers alert |
+| **Restore Threshold** | `FUNDING_RESTORE_THRESHOLD=0.0001` — rate ≥ +0.01% triggers restore |
+| **State Tracking** | Per-symbol `isAlerted` boolean to prevent spam |
+| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nМонета: {symbol}\nСтавка: {rate}%\nРекомендуется закрыть арбитраж!` |
+| **Telegram Alert (Restore)** | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate}% (APY: ~{apy}%)\nМожно снова открывать арбитраж!` |
+| **Public API** | `getCurrentRates(): Map<string, Decimal>` for `/status` command |
+
+**Integration**:
+- Conditionally created if `ENABLE_FUNDING_MONITOR=true` and symbols configured
+- Started via `fundingMonitor.start()` in bootstrap
+- Graceful shutdown via `fundingMonitor.stop()`
+- `/status` shows: `📊 Funding: BTC: +0.0100% | ETH: +0.0150% | SOL: +0.0200%` or `Disabled`
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -184,10 +210,17 @@ docker compose up -d
 | **ENABLE_LIVE_TEST_ORDERS**        |          | `false` | Enable `/test_live_order` (real Demo orders)     |
 | **ACTIVE_SCENARIOS**               |          | `1-11`  | Comma-separated: `1,2,3,5,7`                     |
 | **LOG_LEVEL**                      |          | `info`  | `debug`, `info`, `warn`, `error`                 |
+| **BACKUP_PASSWORD**                |          |    —    | AES-256-CBC encryption password for backups      |
+| **ENABLE_FUNDING_MONITOR**         |          | `false` | Enable funding rate monitoring                   |
+| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates |
+| **FUNDING_ALERT_THRESHOLD**        |          | `0.0`   | Alert when funding rate ≤ this value             |
+| **FUNDING_RESTORE_THRESHOLD**      |          | `0.0001`| Restore alert when funding rate ≥ this value     |
 
 ---
 
 ## 🐳 Docker Management Commands
+
+### Single Container (Development / Production)
 
 ```bash
 # ─── Image ───
@@ -207,23 +240,66 @@ docker compose up -d                   # Start (build if needed)
 docker compose up -d --build           # Rebuild + start
 docker compose down                    # Stop + remove
 docker compose pull && docker compose up -d  # Update base image + restart
+```
 
+**docker-compose.yml** (single service with resource limits):
+```yaml
+services:
+  smc-bot:
+    build: .
+    container_name: smc-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+```
+
+- **No volumes** — fully stateless (Supabase for persistence)
+- **Port 3000** — health check (`GET /health`) for Render/load balancer
+- **stop_grace_period: 30s** — matches `SIGTERM` handler in `index.ts`
+- **Resource limits**: 0.5 CPU / 512MB — fits Oracle Cloud Free Tier (ARM) or Render free tier
+- **Single `.env` file** with all configuration
+
+```bash
 # ─── Logs ───
-docker logs -f smc-bot                 # Follow logs
-docker logs --tail 100 smc-bot         # Last 100 lines
-docker logs --since 1h smc-bot         # Last hour
+docker logs -f smc-bot                   # Follow logs
+docker logs --tail 100 smc-bot           # Last 100 lines
+docker logs --since 1h smc-bot           # Last hour
 
 # ─── Lifecycle ───
-docker stop smc-bot                    # Graceful stop (30s SIGTERM)
-docker start smc-bot                   # Start existing
-docker restart smc-bot                 # Restart
-docker rm -f smc-bot                   # Force remove
+docker stop smc-bot                      # Graceful stop (30s SIGTERM)
+docker start smc-bot                     # Start existing
+docker restart smc-bot                   # Restart
+docker rm -f smc-bot                     # Force remove
 
 # ─── Debug ───
-docker exec -it smc-bot sh             # Shell into container
-docker inspect smc-bot                 # Container details
-docker stats smc-bot                   # Resource usage
+docker exec -it smc-bot sh               # Shell into container
+docker inspect smc-bot                   # Container details
+docker stats smc-bot                     # Resource usage
 ```
+
+---
+
+## 🔐 Backup Decryption
+
+Backup files are encrypted with AES-256-CBC (IV prepended, gzipped before encryption). The Node.js crypto format is not compatible with the standard `openssl` CLI tool.
+
+**Use the provided decrypt script:**
+
+```bash
+# Decrypt backup file (replace with actual password and filename)
+npm run decrypt ./trades_backup_2026-09-16_14-30-00.csv.enc YOUR_BACKUP_PASSWORD
+```
+
+This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same directory.
+
+> **Note**: The backup password is set via the `BACKUP_PASSWORD` environment variable. The encrypted file has a `.csv.enc` extension and includes a human-readable date in the filename (e.g., `trades_backup_2026-09-16_14-30-00.csv.enc`).
 
 ---
 
@@ -452,7 +528,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full 180-day backtest (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (211 tests)
+npm test             # Jest (221 tests)
 npm run test:watch   # Watch mode
 ```
 

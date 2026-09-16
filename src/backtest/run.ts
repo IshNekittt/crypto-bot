@@ -4,7 +4,7 @@ import { PatternRecognizer } from '../smc/patternRecognizer';
 import { ScenarioRouter } from '../engine/scenarioRouter';
 import { loadConfig } from '../config/env';
 import { logger } from '../utils/logger';
-import { Candle } from '../types';
+import { Candle, Timeframe } from '../types';
 import { InstrumentInfo } from './executionSimulator';
 import { Decimal } from 'decimal.js';
 import { loadCachedOrFetch, getTimeRangeForSixMonths } from './historyLoader';
@@ -22,10 +22,10 @@ function parseArgs(config: any): string[] {
   return config.symbols;
 }
 
-function cleanupMemory(candles15m: any[], candles4h: any[], router: any, _recognizer: any): void {
+function cleanupMemory(candlesLtf: any[], candlesHtf: any[], router: any, _recognizer: any): void {
   // Clear large arrays
-  if (candles15m) candles15m.length = 0;
-  if (candles4h) candles4h.length = 0;
+  if (candlesLtf) candlesLtf.length = 0;
+  if (candlesHtf) candlesHtf.length = 0;
   // Clear router and recognizer references
   if (router) {
     router.scenarios = [];
@@ -49,19 +49,20 @@ async function runBacktestForSymbol(
   symbol: string,
   instrument: InstrumentInfo,
   recognizer: PatternRecognizer,
-  candles15m: Candle[],
-  candles4h: Candle[]
+  candlesLtf: Candle[],
+  candlesHtf: Candle[],
+  ltfMinutes: number
 ): Promise<{ trades: TradeResult[]; maxDrawdown: Decimal }> {
   const state = getInitialState();
   const results: TradeResult[] = [];
   const mitigatedZones: MitigatedZone[] = [];
 
-  const fourHourMap = new Map<number, Candle>();
-  for (const c of candles4h) {
-    fourHourMap.set(c.timestamp, c);
+  const htfMap = new Map<number, Candle>();
+  for (const c of candlesHtf) {
+    htfMap.set(c.timestamp, c);
   }
 
-  const fourHourTimestamps = candles4h.map(c => c.timestamp).sort((a, b) => a - b);
+  const htfTimestamps = candlesHtf.map(c => c.timestamp).sort((a, b) => a - b);
 
   // Create router ONCE outside the loop (performance optimization)
   const router = new ScenarioRouter({
@@ -80,21 +81,21 @@ async function runBacktestForSymbol(
   // Silence all info/debug logs - only keep warn for progress
   logger.level = 'warn';
 
-  logger.warn(`[${symbol}] Starting backtest loop over ${candles15m.length} 15m candles...`);
+  logger.warn(`[${symbol}] Starting backtest loop over ${candlesLtf.length} ${ltfMinutes}m candles...`);
 
-  for (let i = 0; i < candles15m.length; i++) {
+  for (let i = 0; i < candlesLtf.length; i++) {
     // Progress logging every 1000 candles
     if (i % 1000 === 0) {
-      logger.warn(`[${symbol}] Backtest processing candle ${i}/${candles15m.length} (${((i / candles15m.length) * 100).toFixed(1)}%)`);
+      logger.warn(`[${symbol}] Backtest processing candle ${i}/${candlesLtf.length} (${((i / candlesLtf.length) * 100).toFixed(1)}%)`);
     }
 
-    const candle15m = candles15m[i];
-    const candleTime = candle15m.timestamp;
+    const candleLtf = candlesLtf[i];
+    const candleTime = candleLtf.timestamp;
 
     // HARD CHECK: If we have an open trade, ONLY check TP/SL. Skip ALL heavy math (router, patternRecognizer)
     if (state.openTrade) {
       if (state.openTrade.entryTime !== candleTime) {
-        const { state: stateAfterCheck, tradeResult, mitigatedZone } = checkAndCloseTrade(state, candle15m);
+        const { state: stateAfterCheck, tradeResult, mitigatedZone } = checkAndCloseTrade(state, candleLtf);
         Object.assign(state, stateAfterCheck);
         if (tradeResult) {
           results.push(tradeResult);
@@ -109,10 +110,10 @@ async function runBacktestForSymbol(
       }
     }
 
-    const valid4hTimestamps = fourHourTimestamps.filter(ts => ts <= candleTime);
-    const current4hCandles = valid4hTimestamps.map(ts => fourHourMap.get(ts)!).filter(Boolean);
+    const validHtfTimestamps = htfTimestamps.filter(ts => ts <= candleTime);
+    const currentHtfCandles = validHtfTimestamps.map(ts => htfMap.get(ts)!).filter(Boolean);
 
-    if (current4hCandles.length < 50) continue;
+    if (currentHtfCandles.length < 50) continue;
 
     // Cache pattern data - only rebuild when mitigated zones change or every CACHE_REBUILD_INTERVAL candles
     const shouldRebuildCache = 
@@ -123,12 +124,12 @@ async function runBacktestForSymbol(
     if (shouldRebuildCache) {
       // SLIDING WINDOW: Only pass last 200 LTF candles and last 50 HTF candles
       const ltfStart = Math.max(0, i - 200 + 1);
-      const currentLtfCandles = candles15m.slice(ltfStart, i + 1);
+      const currentLtfCandles = candlesLtf.slice(ltfStart, i + 1);
       
       // For HTF, we need last 50 candles up to current time
-      const htfEndIdx = current4hCandles.length - 1;
+      const htfEndIdx = currentHtfCandles.length - 1;
       const htfStartIdx = Math.max(0, htfEndIdx - 50 + 1);
-      const currentHtfWindow = current4hCandles.slice(htfStartIdx, htfEndIdx + 1);
+      const currentHtfWindow = currentHtfCandles.slice(htfStartIdx, htfEndIdx + 1);
 
       const routerResultForCache = await router.evaluate(
         currentLtfCandles,
@@ -164,7 +165,7 @@ async function runBacktestForSymbol(
 
           const { state: newState, tradeOpened } = openTrade(
             state,
-            candle15m,
+            candleLtf,
             entryDecimal,
             slDecimal,
             tpDecimal,
@@ -180,15 +181,15 @@ async function runBacktestForSymbol(
           }
         }
       } catch (err) {
-        logger.error(`[${symbol}] Backtest ERROR at index ${i} (${new Date(candleTime).toISOString()}) | Candle: O=${candle15m.open} H=${candle15m.high} L=${candle15m.low} C=${candle15m.close} V=${candle15m.volume} | Error: ${err instanceof Error ? err.message : String(err)}`);
+        logger.error(`[${symbol}] Backtest ERROR at index ${i} (${new Date(candleTime).toISOString()}) | Candle: O=${candleLtf.open} H=${candleLtf.high} L=${candleLtf.low} C=${candleLtf.close} V=${candleLtf.volume} | Error: ${err instanceof Error ? err.message : String(err)}`);
         logger.error(`[${symbol}] Stack: ${err instanceof Error ? err.stack : 'no stack'}`);
         continue;
       }
   }
 
-  logger.info(`[${symbol}] Backtest finished successfully. Processed ${candles15m.length} candles, generated ${results.length} trades. Max Drawdown: ${state.maxDrawdown.toFixed(2)}%`);
+  logger.info(`[${symbol}] Backtest finished successfully. Processed ${candlesLtf.length} candles, generated ${results.length} trades. Max Drawdown: ${state.maxDrawdown.toFixed(2)}%`);
   // Cleanup memory after each symbol
-  cleanupMemory(candles15m, candles4h, router, null);
+  cleanupMemory(candlesLtf, candlesHtf, router, null);
   return { trades: results, maxDrawdown: state.maxDrawdown };
 }
 
@@ -212,6 +213,11 @@ async function main(): Promise<void> {
   const { fromMs, toMs } = getTimeRangeForSixMonths();
   logger.info(`Backtest period: ${new Date(fromMs).toISOString()} - ${new Date(toMs).toISOString()}`);
 
+  // Dynamic candle count based on LTF timeframe (180 days)
+  const ltfMinutes = Number(config.ltfTimeframe);
+  const totalCandles = Math.ceil((180 * 24 * 60) / ltfMinutes);
+  logger.info(`Expected ~${totalCandles} LTF candles for ${ltfMinutes}m timeframe over 180 days`);
+
   for (const symbol of symbolsToTest) {
     logger.info(`\n=== Backtesting ${symbol} ===`);
 
@@ -221,14 +227,14 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const [candles15m, candles4h] = await Promise.all([
-      loadCachedOrFetch(client, symbol, '15', fromMs, toMs),
-      loadCachedOrFetch(client, symbol, '240', fromMs, toMs),
+    const [candlesLtf, candlesHtf] = await Promise.all([
+      loadCachedOrFetch(client, symbol, config.ltfTimeframe as Timeframe, fromMs, toMs),
+      loadCachedOrFetch(client, symbol, config.htfTimeframe as Timeframe, fromMs, toMs),
     ]);
 
-    logger.info(`Loaded ${candles15m.length} 15m candles, ${candles4h.length} 4H candles for ${symbol}`);
+    logger.info(`Loaded ${candlesLtf.length} ${config.ltfTimeframe}m candles, ${candlesHtf.length} ${config.htfTimeframe}m candles for ${symbol}`);
 
-    if (candles15m.length === 0 || candles4h.length === 0) {
+    if (candlesLtf.length === 0 || candlesHtf.length === 0) {
       logger.warn(`No data for ${symbol}, skipping`);
       continue;
     }
@@ -239,8 +245,9 @@ async function main(): Promise<void> {
       symbol,
       instrument,
       recognizer,
-      candles15m,
-      candles4h
+      candlesLtf,
+      candlesHtf,
+      ltfMinutes
     );
     const trades = result.trades;
     const maxDrawdown = result.maxDrawdown;

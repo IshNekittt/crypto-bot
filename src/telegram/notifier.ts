@@ -8,6 +8,7 @@ import { RiskManager } from "../risk/riskManager";
 import { ExecutionEngine } from "../execution/executionEngine";
 import { StrategyEngine } from "../engine/strategyEngine";
 import { NewsService } from "../services/newsService";
+import { FundingMonitorService } from "../services/fundingMonitorService";
 
 export class TelegramNotifier {
   readonly bot: Telegraf;
@@ -20,6 +21,7 @@ export class TelegramNotifier {
   private executionEngine: ExecutionEngine | null = null;
   private engines: StrategyEngine[] | null = null;
   private newsService: NewsService | null = null;
+  private fundingMonitor: FundingMonitorService | null = null;
 
   setPendingTradeManager(manager: PendingTradeManager): void {
     this.pendingTradeManager = manager;
@@ -31,6 +33,10 @@ export class TelegramNotifier {
 
   setNewsService(service: NewsService): void {
     this.newsService = service;
+  }
+
+  setFundingMonitor(service: FundingMonitorService): void {
+    this.fundingMonitor = service;
   }
 
   setLiveTestDependencies(deps: {
@@ -180,7 +186,7 @@ export class TelegramNotifier {
 
     if (!botToken || !this.chatId) {
       logger.warn(
-        "Telegram credentials not configured (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)",
+        "Telegram notifications are disabled (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set)",
       );
       this.bot = new Telegraf("dummy:token");
       return;
@@ -389,6 +395,24 @@ export class TelegramNotifier {
             statusLines.push(`📰 <b>Next USD High-Impact News:</b> None for today`);
           }
         }
+      }
+
+      // Funding Monitor info
+      if (this.fundingMonitor) {
+        const rates = this.fundingMonitor.getCurrentRates();
+        if (rates.size > 0) {
+          statusLines.push(`📊 <b>Funding Rates:</b>`);
+          for (const [symbol, rate] of rates) {
+            const ratePct = rate.mul(100).toFixed(4);
+            const emoji = rate.isNegative() ? '🔴' : '🟢';
+            const prefix = rate.isNegative() ? '' : '+';
+            statusLines.push(`${emoji} ${symbol}: ${prefix}${ratePct}%`);
+          }
+        } else {
+          statusLines.push(`📊 <b>Funding Rates:</b> Loading...`);
+        }
+      } else {
+        statusLines.push(`📊 <b>Funding Rates:</b> Disabled`);
       }
 
       const text = statusLines.join("\n");

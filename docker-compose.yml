@@ -7,3 +7,8 @@ services:
     ports:
       - "3000:3000"
     stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M

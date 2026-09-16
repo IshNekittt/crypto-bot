@@ -36,6 +36,10 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     tradeApprovalTimeoutMinutes: 5,
     enableLiveTestOrders: false,
     activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+    enableFundingMonitor: false,
+    fundingMonitorSymbols: [],
+    fundingAlertThreshold: '0.0',
+    fundingRestoreThreshold: '0.0001',
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }

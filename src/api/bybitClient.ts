@@ -32,6 +32,12 @@ export interface ClosedPnlRecord {
   readonly orderId: string;
 }
 
+export interface TickerInfo {
+  readonly symbol: string;
+  readonly fundingRate: string;
+  readonly nextFundingTime: string;
+}
+
 type KlineRow = readonly [string, string, string, string, string, string, string];
 
 const LEVERAGE_NOT_MODIFIED_RET_CODE = 110043;
@@ -50,13 +56,11 @@ function isRetryableError(retCode: number): boolean {
 
 function validateCandle(row: KlineRow): boolean {
   try {
-    // Bybit REST klines format: [startTime, open, high, low, close, volume, turnover]
     const timestamp = Number(row[0]);
     const open = new Decimal(row[1]);
     const high = new Decimal(row[2]);
     const low = new Decimal(row[3]);
     const close = new Decimal(row[4]);
-    // row[5] is volume, row[6] is turnover - we don't use turnover
 
     if (!Number.isFinite(timestamp) || timestamp <= 0) return false;
     if (!open.isFinite() || !high.isFinite() || !low.isFinite() || !close.isFinite()) return false;
@@ -96,7 +100,6 @@ interface CircuitBreakerState {
   blockedUntil: number;
 }
 
-// Global circuit breaker for 429 (Too Many Requests)
 interface GlobalRateLimitState {
   consecutive429Count: number;
   circuitOpen: boolean;
@@ -108,15 +111,14 @@ export class BybitClient {
   private readonly circuitBreakers: Map<string, CircuitBreakerState> = new Map();
   private static readonly MAX_FAILURES = 3;
   private static readonly BLOCK_DURATION_MS = 60_000;
-  
-  // Global rate limit circuit breaker (429 errors)
+
   private readonly globalRateLimit: GlobalRateLimitState = {
     consecutive429Count: 0,
     circuitOpen: false,
     circuitOpenUntil: 0,
   };
   private static readonly GLOBAL_429_THRESHOLD = 3;
-  private static readonly GLOBAL_CIRCUIT_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly GLOBAL_CIRCUIT_DURATION_MS = 5 * 60 * 1000;
   private static readonly MAX_RETRIES = 3;
   private static readonly BASE_BACKOFF_MS = 1000;
 
@@ -136,7 +138,6 @@ export class BybitClient {
     const state = this.circuitBreakers.get(symbol);
     if (!state) return false;
     if (Date.now() < state.blockedUntil) return true;
-    // Reset after block period expires
     this.circuitBreakers.delete(symbol);
     return false;
   }
@@ -168,7 +169,6 @@ export class BybitClient {
       if (Date.now() < this.globalRateLimit.circuitOpenUntil) {
         return true;
       }
-      // Circuit expired, reset
       this.globalRateLimit.circuitOpen = false;
       this.globalRateLimit.consecutive429Count = 0;
       this.globalRateLimit.circuitOpenUntil = 0;
@@ -189,7 +189,6 @@ export class BybitClient {
         }
       }
     } else {
-      // Non-429 error resets the consecutive counter
       this.globalRateLimit.consecutive429Count = 0;
     }
   }
@@ -199,13 +198,12 @@ export class BybitClient {
   }
 
   async executeWithRetry<T>(operation: () => Promise<T>, operationName: string): Promise<T> {
-    // Check global circuit breaker first
     if (this.checkGlobalRateLimitCircuit()) {
       throw new Error('Global rate limit circuit breaker OPEN — REST paused for 5 minutes');
     }
 
     let lastError: Error | null = null;
-    
+
     for (let attempt = 0; attempt <= BybitClient.MAX_RETRIES; attempt++) {
       try {
         const result = await operation();
@@ -214,29 +212,25 @@ export class BybitClient {
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
         const message = lastError.message;
-        
-        // Extract retCode from error message
+
         const codeMatch = /\[(\d+)\]/.exec(message);
         const retCode = codeMatch ? parseInt(codeMatch[1], 10) : 0;
-        
-        // Check if we should retry
+
         if (attempt < BybitClient.MAX_RETRIES && isRetryableError(retCode)) {
-          const backoffMs = BybitClient.BASE_BACKOFF_MS * Math.pow(2, attempt); // 1s, 2s, 4s
+          const backoffMs = BybitClient.BASE_BACKOFF_MS * Math.pow(2, attempt);
           logger.warn(`[Retry ${attempt + 1}/${BybitClient.MAX_RETRIES}] ${operationName} failed with retCode=${retCode}, backing off ${backoffMs}ms: ${message}`);
-          
+
           await new Promise(resolve => setTimeout(resolve, backoffMs));
-          
-          // Record for global circuit breaker
+
           this.recordGlobalRateLimitError(retCode);
           continue;
         }
-        
-        // Record failure for circuit breakers
+
         this.recordGlobalRateLimitError(retCode);
         throw lastError;
       }
     }
-    
+
     throw lastError;
   }
 
@@ -442,10 +436,6 @@ export class BybitClient {
     }, 'getExecutions');
   }
 
-  /**
-   * Fetch closed PnL from Bybit (includes fees and funding)
-   * GET /v5/position/closed-pnl
-   */
   async getClosedPnl(symbol: string, startTime: number, endTime: number): Promise<ClosedPnlRecord[]> {
     return this.executeWithRetry(async () => {
       const response = await this.rest.getClosedPnL({
@@ -470,5 +460,19 @@ export class BybitClient {
           orderId: item.orderId,
         }));
     }, 'getClosedPnl');
+  }
+
+  async getTickers(params: { category: 'linear' }): Promise<TickerInfo[]> {
+    return this.executeWithRetry(async () => {
+      const response = await this.rest.getTickers(params);
+      if (response.retCode !== 0) {
+        throw new Error(`Tickers fetch failed: [${response.retCode}] ${response.retMsg}`);
+      }
+      return response.result.list.map((item: any) => ({
+        symbol: item.symbol,
+        fundingRate: item.fundingRate ?? '0',
+        nextFundingTime: item.nextFundingTime ?? '0',
+      }));
+    }, 'getTickers');
   }
 }
