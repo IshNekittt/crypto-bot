@@ -1,6 +1,5 @@
 import { IScenario } from '../types';
 import { logger } from '../utils/logger';
-import { loadConfig } from '../config/env';
 import { Decimal } from 'decimal.js';
 import { ZoneDetails } from '../types';
 import { Scenario1_HTFContinuation } from './scenarios/Scenario1_HTFContinuation';
@@ -19,6 +18,7 @@ export interface ScenarioRouterDeps {
   readonly symbol: string;
   readonly patternRecognizer: any;
   readonly notifier: any;
+  readonly activeScenarios: number[];
 }
 
 export interface MitigatedZone {
@@ -48,13 +48,11 @@ export class ScenarioRouter {
   }
   private readonly scenarios: IScenario[];
 
-  constructor(deps: { symbol: string; patternRecognizer: any; notifier: any }) {
+  constructor(deps: ScenarioRouterDeps) {
     this.symbol = deps.symbol;
     this.patternRecognizer = deps.patternRecognizer;
     this._notifier = deps.notifier;
 
-    // Load active scenarios from config (env ACTIVE_SCENARIOS)
-    const config = loadConfig();
     const allScenarios: IScenario[] = [
       // Priority 1: Complex, high-precision scenarios (checked first)
       new Scenario5_HTFLiquiditySweep(),    // 5: HTF Liquidity Sweep
@@ -72,12 +70,12 @@ export class ScenarioRouter {
       new Scenario4_MitigationChain(),       // 4: Mitigation Chain
     ];
 
-    if (config.activeScenarios && config.activeScenarios.length > 0) {
-      this.scenarios = allScenarios.filter(s => config.activeScenarios.includes(s.id));
-      logger.info(`Active scenarios: ${this.scenarios.map(s => `${s.id}:${s.name}`).join(', ')}`);
+    if (deps.activeScenarios && deps.activeScenarios.length > 0) {
+      this.scenarios = allScenarios.filter(s => deps.activeScenarios.includes(s.id));
+      logger.info(`[${this.symbol}] Active scenarios: ${this.scenarios.map(s => `${s.id}:${s.name}`).join(', ')}`);
     } else {
       this.scenarios = allScenarios;
-      logger.info('All 11 scenarios active (ACTIVE_SCENARIOS not set)');
+      logger.info(`[${this.symbol}] All 11 scenarios active (no active scenarios configured)`);
     }
   }
 

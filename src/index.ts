@@ -222,6 +222,10 @@ async function main(): Promise<void> {
   for (const symbol of config.symbols) {
     const instrument = instruments.get(symbol);
     if (!instrument) throw new Error(`No instrument info for ${symbol}, aborting`);
+    
+    // Get per-symbol scenarios or fall back to global activeScenarios
+    const symbolScenarios = config.symbolScenarios.get(symbol) ?? config.activeScenarios;
+    
     engines.push(new StrategyEngine({
       symbol,
       instrument,
@@ -234,6 +238,8 @@ async function main(): Promise<void> {
       autoTrading: config.autoTrading,
       pendingTradeManager,
       newsService,
+      config,
+      activeScenarios: symbolScenarios,
     }));
   }
 

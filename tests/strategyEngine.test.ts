@@ -171,13 +171,15 @@ describe('StrategyEngine - News Embargo Integration', () => {
       autoTrading: false,
       pendingTradeManager: mockPendingTradeManager,
       newsService: mockNewsService,
+      config: { ltfTimeframe: '15', htfTimeframe: '240', historyCandles: 200, activeScenarios: [1,2,3,4,5,6,7,8,9,10,11], symbolScenarios: new Map() } as any,
+      activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
     });
 
     // Set up feed with mock candles
-    (engine as any).feed15m.getCandles = () => mockCandles15m;
-    (engine as any).feed4h.getCandles = () => [];
-    (engine as any).feed15m.getLastClosed = () => mockCandles15m[mockCandles15m.length - 1];
-    (engine as any).feed4h.getCandles = () => mockCandles4h;
+    (engine as any).feedLtf.getCandles = () => mockCandles15m;
+    (engine as any).feedHtf.getCandles = () => [];
+    (engine as any).feedLtf.getLastClosed = () => mockCandles15m[mockCandles15m.length - 1];
+    (engine as any).feedHtf.getCandles = () => mockCandles4h;
 
     // Mock ScenarioRouter to avoid actual pattern recognition
     (engine as any).scenarioRouter = {
@@ -194,7 +196,7 @@ describe('StrategyEngine - News Embargo Integration', () => {
   describe('News Embargo Check', () => {
     it('should skip scan when isNewsEmbargo returns true', async () => {
       const timestamp = Date.now();
-      (engine as any).feed15m.getLastClosed = () => ({
+      (engine as any).feedLtf.getLastClosed = () => ({
         timestamp,
         close: '50000',
       });
@@ -219,7 +221,7 @@ describe('StrategyEngine - News Embargo Integration', () => {
 
     it('should proceed with scan when isNewsEmbargo returns false', async () => {
       const timestamp = Date.now();
-      (engine as any).feed15m.getLastClosed = () => ({
+      (engine as any).feedLtf.getLastClosed = () => ({
         timestamp,
         close: '50000',
       });
@@ -227,11 +229,11 @@ describe('StrategyEngine - News Embargo Integration', () => {
       mockNewsService.isNewsEmbargo.mockReturnValue(false);
 
       // Mock feed to have enough candles
-      (engine as any).feed15m.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
+      (engine as any).feedLtf.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
         timestamp: Date.now() - (49 - i) * 900000,
         open: '50000', high: '50100', low: '49900', close: '50050', volume: '100',
       }));
-      (engine as any).feed4h.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
+      (engine as any).feedHtf.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
         timestamp: Date.now() - (49 - i) * 3600000,
         open: '50000', high: '50200', low: '49800', close: '50100', volume: '1000',
       }));
@@ -249,7 +251,7 @@ describe('StrategyEngine - News Embargo Integration', () => {
 
     it('should skip 4H timeframe (no embargo check)', async () => {
       const timestamp = Date.now();
-      (engine as any).feed15m.getLastClosed = () => ({
+      (engine as any).feedLtf.getLastClosed = () => ({
         timestamp,
         close: '50000',
       });
@@ -267,7 +269,7 @@ describe('StrategyEngine - News Embargo Integration', () => {
   describe('State transitions with embargo', () => {
     it('should remain in SCANNING state when embargo active', async () => {
       const timestamp = Date.now();
-      (engine as any).feed15m.getLastClosed = () => ({ timestamp, close: '50000' });
+      (engine as any).feedLtf.getLastClosed = () => ({ timestamp, close: '50000' });
       mockNewsService.isNewsEmbargo.mockReturnValue(true);
 
       expect(engine.getState()).toBe(StrategyState.SCANNING);
@@ -277,15 +279,15 @@ describe('StrategyEngine - News Embargo Integration', () => {
 
     it('should transition to ENTRY_STAGED when embargo not active and setup found', async () => {
       const timestamp = Date.now();
-      (engine as any).feed15m.getLastClosed = () => ({ timestamp, close: '50000' });
+      (engine as any).feedLtf.getLastClosed = () => ({ timestamp, close: '50000' });
       mockNewsService.isNewsEmbargo.mockReturnValue(false);
 
       // Mock feed to have enough candles
-      (engine as any).feed15m.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
+      (engine as any).feedLtf.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
         timestamp: Date.now() - (49 - i) * 900000,
         open: '50000', high: '50100', low: '49900', close: '50050', volume: '100',
       }));
-      (engine as any).feed4h.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
+      (engine as any).feedHtf.getCandles = () => Array.from({ length: 50 }, (_, i) => ({
         timestamp: Date.now() - (49 - i) * 3600000,
         open: '50000', high: '50200', low: '49800', close: '50100', volume: '1000',
       }));

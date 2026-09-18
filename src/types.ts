@@ -1,4 +1,5 @@
 import { Decimal } from 'decimal.js';
+import { BotConfig } from './config/env';
 
 export type Direction = 'BULLISH' | 'BEARISH';
 export type StructureBreakKind = 'BOS' | 'CHOCH';
@@ -6,6 +7,8 @@ export type SwingType = 'HIGH' | 'LOW';
 export type Timeframe = '1' | '3' | '5' | '15' | '30' | '60' | '120' | '240' | '360' | '720' | 'D' | 'W' | 'M';
 export type TradeSide = 'Buy' | 'Sell';
 export type TradeStatus = 'OPEN' | 'CLOSED';
+
+export { BotConfig };
 
 export enum Trend {
   UP = 'UP',

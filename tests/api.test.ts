@@ -40,6 +40,7 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     fundingMonitorSymbols: [],
     fundingAlertThreshold: '0.0',
     fundingRestoreThreshold: '0.0001',
+    symbolScenarios: new Map(),
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }

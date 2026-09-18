@@ -30,6 +30,7 @@ export interface BotConfig {
   readonly fundingMonitorSymbols: string[];
   readonly fundingAlertThreshold: string;
   readonly fundingRestoreThreshold: string;
+  readonly symbolScenarios: Map<string, number[]>;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -96,6 +97,21 @@ function parseDecimalOrDefault(value: string | null, defaultValue: string, label
   return raw;
 }
 
+function parseSymbolScenarios(env: NodeJS.ProcessEnv, symbols: string[]): Map<string, number[]> {
+  const map = new Map<string, number[]>();
+  for (const symbol of symbols) {
+    const key = `SCENARIOS_${symbol}`;
+    const raw = env[key];
+    if (raw && raw.trim()) {
+      const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n) && n >= 1 && n <= 11);
+      if (ids.length > 0) {
+        map.set(symbol, [...new Set(ids)].sort((a, b) => a - b));
+      }
+    }
+  }
+  return map;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const riskPercent = requireEnv(env, 'RISK_PERCENT');
   parsePositiveNumber(riskPercent, 'RISK_PERCENT');
@@ -151,12 +167,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const fundingAlertThreshold = parseDecimalOrDefault(optionalEnv(env, 'FUNDING_ALERT_THRESHOLD'), '0.0', 'FUNDING_ALERT_THRESHOLD');
   const fundingRestoreThreshold = parseDecimalOrDefault(optionalEnv(env, 'FUNDING_RESTORE_THRESHOLD'), '0.0001', 'FUNDING_RESTORE_THRESHOLD');
 
+  const symbols = parseSymbols(requireEnv(env, 'SYMBOLS'));
+  const symbolScenarios = parseSymbolScenarios(env, symbols);
+
   return {
     apiKey: requireEnv(env, 'BYBIT_API_KEY'),
     apiSecret: requireEnv(env, 'BYBIT_API_SECRET'),
     testnet,
     demoTrading,
-    symbols: parseSymbols(requireEnv(env, 'SYMBOLS')),
+    symbols,
     riskPercent,
     reducedRiskPercent,
     leverage,
@@ -176,5 +195,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     fundingMonitorSymbols,
     fundingAlertThreshold,
     fundingRestoreThreshold,
+    symbolScenarios,
   };
 }

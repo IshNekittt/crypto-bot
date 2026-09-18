@@ -218,6 +218,33 @@ docker compose up -d
 | **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates             |
 | **FUNDING_ALERT_THRESHOLD**        |          |           `0.0`           | Alert when funding rate ≤ this value             |
 | **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value     |
+| **SCENARIOS_<SYMBOL>**             |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol. |
+
+---
+
+## 🎯 Per-Symbol Scenario Configuration (Asset-Specific DNA)
+
+Different trading pairs have different market structures ("DNA") and may require different scenario combinations. The bot supports per-symbol scenario overrides:
+
+```bash
+# Global default (applies to all symbols without override)
+ACTIVE_SCENARIOS=1,2,3,4,5,6,7,8,9,10,11
+
+# BTC-specific: Only HTF Liquidity Sweep (5), HTF Continuation (1), SMS (6)
+SCENARIOS_BTCUSDT=1,5,6
+
+# ETH-specific: FVG Fill (2), IDM (3), Mitigation Chain (4)
+SCENARIOS_ETHUSDT=2,3,4
+
+# SOL-specific: HTF Liquidity Sweep (5), SMS (6), AMD (7), Breaker Block (10)
+SCENARIOS_SOLUSDT=5,6,7,10
+```
+
+**How it works:**
+- If `SCENARIOS_<SYMBOL>` is set, that symbol uses **only** those scenarios
+- If not set, the symbol falls back to `ACTIVE_SCENARIOS`
+- The `ScenarioRouter` for each symbol is instantiated with its specific active scenarios
+- Allows fine-tuning strategies per asset's market character
 
 ---
 

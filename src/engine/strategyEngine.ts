@@ -8,7 +8,7 @@ import { ScenarioRouter } from './scenarioRouter';
 import { TelegramNotifier } from '../telegram/notifier';
 import { PendingTradeManager } from './pendingTradeManager';
 import { NewsService } from '../services/newsService';
-import { InstrumentInfo, StrategyState, Timeframe } from '../types';
+import { InstrumentInfo, StrategyState, Timeframe, BotConfig } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 
@@ -35,6 +35,8 @@ export interface StrategyEngineDeps {
   readonly autoTrading: boolean;
   readonly pendingTradeManager: PendingTradeManager;
   readonly newsService: NewsService;
+  readonly config: BotConfig;
+  readonly activeScenarios: number[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -63,8 +65,8 @@ function parseClosedPositions(payload: unknown, ownSymbol: string): ClosedPositi
 export class StrategyEngine {
   readonly symbol: string;
   private readonly deps: StrategyEngineDeps;
-  private readonly feed15m: CandleFeed;
-  private readonly feed4h: CandleFeed;
+  private readonly feedLtf: CandleFeed;
+  private readonly feedHtf: CandleFeed;
   private readonly scenarioRouter: ScenarioRouter;
   private state: StrategyState = StrategyState.SCANNING;
   private plan: PositionPlan | null = null;
@@ -76,13 +78,14 @@ export class StrategyEngine {
     this.symbol = deps.symbol;
     this.deps = deps;
     const historyCandles = deps.client.config?.historyCandles ?? 200;
-    this.feed15m = new CandleFeed(deps.symbol, '15', historyCandles);
-    this.feed4h = new CandleFeed(deps.symbol, '240', historyCandles);
+    this.feedLtf = new CandleFeed(deps.symbol, deps.config.ltfTimeframe as Timeframe, historyCandles);
+    this.feedHtf = new CandleFeed(deps.symbol, deps.config.htfTimeframe as Timeframe, historyCandles);
 
     this.scenarioRouter = new ScenarioRouter({
       symbol: deps.symbol,
       patternRecognizer: deps.patternRecognizer,
       notifier: deps.notifier,
+      activeScenarios: deps.activeScenarios,
     });
   }
 
@@ -95,7 +98,7 @@ export class StrategyEngine {
   }
 
   getLastClosedCandle(): { close: Decimal; timestamp: number } | null {
-    const candle = this.feed15m.getLastClosed();
+    const candle = this.feedLtf.getLastClosed();
     if (!candle) return null;
     return { close: new Decimal(candle.close), timestamp: candle.timestamp };
   }
@@ -109,34 +112,32 @@ export class StrategyEngine {
     nearestMacroDistancePct: string | null;
     state: StrategyState;
   }> {
-    // Last closed 15m candle time
-    const lastClosed = this.feed15m.getLastClosed();
+    // Last closed LTF candle time
+    const lastClosed = this.feedLtf.getLastClosed();
     const lastCandleTime = lastClosed ? lastClosed.timestamp : null;
 
-    // 4H Trend from structures (we need to get this from patternRecognizer)
-    // For now, we'll get it from the latest patternData or compute from 4H candles
-    let trend4h: 'BULLISH' | 'BEARISH' | 'NONE' = 'NONE';
-    const candles4h = this.feed4h.getCandles() as any[];
-    if (candles4h.length >= 2) {
-      const last4h = candles4h[candles4h.length - 1];
-      const prev4h = candles4h[candles4h.length - 2];
-      const lastClose = new Decimal(last4h.close);
-      const prevClose = new Decimal(prev4h.close);
-      if (lastClose.gt(prevClose)) trend4h = 'BULLISH';
-      else if (lastClose.lt(prevClose)) trend4h = 'BEARISH';
+    // HTF Trend from structures
+    let trendHtf: 'BULLISH' | 'BEARISH' | 'NONE' = 'NONE';
+    const candlesHtf = this.feedHtf.getCandles() as any[];
+    if (candlesHtf.length >= 2) {
+      const lastHtf = candlesHtf[candlesHtf.length - 1];
+      const prevHtf = candlesHtf[candlesHtf.length - 2];
+      const lastClose = new Decimal(lastHtf.close);
+      const prevClose = new Decimal(prevHtf.close);
+      if (lastClose.gt(prevClose)) trendHtf = 'BULLISH';
+      else if (lastClose.lt(prevClose)) trendHtf = 'BEARISH';
     }
 
-    // Count zones in memory (OB + FVG from 15m and 4H)
-    const candles15m = this.feed15m.getCandles() as any[];
-    const candles4hAll = this.feed4h.getCandles() as any[];
+    // Count zones in memory (OB + FVG from LTF and HTF)
+    const candlesLtf = this.feedLtf.getCandles() as any[];
+    const candlesHtfAll = this.feedHtf.getCandles() as any[];
     let zonesCount = 0;
-    if (candles15m.length >= 20 && candles4hAll.length >= 20) {
+    if (candlesLtf.length >= 20 && candlesHtfAll.length >= 20) {
       try {
-        // Generate pattern data to count zones
         const patternData = await this.deps.patternRecognizer.buildPatternData(
           this.symbol,
-          candles15m,
-          candles4hAll,
+          candlesLtf,
+          candlesHtfAll,
           Date.now()
         );
         zonesCount = patternData.zones?.length || 0;
@@ -150,8 +151,7 @@ export class StrategyEngine {
     try {
       const macroContext = await this.deps.patternRecognizer['macroCache'].get(`${this.symbol}_macro`);
       if (macroContext) {
-        // Use LIVE price for nearest macro calculation
-        const livePriceStr = this.feed15m.getCurrentLivePrice();
+        const livePriceStr = this.feedLtf.getCurrentLivePrice();
         if (livePriceStr) {
           const currentPrice = new Decimal(livePriceStr);
           const pdh = macroContext.dailyLevels.pdh;
@@ -170,9 +170,9 @@ export class StrategyEngine {
 
     return {
       symbol: this.symbol,
-      livePrice: this.feed15m.getCurrentLivePrice(),
+      livePrice: this.feedLtf.getCurrentLivePrice(),
       lastCandleTime,
-      trend4h,
+      trend4h: trendHtf, // keep key as trend4h for compatibility with Telegram /status
       zonesCount,
       nearestMacroDistancePct,
       state: this.state,
@@ -194,16 +194,17 @@ export class StrategyEngine {
   }
 
   async reloadHistory(): Promise<void> {
-    await this.feed15m.loadHistory(this.deps.client);
-    await this.feed4h.loadHistory(this.deps.client);
+    await this.feedLtf.loadHistory(this.deps.client);
+    await this.feedHtf.loadHistory(this.deps.client);
     logger.info(
-      `${this.symbol}: history ready (15m=${this.feed15m.getCandles().length}, 4h=${this.feed4h.getCandles().length})`,
+      `${this.symbol}: history ready (${this.deps.config.ltfTimeframe}=${this.feedLtf.getCandles().length}, ${this.deps.config.htfTimeframe}=${this.feedHtf.getCandles().length})`,
     );
   }
 
   async handleKline(update: KlineUpdate): Promise<void> {
     if (!update.confirmed) return;
-    const feed = update.interval === '240' ? this.feed4h : this.feed15m;
+    const htfInterval = this.deps.config.htfTimeframe;
+    const feed = update.interval === htfInterval ? this.feedHtf : this.feedLtf;
     const previousTimestamp = feed.getLastClosed()?.timestamp;
     feed.applyKline(update);
     if (feed.getLastClosed()?.timestamp === previousTimestamp) return;
@@ -381,18 +382,19 @@ export class StrategyEngine {
   }
 
   private async process(timeframe: Timeframe): Promise<void> {
-    // Only evaluate on 15m confirmed candles for scenario matching
-    if (timeframe !== '15') return;
+    // Only evaluate on LTF confirmed candles for scenario matching
+    const ltfInterval = this.deps.config.ltfTimeframe;
+    if (timeframe !== ltfInterval) return;
 
     if (this.state === StrategyState.IN_TRADE) return;
     if (this.state === StrategyState.ENTRY_STAGED) return;
 
-    const candles15m = this.feed15m.getCandles() as any[];
-    const candles4h = this.feed4h.getCandles() as any[];
+    const candlesLtf = this.feedLtf.getCandles() as any[];
+    const candlesHtf = this.feedHtf.getCandles() as any[];
 
-    if (candles15m.length < 20 || candles4h.length < 20) return;
+    if (candlesLtf.length < 20 || candlesHtf.length < 20) return;
 
-    const lastCandle = candles15m[candles15m.length - 1];
+    const lastCandle = candlesLtf[candlesLtf.length - 1];
     const candleTimestamp = lastCandle?.timestamp ?? 0;
 
     // Deduplication: skip if we already processed this candle (within 1 minute window)
@@ -405,11 +407,11 @@ export class StrategyEngine {
 
     // News Embargo check: skip scan if high-impact USD news is within 30 minutes
     if (this.deps.newsService.isNewsEmbargo(candleTimestamp)) {
-      logger.info(`[${this.symbol}] 15m candle closed, but HIGH IMPACT NEWS EMBARGO is active. Skipping scan.`);
+      logger.info(`[${this.symbol}] ${ltfInterval}m candle closed, but HIGH IMPACT NEWS EMBARGO is active. Skipping scan.`);
       return;
     }
 
-    const result = await this.scenarioRouter.evaluate(candles15m, candles4h, candleTimestamp, this.mitigatedZones);
+    const result = await this.scenarioRouter.evaluate(candlesLtf, candlesHtf, candleTimestamp, this.mitigatedZones);
 
     if (result.triggered && result.levels) {
       const riskResult = await this.deps.riskManager.calculatePosition({

@@ -33,6 +33,7 @@ describe('ScenarioRouter', () => {
       symbol: 'SOLUSDT',
       patternRecognizer: mockPatternRecognizer,
       notifier: mockNotifier,
+      activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
     });
     jest.clearAllMocks();
   });
@@ -77,6 +78,7 @@ describe('ScenarioRouter', () => {
           buildPatternData: jest.fn().mockResolvedValue({}),
         },
         notifier: mockNotifier,
+        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
       });
 
       (testRouter as any).scenarios = mockScenarios;
@@ -100,6 +102,7 @@ describe('ScenarioRouter', () => {
         symbol: 'SOLUSDT',
         patternRecognizer: { buildPatternData: jest.fn().mockResolvedValue({}) },
         notifier: mockNotifier,
+        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
       });
 
       (testRouter as any).scenarios = mockScenarios;
@@ -122,6 +125,7 @@ describe('ScenarioRouter', () => {
         symbol: 'SOLUSDT',
         patternRecognizer: { buildPatternData: jest.fn().mockResolvedValue({}) },
         notifier: mockNotifier,
+        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
       });
 
       (testRouter as any).scenarios = mockScenarios;
@@ -140,6 +144,7 @@ describe('ScenarioRouter', () => {
           buildPatternData: jest.fn().mockRejectedValue(new Error('API Error')),
         },
         notifier: mockNotifier,
+        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
       });
 
       const result = await testRouter.evaluate([], [], Date.now());

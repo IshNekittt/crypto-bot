@@ -51,7 +51,8 @@ async function runBacktestForSymbol(
   recognizer: PatternRecognizer,
   candlesLtf: Candle[],
   candlesHtf: Candle[],
-  ltfMinutes: number
+  ltfMinutes: number,
+  config: ReturnType<typeof loadConfig>
 ): Promise<{ trades: TradeResult[]; maxDrawdown: Decimal }> {
   const state = getInitialState();
   const results: TradeResult[] = [];
@@ -69,6 +70,7 @@ async function runBacktestForSymbol(
     symbol,
     patternRecognizer: recognizer,
     notifier: { sendMessage: async () => false } as any,
+    activeScenarios: config.activeScenarios,
   });
 
   // Pattern data cache - avoid recomputing from scratch every candle
@@ -247,7 +249,8 @@ async function main(): Promise<void> {
       recognizer,
       candlesLtf,
       candlesHtf,
-      ltfMinutes
+      ltfMinutes,
+      config
     );
     const trades = result.trades;
     const maxDrawdown = result.maxDrawdown;
