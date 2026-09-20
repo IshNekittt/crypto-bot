@@ -21,6 +21,7 @@ describe('RiskManager', () => {
     riskManager = new RiskManager(mockBalanceSource, mockHistorySource, {
       baseRiskPercent: '2',
       reducedRiskPercent: '1',
+      leverage: '10',
     });
   });
 
@@ -31,6 +32,7 @@ describe('RiskManager', () => {
         side: 'Buy',
         entryPrice: new Decimal('100'),
         stopLossRaw: new Decimal('99'),
+        takeProfitRaw: new Decimal('103'),
         instrument: mockInstrument,
         zoneDetails: null,
       });
@@ -50,6 +52,7 @@ describe('RiskManager', () => {
         side: 'Buy',
         entryPrice: new Decimal('100'),
         stopLossRaw: new Decimal('50'), // 50% SL distance
+        takeProfitRaw: new Decimal('250'),
         instrument: mockInstrument,
         zoneDetails: null,
       });
@@ -79,6 +82,7 @@ describe('RiskManager', () => {
         side: 'Buy',
         entryPrice: new Decimal('50000'),
         stopLossRaw: new Decimal('25000'), // 50% SL distance
+        takeProfitRaw: new Decimal('125000'),
         instrument: btcInstrument,
         zoneDetails: null,
       });
@@ -102,6 +106,7 @@ describe('RiskManager', () => {
         side: 'Buy',
         entryPrice: new Decimal('100'),
         stopLossRaw: new Decimal('99'),
+        takeProfitRaw: new Decimal('103'),
         instrument: mockInstrument,
         zoneDetails: null,
       });
@@ -118,6 +123,7 @@ describe('RiskManager', () => {
         side: 'Buy',
         entryPrice: new Decimal('100'),
         stopLossRaw: new Decimal('101'), // SL above entry for long
+        takeProfitRaw: new Decimal('97'),
         instrument: mockInstrument,
         zoneDetails: null,
       });
@@ -134,6 +140,7 @@ describe('RiskManager', () => {
         side: 'Sell',
         entryPrice: new Decimal('100'),
         stopLossRaw: new Decimal('99'), // SL below entry for short
+        takeProfitRaw: new Decimal('97'),
         instrument: mockInstrument,
         zoneDetails: null,
       });

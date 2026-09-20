@@ -212,6 +212,7 @@ describe('BybitClient.placeMarketOrderWithTpsl', () => {
       tpslMode: 'Full',
       stopLoss: '97.70',
       takeProfit: '122.90',
+      orderLinkId: 'test_order_link_id',
     });
   });
 

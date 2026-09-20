@@ -369,6 +369,7 @@ export class BybitClient {
         tpslMode: 'Full',
         stopLoss: request.stopLoss,
         takeProfit: request.takeProfit,
+        orderLinkId: request.orderLinkId,
       });
 
       if (response.retCode !== 0 || !response.result.orderId) {

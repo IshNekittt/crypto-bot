@@ -77,6 +77,7 @@ async function main(): Promise<void> {
   const riskManager = new RiskManager(client, db, {
     baseRiskPercent: config.riskPercent,
     reducedRiskPercent: config.reducedRiskPercent,
+    leverage: config.leverage,
   });
   const executionEngine = new ExecutionEngine(client, notifier);
 

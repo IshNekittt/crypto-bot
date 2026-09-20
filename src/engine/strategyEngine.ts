@@ -436,6 +436,7 @@ export class StrategyEngine {
         side: 'Buy',
         entryPrice: new Decimal(result.levels.entry),
         stopLossRaw: new Decimal(result.levels.stopLoss),
+        takeProfitRaw: new Decimal(result.levels.takeProfit),
         instrument: this.deps.instrument,
         zoneDetails: result.zoneDetails ? {
           type: result.zoneDetails.type,

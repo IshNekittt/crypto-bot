@@ -649,8 +649,21 @@ services:
 | **Min Order Qty**    | If `rounded_qty < minOrderQty` → **ABORT** + `[WARN]` + state→`SCANNING` | Exchange `minOrderQty`                        |
 | **Max Order Qty**    | If `qty > maxOrderQty` → **ABORT**                                       | Exchange `maxOrderQty`                        |
 | **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                    | Hardcoded in `RiskManager`                    |
+| **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop too tight | `LEVERAGE` from config                        |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
+
+### 🔒 Execution Pipeline Hardening (v2026-09-21)
+
+All three execution pipeline fixes applied in single pass:
+
+1. **Order Idempotency** (`bybitClient.ts:372`): `orderLinkId` now passed to `submitOrder()` — prevents duplicate orders on retry via `executeWithRetry()`.
+
+2. **Leverage Cap** (`riskManager.ts:146-155`): `maxAllowedQty = marginBuffer * leverage / entry`. If `rawQty > maxAllowedQty`, caps it. Prevents "Insufficient Margin" when stop is very tight.
+
+3. **No Double Rounding** (`riskManager.ts:115-116`): Removed `roundDownToStep()` for entry/SL. Now `formatPrice(input.entryPrice, tickSize)` and `formatPrice(input.stopLossRaw, tickSize)` — single precision step.
+
+4. **TP From Scenario** (`riskManager.ts:131`): Removed internal `TAKE_PROFIT_RR_RATIO` recalculation. Takes `input.takeProfitRaw` (already calculated by `BaseScenario.calculateLevels()` with correct geometry). RiskManager only formats via `formatPrice()`.
 
 ---
 

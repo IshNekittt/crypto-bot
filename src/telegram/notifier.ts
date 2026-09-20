@@ -103,6 +103,7 @@ export class TelegramNotifier {
           side: "Buy",
           entryPrice: entryDecimal,
           stopLossRaw: slDecimal,
+          takeProfitRaw: tpDecimal,
           instrument,
           zoneDetails: null,
         });

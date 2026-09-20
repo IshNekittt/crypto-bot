@@ -1,8 +1,6 @@
 import { Decimal } from "decimal.js";
-import { TAKE_PROFIT_RR_RATIO } from "../smc/smc";
 import { InstrumentInfo, TradeRecord, TradeSide } from "../types";
 import {
-  roundDownToStep,
   formatPrice,
   formatQuantity,
 } from "../utils/precision";
@@ -18,6 +16,7 @@ export interface TradeHistorySource {
 export interface RiskManagerOptions {
   readonly baseRiskPercent: string;
   readonly reducedRiskPercent: string;
+  readonly leverage: string;
 }
 
 export const DRAWDOWN_LOSING_TRADES_COUNT = 3;
@@ -27,6 +26,7 @@ export interface PositionPlanInput {
   readonly side: TradeSide;
   readonly entryPrice: Decimal;
   readonly stopLossRaw: Decimal;
+  readonly takeProfitRaw: Decimal;
   readonly instrument: InstrumentInfo;
   readonly zoneDetails: {
     type: string | null;
@@ -112,10 +112,8 @@ export class RiskManager {
     }
 
     const isLong = input.side === "Buy";
-    const entryRaw = roundDownToStep(input.entryPrice, tickSize);
-    const stopLossRaw = roundDownToStep(input.stopLossRaw, tickSize);
-    const entry = formatPrice(entryRaw, tickSize);
-    const stopLoss = formatPrice(stopLossRaw, tickSize);
+    const entry = formatPrice(input.entryPrice, tickSize);
+    const stopLoss = formatPrice(input.stopLossRaw, tickSize);
 
     const entryDecimal = new Decimal(entry);
     const stopLossDecimal = new Decimal(stopLoss);
@@ -130,10 +128,7 @@ export class RiskManager {
       };
     }
 
-    const takeProfitRaw = isLong
-      ? new Decimal(entry).plus(slDistanceDecimal.mul(TAKE_PROFIT_RR_RATIO))
-      : new Decimal(entry).minus(slDistanceDecimal.mul(TAKE_PROFIT_RR_RATIO));
-    const takeProfit = formatPrice(takeProfitRaw, tickSize);
+    const takeProfit = formatPrice(input.takeProfitRaw, tickSize);
 
     const riskPercent = await this.getEffectiveRiskPercent();
     const balance = await this.balanceSource.getUsdtBalance();
@@ -144,10 +139,21 @@ export class RiskManager {
       };
     }
 
-    // Margin Buffer: Use 98% of safeBalance to leave 2% for fees/reserve
+    // Margin Buffer: Use 98% of balance to leave 2% for fees/reserve
     const marginBuffer = balance.mul(0.98);
+    
+    // Leverage cap: max position value = marginBuffer * leverage
+    const leverage = new Decimal(this.options.leverage);
+    const maxAllowedQty = marginBuffer.mul(leverage).div(entryDecimal);
+    
     const riskAmountDecimal = marginBuffer.mul(riskPercent.div(100));
-    const rawQty = riskAmountDecimal.div(slDistanceDecimal);
+    let rawQty = riskAmountDecimal.div(slDistanceDecimal);
+    
+    // Cap qty by max leverage
+    if (rawQty.gt(maxAllowedQty)) {
+      rawQty = maxAllowedQty;
+    }
+    
     const qty = formatQuantity(rawQty, qtyStep);
 
     if (new Decimal(qty).lt(minOrderQty)) {

@@ -92,6 +92,8 @@ All REST calls wrapped in `executeWithRetry()`:
 | **Per-Symbol Circuit Breaker** | 3 failures in 60s      | Blocks **only that symbol** for 60s (5xx, 10006, 10007)                                              |
 | **Global Circuit Breaker**     | **3 consecutive 429**  | **ALL REST paused 5 min** → Telegram alert: `🚨 API Rate Limit breached!` → auto-reset, log `CLOSED` |
 
+**Order Idempotency** (`bybitClient.ts:372`): `orderLinkId` passed to `submitOrder()` in `placeMarketOrderWithTpsl()` — prevents duplicate orders on retry via `executeWithRetry()`.
+
 ### 3.3 Daily Clock Sync — `src/index.ts` + `src/bootstrap/reconciliation.ts`
 
 - **Macro Refresher (00:00 UTC)**: `client.syncServerTime()` before `refreshMacroContext()`.
@@ -165,8 +167,23 @@ this.bot.use(async (ctx, next) => {
 | **Min Order Qty**    | If `rounded_qty < minOrderQty` → **ABORT** + `[WARN]` + state→`SCANNING`              | Exchange `minOrderQty`                        |
 | **Max Order Qty**    | If `qty > maxOrderQty` → **ABORT**                                                    | Exchange `maxOrderQty`                        |
 | **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                                 | Hardcoded in `RiskManager`                    |
+| **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop is too tight     | `LEVERAGE` from config                        |
+| **No Double Rounding** | Entry/SL passed directly to `formatPrice()` — no intermediate `roundDownToStep()`     | Instrument `tickSize`                         |
+| **TP From Scenario** | Takes pre-calculated `takeProfitRaw` from `BaseScenario.calculateLevels()` — no RR recalc | N/A                                           |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
+
+### 5.1 RiskManager Hardening (v2026-09-21)
+
+All three execution pipeline fixes applied in single pass:
+
+1. **Order Idempotency** (`bybitClient.ts:372`): `orderLinkId` now passed to `submitOrder()` — prevents duplicate orders on retry via `executeWithRetry()`.
+
+2. **Leverage Cap** (`riskManager.ts:146-155`): `maxAllowedQty = marginBuffer.mul(leverage).div(entryDecimal)`. If `rawQty > maxAllowedQty`, caps it. Prevents "Insufficient Margin" when stop is very tight.
+
+3. **No Double Rounding** (`riskManager.ts:115-116`): Removed `roundDownToStep()` for entry/SL. Now `formatPrice(input.entryPrice, tickSize)` and `formatPrice(input.stopLossRaw, tickSize)` — single precision step.
+
+4. **TP From Scenario** (`riskManager.ts:131`): Removed internal `TAKE_PROFIT_RR_RATIO` recalculation. Takes `input.takeProfitRaw` (already calculated by `BaseScenario.calculateLevels()` with correct geometry). RiskManager only formats via `formatPrice()`.
 
 ---
 
