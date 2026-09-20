@@ -112,12 +112,13 @@ export interface MarketOrderRequest {
   readonly qty: string;
   readonly stopLoss: string;
   readonly takeProfit: string;
+  readonly orderLinkId: string;
 }
 
 export interface ScenarioLevels {
-  readonly entry: string;
-  readonly stopLoss: string;
-  readonly takeProfit: string;
+  readonly entry: Decimal;
+  readonly stopLoss: Decimal;
+  readonly takeProfit: Decimal;
 }
 
 export interface ZoneDetails {

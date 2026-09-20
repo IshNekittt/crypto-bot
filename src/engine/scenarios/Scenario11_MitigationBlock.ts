@@ -192,9 +192,9 @@ const lastClose = new Decimal(retestCandle.close);
     );
 
     this.setLevels({
-      entry: levels.entry.toFixed(2),
-      stopLoss: levels.stopLoss.toFixed(2),
-      takeProfit: levels.takeProfit.toFixed(2),
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
     this.setReason(`Mitigation Block: ${sms.direction} SMS (strict) + ${expectedChochDirection} CHoCH + MB 0.5 retest`);

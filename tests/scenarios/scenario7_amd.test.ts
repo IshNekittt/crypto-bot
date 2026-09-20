@@ -109,7 +109,7 @@ describe('Scenario7: AMD (Accumulation-Manipulation-Distribution)', () => {
       expect(scenario.getReason()).toContain('AMD');
       expect(scenario.getLevels().entry).toBeDefined();
       expect(scenario.getLevels().takeProfit).toBeDefined();
-      expect(parseFloat(scenario.getLevels().takeProfit)).toBe(105); // Asian High
+      expect(parseFloat(scenario.getLevels().takeProfit.toString())).toBe(105); // Asian High
     });
   });
 
@@ -133,10 +133,11 @@ describe('Scenario7: AMD (Accumulation-Manipulation-Distribution)', () => {
   });
 
   describe('negative cases - Asian Range width', () => {
-    it('should reject when Asian Range too wide (> 1.5*ATR4H)', () => {
+    it('should reject when Asian Range too wide (> 3.0*ATR4H)', () => {
       const data = createIdealAmdPatternData();
-      // Make range wider: high=120, low=90 (height=30), ATR4H=10 -> 1.5*ATR4H=15, 30>15
-      data.sessionRanges[0].high = new Decimal(120);
+      // Make range wider: high=120, low=90 (height=30), ATR4H=10 -> 3.0*ATR4H=30, 30>30 is false
+      // Need even wider: high=130, low=90 (height=40), ATR4H=10 -> 3.0*ATR4H=30, 40>30
+      data.sessionRanges[0].high = new Decimal(130);
       data.sessionRanges[0].low = new Decimal(90);
       const result = scenario.evaluate(data);
       expect(result).toBe(false);

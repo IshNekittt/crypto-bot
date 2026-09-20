@@ -9,6 +9,7 @@ export class Scenario2_FVGFill extends BaseScenario {
     noChoch: 0,
     displacement: 0,
     trendFilter: 0,
+    premiumDiscount: 0,
     noLiquidityContext: 0,
     totalEvals: 0
   };
@@ -25,6 +26,7 @@ export class Scenario2_FVGFill extends BaseScenario {
       noChoch: 0,
       displacement: 0,
       trendFilter: 0,
+      premiumDiscount: 0,
       noLiquidityContext: 0,
       totalEvals: 0
     };
@@ -93,6 +95,31 @@ export class Scenario2_FVGFill extends BaseScenario {
     const htfFvg = htfFvgs[0];
     const lastCandle = patternData.candles15m[patternData.candles15m.length - 1];
     if (!lastCandle) return false;
+
+    // PREMIUM/DISCOUNT FILTER (Fibonacci 0.5)
+    // For BULLISH FVG (Long): FVG must be in DISCOUNT zone (below 0.5)
+    // For BEARISH FVG (Short): FVG must be in PREMIUM zone (above 0.5)
+    const pd = patternData.patternRecognizer.calculatePremiumDiscount(patternData.candles15m);
+    if (!pd) {
+      this.logRejection('Could not calculate Premium/Discount levels');
+      return false;
+    }
+    
+    const fvgMid = htfFvg.top.plus(htfFvg.bottom).dividedBy(2);
+    const isBullishFvg = htfFvg.direction === 'BULLISH';
+    
+    // BULLISH FVG must be in DISCOUNT (below equilibrium)
+    // BEARISH FVG must be in PREMIUM (above equilibrium)
+    if (isBullishFvg && fvgMid.gte(pd.equilibrium)) {
+      this.logRejection('BULLISH HTF FVG not in Discount zone (above 0.5)');
+      Scenario2_FVGFill.rejectionStats.premiumDiscount++;
+      return false;
+    }
+    if (!isBullishFvg && fvgMid.lte(pd.equilibrium)) {
+      this.logRejection('BEARISH HTF FVG not in Premium zone (below 0.5)');
+      Scenario2_FVGFill.rejectionStats.premiumDiscount++;
+      return false;
+    }
 
     // CRITICAL: 0.5 RULE - Price must touch EXACTLY 50% (Equilibrium) of FVG
     // Not "near" or "close" - EXACTLY 0.5 level
@@ -165,12 +192,12 @@ export class Scenario2_FVGFill extends BaseScenario {
     );
 
     this.setLevels({
-      entry: levels.entry.toFixed(2),
-      stopLoss: levels.stopLoss.toFixed(2),
-      takeProfit: levels.takeProfit.toFixed(2),
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
-    this.setReason(`FVG Fill: HTF FVG 0.5 touch + liquidity context + 15m CHoCH`);
+    this.setReason(`FVG Fill: HTF FVG 0.5 touch + Premium/Discount + liquidity context + 15m CHoCH`);
     return true;
   }
 }

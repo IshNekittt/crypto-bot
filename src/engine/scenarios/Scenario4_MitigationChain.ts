@@ -9,6 +9,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
     noChoch: 0,
     displacement: 0,
     trendFilter: 0,
+    premiumDiscount: 0,
     noBosAfterBounce: 0,
     totalEvals: 0
   };
@@ -25,6 +26,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
       noChoch: 0,
       displacement: 0,
       trendFilter: 0,
+      premiumDiscount: 0,
       noBosAfterBounce: 0,
       totalEvals: 0
     };
@@ -81,6 +83,23 @@ export class Scenario4_MitigationChain extends BaseScenario {
 
     // Get the most recent OB
     const latestOb = trendObs[0];
+    
+    // PREMIUM/DISCOUNT FILTER (Fibonacci 0.5)
+    // For BULLISH OB (Long): OB must be in DISCOUNT zone (below 0.5)
+    const pd = patternData.patternRecognizer.calculatePremiumDiscount(patternData.candles15m);
+    if (!pd) {
+      this.logRejection('Could not calculate Premium/Discount levels');
+      return false;
+    }
+    
+    const obMid = latestOb.top.plus(latestOb.bottom).dividedBy(2);
+    
+    // BULLISH OB must be in DISCOUNT (below equilibrium)
+    if (obMid.gte(pd.equilibrium)) {
+      this.logRejection('BULLISH OB not in Discount zone (above 0.5)');
+      Scenario4_MitigationChain.rejectionStats.premiumDiscount++;
+      return false;
+    }
     
     // STRENGTH FILTER: OB must have produced a true BOS after its formation
     // This validates the OB as a "strong" institutional level
@@ -157,12 +176,12 @@ export class Scenario4_MitigationChain extends BaseScenario {
     );
 
     this.setLevels({
-      entry: levels.entry.toFixed(2),
-      stopLoss: levels.stopLoss.toFixed(2),
-      takeProfit: levels.takeProfit.toFixed(2),
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
-    this.setReason(`Mitigation Chain: OB 0.5 mitigation (BOS validated) + CHoCH continuation`);
+    this.setReason(`Mitigation Chain: OB 0.5 mitigation + BOS validated + Premium/Discount`);
     return true;
   }
 }

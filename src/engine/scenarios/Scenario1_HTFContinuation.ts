@@ -84,9 +84,9 @@ export class Scenario1_HTFContinuation extends BaseScenario {
     );
 
     this.setLevels({
-      entry: levels.entry.toFixed(2),
-      stopLoss: levels.stopLoss.toFixed(2),
-      takeProfit: levels.takeProfit.toFixed(2),
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
     // Set zone details for mitigation tracking (the FVG we entered from)

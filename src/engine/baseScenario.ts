@@ -36,7 +36,7 @@ export abstract class BaseScenario implements IScenario {
   }
 
   getLevels(): ScenarioLevels {
-    return this.levels || { entry: '', stopLoss: '', takeProfit: '' };
+    return this.levels || { entry: new Decimal(0), stopLoss: new Decimal(0), takeProfit: new Decimal(0) };
   }
 
   getReason(): string {

@@ -352,6 +352,13 @@ async function main(): Promise<void> {
             // Atomically replace the macro cache for this symbol
             await patternRecognizer.refreshMacroContext(symbol, config.macroCandles);
             logger.info(`Macro context refreshed for ${symbol}`);
+            
+            // Clean up old mitigated zones for this symbol
+            const engine = engines.find(e => e.symbol === symbol);
+            if (engine) {
+              // @ts-ignore - accessing private method for maintenance
+              engine.cleanupMitigatedZones();
+            }
           } catch (error) {
             logger.error(`Failed to refresh macro context for ${symbol}: ${error instanceof Error ? error.message : String(error)}`);
           }

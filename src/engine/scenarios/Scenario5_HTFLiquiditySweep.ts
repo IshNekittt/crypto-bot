@@ -161,9 +161,9 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       : entry.minus(sl.minus(entry).mul(3));
 
     this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
+      entry,
+      stopLoss: sl,
+      takeProfit: tp,
     });
 
     // Set zone details for mitigation tracking (the FVG we entered from)

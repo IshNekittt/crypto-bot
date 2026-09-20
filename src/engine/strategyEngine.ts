@@ -372,6 +372,23 @@ export class StrategyEngine {
     }
   }
 
+  /**
+   * Clean up mitigated zones older than 14 days to prevent memory leak
+   * Call this periodically (e.g., daily via macro context refresh)
+   */
+  cleanupMitigatedZones(): void {
+    const now = Date.now();
+    const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000;
+    const before = this.mitigatedZones.length;
+    this.mitigatedZones = this.mitigatedZones.filter(
+      zone => now - zone.timestamp < fourteenDaysMs
+    );
+    const removed = before - this.mitigatedZones.length;
+    if (removed > 0) {
+      logger.debug(`[${this.symbol}] Cleaned up ${removed} old mitigated zones (older than 14 days)`);
+    }
+  }
+
   private transition(state: StrategyState): void {
     this.state = state;
     if (state === StrategyState.SCANNING) {

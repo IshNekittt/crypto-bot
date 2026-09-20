@@ -16,12 +16,12 @@ describe('Scenario2: FVG Fill', () => {
     const FIXED_NOW = 1788675600000; // 2026-09-06 03:00 UTC (LONDON killzone)
     const FVG_TIME = FIXED_NOW - 15 * 900000; // 15 candles ago (225 min ago)
 
-    // HTF FVG (4H): top=105, bottom=103, eq=104
+    // HTF FVG (4H): top=100, bottom=98, eq=99 (in Discount zone)
     const htfFvg = {
       type: 'FVG' as const,
       direction: 'BULLISH' as const,
-      top: new Decimal(105),
-      bottom: new Decimal(103),
+      top: new Decimal(100),
+      bottom: new Decimal(98),
       timestamp: FVG_TIME,
       mitigated: false,
       timeframe: '240',
@@ -33,7 +33,7 @@ describe('Scenario2: FVG Fill', () => {
     // Candle 7 (index 7): CHoCH/BOS confirming direction
     // Candle 15 (index 15): FVG formation (timestamp = FVG_TIME)
     // Candles 16-29: after FVG
-    // Current candle (index 29): price at FVG equilibrium (104)
+    // Current candle (index 29): price at FVG equilibrium (99)
     const candles15m: any[] = [];
     for (let i = 0; i < 30; i++) {
       const ts = FIXED_NOW - (29 - i) * 900000;
@@ -62,16 +62,16 @@ describe('Scenario2: FVG Fill', () => {
     candles15m[7] = {
       ...candles15m[7],
       timestamp: FIXED_NOW - 22 * 900000,
-      high: '102',
+      high: '101',
       low: '99',
-      close: '101.5', // bullish close
+      close: '100.5', // bullish close
       open: '100',
     };
 
     // FVG formation candle (index 15) - this creates the FVG
     // FVG: gap between candle 14 high and candle 16 low
-    // Candle 14: high=101, Candle 16: low=104 -> FVG 101-104
-    // But we already have htfFvg with top=105, bottom=103, so let's align
+    // Candle 14: high=101, Candle 16: low=99 -> FVG 99-101
+    // But we already have htfFvg with top=100, bottom=98, so let's align
     candles15m[14] = {
       ...candles15m[14],
       timestamp: FVG_TIME + 900000, // 1 candle after FVG
@@ -82,27 +82,27 @@ describe('Scenario2: FVG Fill', () => {
     candles15m[15] = { // FVG formation candle (4H candle)
       ...candles15m[15],
       timestamp: FVG_TIME,
-      high: '105',
-      low: '103',
-      close: '104',
-      open: '103',
+      high: '100',
+      low: '98',
+      close: '99',
+      open: '99',
     };
     candles15m[16] = {
       ...candles15m[16],
       timestamp: FVG_TIME - 900000, // 1 candle before FVG
-      high: '106',
-      low: '104',
-      close: '105',
+      high: '101',
+      low: '99',
+      close: '100',
     };
 
-    // Current candle (index 29): price at FVG equilibrium (104)
-    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 104
+    // Current candle (index 29): price at FVG equilibrium (99)
+    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 99
     candles15m[29] = {
       timestamp: FIXED_NOW,
-      high: '104.5',
-      low: '103.5',
+      high: (eq.plus(0.5)).toFixed(2),
+      low: (eq.minus(0.5)).toFixed(2),
       close: eq.toFixed(2), // exactly at equilibrium
-      open: '104',
+      open: '99',
       volume: '1000',
     };
 
@@ -110,7 +110,7 @@ describe('Scenario2: FVG Fill', () => {
     const choch = {
       type: 'CHOCH' as const,
       direction: 'BULLISH' as const,
-      price: new Decimal(104),
+      price: new Decimal(99),
       timestamp: FIXED_NOW - 500, // very recent
       isValidated: true,
       impulseFactor: new Decimal(2.0), // > 1.5
@@ -120,7 +120,7 @@ describe('Scenario2: FVG Fill', () => {
     const bos4h = {
       type: 'BOS' as const,
       direction: 'BULLISH' as const,
-      price: new Decimal(102),
+      price: new Decimal(100),
       timestamp: FIXED_NOW - 2 * 60 * 60 * 1000, // 2 hours ago
       timeframe: '240',
       isValidated: true,
@@ -144,6 +144,19 @@ describe('Scenario2: FVG Fill', () => {
       structures: [choch, bos4h],
       liquidityPools: [sweepPool],
       atr15m: new Decimal('0.5'),
+      patternRecognizer: {
+        config: {
+          wickRatioThreshold: new Decimal('0.4'),
+        },
+        calculatePremiumDiscount: (candles: any[]) => {
+          const highs = candles.map((c: any) => new Decimal(c.high));
+          const lows = candles.map((c: any) => new Decimal(c.low));
+          const rangeHigh = Decimal.max(...highs);
+          const rangeLow = Decimal.min(...lows);
+          const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
+          return { equilibrium, rangeHigh, rangeLow, isPremium: false, isDiscount: false };
+        }
+      } as any,
     };
   };
 
@@ -157,8 +170,8 @@ describe('Scenario2: FVG Fill', () => {
     const htfFvg = {
       type: 'FVG' as const,
       direction: 'BULLISH' as const,
-      top: new Decimal(105),
-      bottom: new Decimal(103),
+      top: new Decimal(100),
+      bottom: new Decimal(98),
       timestamp: FVG_TIME,
       mitigated: false,
       timeframe: '240',
@@ -180,20 +193,20 @@ describe('Scenario2: FVG Fill', () => {
     // NO sweep, NO CHoCH/BOS before FVG - just random candles
 
     // Current candle at FVG equilibrium
-    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 104
+    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 99
     candles15m[29] = {
       timestamp: FIXED_NOW,
-      high: '104.5',
-      low: '103.5',
+      high: (eq.plus(0.5)).toFixed(2),
+      low: (eq.minus(0.5)).toFixed(2),
       close: eq.toFixed(2),
-      open: '104',
+      open: '99',
       volume: '1000',
     };
 
     const choch = {
       type: 'CHOCH' as const,
       direction: 'BULLISH' as const,
-      price: new Decimal(104),
+      price: new Decimal(99),
       timestamp: FIXED_NOW - 500,
       isValidated: true,
       impulseFactor: new Decimal(2.0),
@@ -202,7 +215,7 @@ describe('Scenario2: FVG Fill', () => {
     const bos4h = {
       type: 'BOS' as const,
       direction: 'BULLISH' as const,
-      price: new Decimal(102),
+      price: new Decimal(100),
       timestamp: FIXED_NOW - 2 * 60 * 60 * 1000,
       timeframe: '240',
       isValidated: true,
@@ -217,6 +230,19 @@ describe('Scenario2: FVG Fill', () => {
       structures: [choch, bos4h],
       liquidityPools: [], // NO liquidity context
       atr15m: new Decimal('0.5'),
+      patternRecognizer: {
+        config: {
+          wickRatioThreshold: new Decimal('0.4'),
+        },
+        calculatePremiumDiscount: (candles: any[]) => {
+          const highs = candles.map((c: any) => new Decimal(c.high));
+          const lows = candles.map((c: any) => new Decimal(c.low));
+          const rangeHigh = Decimal.max(...highs);
+          const rangeLow = Decimal.min(...lows);
+          const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
+          return { equilibrium, rangeHigh, rangeLow, isPremium: false, isDiscount: false };
+        }
+      } as any,
     };
   };
 
@@ -227,15 +253,15 @@ describe('Scenario2: FVG Fill', () => {
   describe('SYNTHETIC TEST - Ideal FVG Fill Pattern', () => {
     it('should trigger on perfect FVG Fill: HTF FVG + liquidity context + CHoCH', () => {
       const result = scenario.evaluate(createIdealFvgFillPatternData());
-      
+
       if (!result) {
         console.log('REJECTION REASON:', scenario.getReason());
         console.log('LEVELS:', scenario.getLevels());
       }
-      
+
       expect(result).toBe(true);
       expect(scenario.getReason()).toContain('FVG Fill');
-      expect(scenario.getReason()).toContain('liquidity context');
+      expect(scenario.getReason()).toContain('Premium/Discount');
       expect(scenario.getLevels().entry).toBeDefined();
     });
   });
@@ -263,9 +289,14 @@ describe('Scenario2: FVG Fill', () => {
   describe('negative cases - 0.5 equilibrium', () => {
     it('should reject when price has not touched 0.5 of HTF FVG', () => {
       const data = createIdealFvgFillPatternData();
-      data.candles15m[29].close = '95'; // far from eq
-      data.candles15m[29].high = '96';
-      data.candles15m[29].low = '94';
+      data.candles15m[29].close = '70'; // far from eq
+      data.candles15m[29].high = '71';
+      data.candles15m[29].low = '69';
+      // Ensure FVG stays in Discount zone despite modified candle
+      // With modified candle (low=69), rangeLow=69, rangeHigh=102, equilibrium=85.5
+      // FVG at 82/80 (mid=81) is < 85.5 -> Discount zone
+      data.zones[0].top = new Decimal(82);
+      data.zones[0].bottom = new Decimal(78);
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('0.5 (Equilibrium) of HTF FVG');
@@ -283,6 +314,13 @@ describe('Scenario2: FVG Fill', () => {
   describe('negative cases - CHoCH', () => {
     it('should reject when no 15m CHoCH after FVG touch', () => {
       const data = createIdealFvgFillPatternData();
+      // Ensure FVG is in Discount zone
+      data.zones[0].top = new Decimal(100);
+      data.zones[0].bottom = new Decimal(98);
+      const eq = data.zones[0].top.plus(data.zones[0].bottom).dividedBy(2);
+      data.candles15m[29].close = eq.toFixed(2);
+      data.candles15m[29].high = (eq.plus(0.5)).toFixed(2);
+      data.candles15m[29].low = (eq.minus(0.5)).toFixed(2);
       data.structures = data.structures.filter(s => s.type !== 'CHOCH');
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
@@ -291,7 +329,14 @@ describe('Scenario2: FVG Fill', () => {
 
     it('should reject when CHoCH displacement < 1.5 ATR', () => {
       const data = createIdealFvgFillPatternData();
-      data.structures = data.structures.map(s => 
+      // Ensure FVG is in Discount zone
+      data.zones[0].top = new Decimal(100);
+      data.zones[0].bottom = new Decimal(98);
+      const eq = data.zones[0].top.plus(data.zones[0].bottom).dividedBy(2);
+      data.candles15m[29].close = eq.toFixed(2);
+      data.candles15m[29].high = (eq.plus(0.5)).toFixed(2);
+      data.candles15m[29].low = (eq.minus(0.5)).toFixed(2);
+      data.structures = data.structures.map(s =>
         s.type === 'CHOCH' ? { ...s, impulseFactor: new Decimal(1.0) } : s
       );
       const result = scenario.evaluate(data);
@@ -313,6 +358,16 @@ describe('Scenario2: FVG Fill', () => {
         isValidated: true,
         impulseFactor: new Decimal(2.0),
       } as any);
+      // Also ensure FVG is in Discount zone so Premium/Discount filter passes first
+      // candles range: high=102, low=98 -> equilibrium=100
+      // FVG needs to be < 100 for Discount zone
+      data.zones[0].top = new Decimal(100);
+      data.zones[0].bottom = new Decimal(98);
+      // Update current candle to touch new FVG equilibrium (99)
+      const eq = data.zones[0].top.plus(data.zones[0].bottom).dividedBy(2);
+      data.candles15m[29].close = eq.toFixed(2);
+      data.candles15m[29].high = (eq.plus(0.5)).toFixed(2);
+      data.candles15m[29].low = (eq.minus(0.5)).toFixed(2);
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('4H trend not bullish');

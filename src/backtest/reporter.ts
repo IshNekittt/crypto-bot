@@ -119,9 +119,9 @@ export function generateReport(
 
   lines.push('📊 SCENARIO REJECTION STATS');
   lines.push('   Scenario 2 (FVG Fill):');
-  lines.push(`     Total: ${scenario2Stats.totalEvals} | Killzone: ${scenario2Stats.killzone} | NoHTFFVG: ${scenario2Stats.noHtfFvg} | NoTouch: ${scenario2Stats.noFvgTouch} | NoChoch: ${scenario2Stats.noChoch} | Disp: ${scenario2Stats.displacement} | Trend: ${scenario2Stats.trendFilter} | NoLiqCtx: ${scenario2Stats.noLiquidityContext}`);
+  lines.push(`     Total: ${scenario2Stats.totalEvals} | Killzone: ${scenario2Stats.killzone} | NoHTFFVG: ${scenario2Stats.noHtfFvg} | NoTouch: ${scenario2Stats.noFvgTouch} | NoChoch: ${scenario2Stats.noChoch} | Disp: ${scenario2Stats.displacement} | PremDisc: ${scenario2Stats.premiumDiscount} | NoLiqCtx: ${scenario2Stats.noLiquidityContext}`);
   lines.push('   Scenario 4 (Mitigation Chain):');
-  lines.push(`     Total: ${scenario4Stats.totalEvals} | Killzone: ${scenario4Stats.killzone} | NoOB: ${scenario4Stats.noValidOb} | NoTouch: ${scenario4Stats.noObTouch} | NoChoch: ${scenario4Stats.noChoch} | Disp: ${scenario4Stats.displacement} | Trend: ${scenario4Stats.trendFilter} | NoBOS: ${scenario4Stats.noBosAfterBounce}`);
+  lines.push(`     Total: ${scenario4Stats.totalEvals} | Killzone: ${scenario4Stats.killzone} | NoOB: ${scenario4Stats.noValidOb} | NoTouch: ${scenario4Stats.noObTouch} | NoChoch: ${scenario4Stats.noChoch} | Disp: ${scenario4Stats.displacement} | PremDisc: ${scenario4Stats.premiumDiscount} | NoBOS: ${scenario4Stats.noBosAfterBounce}`);
   lines.push('   Scenario 5 (HTF Sweep):');
   lines.push(`     Total: ${scenario5Stats.totalEvals} | Killzone: ${scenario5Stats.killzone} | NoPools: ${scenario5Stats.noPools} | NoSweep: ${scenario5Stats.noSweep} | NoChoch: ${scenario5Stats.noChoch} | Displacement: ${scenario5Stats.displacement} | NoFvg: ${scenario5Stats.noFvg}`);
   lines.push('   Scenario 7 (AMD):');

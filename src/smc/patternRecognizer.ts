@@ -85,6 +85,12 @@ export interface PatternConfig {
   readonly fvgMinGapPercent: Decimal;
   readonly equilibriumLevel: Decimal;
   readonly sessionConfig: SessionConfig;
+  readonly bollingerPeriod: number;
+  readonly bollingerStdDev: number;
+  readonly bollingerSqueezePercentile: number; // e.g., 20 = bottom 20%
+  readonly bollingerSqueezeLookback: number;  // e.g., 100 candles for percentile
+  readonly rangeLookback: number;             // e.g., 30 candles for range extremes
+  readonly wickRatioThreshold: Decimal;       // e.g., 0.4 = 40% wick
 }
 
 export interface PatternData {
@@ -101,6 +107,7 @@ export interface PatternData {
   readonly swingPoints: SwingPoint[];
   readonly atr15m: Decimal;
   readonly atr4h: Decimal;
+  readonly patternRecognizer: 'PatternRecognizer';
 }
 
 export const DEFAULT_PATTERN_CONFIG: PatternConfig = {
@@ -116,6 +123,12 @@ export const DEFAULT_PATTERN_CONFIG: PatternConfig = {
     london: { start: 2, end: 5 },
     ny: { start: 7, end: 10 },
   },
+  bollingerPeriod: 20,
+  bollingerStdDev: 2,
+  bollingerSqueezePercentile: 20,   // bottom 20% of bandwidth values
+  bollingerSqueezeLookback: 100,    // lookback for percentile calculation
+  rangeLookback: 30,                // candles for range extremes
+  wickRatioThreshold: new Decimal('0.4'), // 40% wick requirement
 };
 
 export class PatternRecognizer {
@@ -276,6 +289,170 @@ export class PatternRecognizer {
     }
 
     return trSum.dividedBy(period);
+  }
+
+  /**
+   * Calculate Bollinger Bands
+   * Returns { upper, middle, lower, bandwidth }
+   * Bandwidth = (Upper - Lower) / Middle
+   */
+  calculateBollingerBands(candles: Candle[], period: number = 20, stdDev: number = 2): { upper: Decimal; middle: Decimal; lower: Decimal; bandwidth: Decimal } {
+    if (candles.length < period) {
+      return { upper: new Decimal(0), middle: new Decimal(0), lower: new Decimal(0), bandwidth: new Decimal(0) };
+    }
+
+    // Calculate SMA (middle band)
+    const recentCandles = candles.slice(-period);
+    let sum = new Decimal(0);
+    for (const c of recentCandles) {
+      sum = sum.plus(new Decimal(c.close));
+    }
+    const middle = sum.dividedBy(period);
+
+    // Calculate standard deviation
+    let sqSum = new Decimal(0);
+    for (const c of recentCandles) {
+      const close = new Decimal(c.close);
+      const diff = close.minus(middle);
+      sqSum = sqSum.plus(diff.mul(diff));
+    }
+    const variance = sqSum.dividedBy(period);
+    const std = variance.sqrt();
+
+    const multiplier = new Decimal(stdDev);
+    const upper = middle.plus(std.mul(multiplier));
+    const lower = middle.minus(std.mul(multiplier));
+    const bandwidth = upper.minus(lower).div(middle);
+
+    return { upper, middle, lower, bandwidth };
+  }
+
+  /**
+   * Calculate Bollinger Bands series for percentile calculation
+   * Returns array of bandwidth values for each period
+   */
+  calculateBollingerBandwidthSeries(candles: Candle[], period: number = 20, stdDev: number = 2, lookback: number = 100): Decimal[] {
+    if (candles.length < period + lookback) return [];
+
+    const bandwidths: Decimal[] = [];
+    const maxStart = candles.length - period;
+    const start = Math.max(0, maxStart - lookback + 1);
+
+    for (let i = start; i <= maxStart; i++) {
+      const window = candles.slice(i, i + period);
+      const bb = this.calculateBollingerBands(window, period, stdDev);
+      bandwidths.push(bb.bandwidth);
+    }
+
+    return bandwidths;
+  }
+
+  /**
+   * Check if current Bollinger Bandwidth indicates a squeeze
+   * Squeeze = current bandwidth is in bottom percentile of recent bandwidths
+   */
+  isBollingerSqueeze(candles: Candle[], period: number, stdDev: number, squeezePercentile: number, squeezeLookback: number): boolean {
+    const bandwidths = this.calculateBollingerBandwidthSeries(candles, period, stdDev, squeezeLookback);
+    if (bandwidths.length < 10) return false; // Need enough data
+
+    const currentBandwidth = bandwidths[bandwidths.length - 1];
+    const sorted = [...bandwidths].sort((a, b) => a.comparedTo(b));
+    const thresholdIndex = Math.floor(sorted.length * (squeezePercentile / 100));
+    const threshold = sorted[thresholdIndex];
+
+    return currentBandwidth.lte(threshold);
+  }
+
+  /**
+   * Calculate trading range with Bollinger Bands squeeze filter
+   * Range is valid only if Bollinger Bands are in squeeze (low volatility)
+   * Range boundaries = extremes of last N candles
+   */
+  detectTradingRange(
+    candles: Candle[],
+    rangeLookback: number = 30,
+    bbPeriod: number = 20,
+    bbStdDev: number = 2,
+    squeezePercentile: number = 20,
+    squeezeLookback: number = 100
+  ): TradingRange | null {
+    if (candles.length < Math.max(rangeLookback, bbPeriod) + 1) return null;
+
+    // Check Bollinger Bands squeeze FIRST - this is the gatekeeper
+    if (!this.isBollingerSqueeze(candles, bbPeriod, bbStdDev, squeezePercentile, squeezeLookback)) {
+      return null; // No squeeze = no valid range
+    }
+
+    // Exclude the last candle (current) from range formation
+    const recentCandles = candles.slice(-(rangeLookback + 1), -1);
+    if (recentCandles.length < rangeLookback) return null;
+
+    // Range boundaries = actual extremes of last N candles
+    let rangeHigh = new Decimal(0);
+    let rangeLow = new Decimal('Infinity');
+
+    for (const c of recentCandles) {
+      const high = new Decimal(c.high);
+      const low = new Decimal(c.low);
+      if (high.gt(rangeHigh)) rangeHigh = high;
+      if (low.lt(rangeLow)) rangeLow = low;
+    }
+
+    // Range size check - realistic for crypto (0.3% to 15%)
+    const rangeSize = rangeHigh.minus(rangeLow);
+    const avgPrice = rangeHigh.plus(rangeLow).dividedBy(2);
+    const rangePct = rangeSize.div(avgPrice).mul(100);
+    if (rangePct.lt(new Decimal('0.3')) || rangePct.gt(new Decimal('15'))) return null;
+
+    // Check for recent deviation - current candle poked outside RH or RL
+    const lastCandle = candles[candles.length - 1];
+    const lastHigh = new Decimal(lastCandle.high);
+    const lastLow = new Decimal(lastCandle.low);
+
+    const isDeviated = lastHigh.gt(rangeHigh) || lastLow.lt(rangeLow);
+
+    const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
+
+    return {
+      high: rangeHigh,
+      low: rangeLow,
+      equilibrium,
+      isDeviated,
+    };
+  }
+
+  /**
+   * Calculate Premium/Discount levels using Fibonacci
+   * Determines trading range from last valid Swing Low to Swing High
+   * Returns { equilibrium, isPremium, isDiscount, rangeHigh, rangeLow }
+   */
+  calculatePremiumDiscount(candles: Candle[], swingLookback: number = 20): { equilibrium: Decimal; isPremium: boolean; isDiscount: boolean; rangeHigh: Decimal; rangeLow: Decimal } | null {
+    if (candles.length < swingLookback + 5) return null;
+
+    // Find recent swing points
+    const swings = this.findSwingPoints(candles.slice(-swingLookback), 3);
+    if (swings.length < 2) return null;
+
+    const highs = swings.filter(s => s.type === 'HIGH');
+    const lows = swings.filter(s => s.type === 'LOW');
+    if (highs.length === 0 || lows.length === 0) return null;
+
+    // Use the most recent valid swing high and swing low
+    const rangeHigh = highs[highs.length - 1].price;
+    const rangeLow = lows[lows.length - 1].price;
+
+    // Ensure rangeLow < rangeHigh (valid range)
+    if (rangeLow.gte(rangeHigh)) return null;
+
+    const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
+
+    return {
+      equilibrium,
+      rangeHigh,
+      rangeLow,
+      isPremium: false, // Will be set by caller based on current price
+      isDiscount: false,
+    };
   }
 
   /**
@@ -763,78 +940,6 @@ export class PatternRecognizer {
   }
 
   /**
-   * Detect Trading Range (consolidation zone) with Range High, Range Low, and Equilibrium
-   * A range is valid when price oscillates between a high and low for a period
-   * Realistic for crypto: uses actual price extremes, allows wicks through boundaries
-   * IMPORTANT: Excludes the last candle (current) from range formation to allow deviation detection
-   */
-  detectTradingRange(candles: Candle[], lookback: number = 50): TradingRange | null {
-    if (candles.length < lookback + 1) return null; // Need lookback + current candle
-
-    // Exclude the last candle (current) from range formation
-    // Range is formed by the PREVIOUS 'lookback' candles
-    const recentCandles = candles.slice(-(lookback + 1), -1);
-    
-    // Use actual price extremes in the lookback period (not just swing points)
-    // This captures ranges even without clean swing points
-    let rangeHigh = new Decimal(0);
-    let rangeLow = new Decimal('Infinity');
-    
-    for (const c of recentCandles) {
-      const high = new Decimal(c.high);
-      const low = new Decimal(c.low);
-      if (high.gt(rangeHigh)) rangeHigh = high;
-      if (low.lt(rangeLow)) rangeLow = low;
-    }
-
-    // Require at least 1 touch of each boundary (the extreme itself counts)
-    // Use 0.5 * ATR as tolerance for "touching" a level
-    const atr = this.calculateATR(recentCandles, 14);
-    const tolerance = atr.mul(0.5); // 50% of ATR as touch tolerance
-    
-    let highTouches = 0;
-    let lowTouches = 0;
-    for (const c of recentCandles) {
-      const high = new Decimal(c.high);
-      const low = new Decimal(c.low);
-      
-      // Touched range high: wicked to/through it, or closed near it
-      if (high.gte(rangeHigh.minus(tolerance))) {
-        highTouches++;
-      }
-      // Touched range low: wicked to/through it, or closed near it
-      if (low.lte(rangeLow.plus(tolerance))) {
-        lowTouches++;
-      }
-    }
-
-    // Require at least 1 touch of each boundary (the extreme candle itself counts)
-    if (highTouches < 1 || lowTouches < 1) return null;
-
-    // Range size check - realistic for crypto (0.3% to 15%)
-    const rangeSize = rangeHigh.minus(rangeLow);
-    const avgPrice = rangeHigh.plus(rangeLow).dividedBy(2);
-    const rangePct = rangeSize.div(avgPrice).mul(100);
-    if (rangePct.lt(new Decimal('0.3')) || rangePct.gt(new Decimal('15'))) return null;
-
-    // Check for recent deviation - current candle poked outside RH or RL
-    const lastCandle = candles[candles.length - 1];
-    const lastHigh = new Decimal(lastCandle.high);
-    const lastLow = new Decimal(lastCandle.low);
-    
-    const isDeviated = lastHigh.gt(rangeHigh) || lastLow.lt(rangeLow);
-
-    const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
-
-    return {
-      high: rangeHigh,
-      low: rangeLow,
-      equilibrium,
-      isDeviated,
-    };
-  }
-
-  /**
    * Initialize macro context: fetch 1W and 1D candles, find ATH/ATL, POIs
    * ULTRA-FAST: ~5ms - NO heavy SMC analysis on macro timeframes!
    * Only computes: ATH, ATL, PWH/PWL, PDH/PDL, DO/WO, recent FVGs (last 20 daily)
@@ -984,8 +1089,15 @@ export class PatternRecognizer {
     const structures15m = this.detectStructureBreaks(ltfCandles, atr15m);
     const structures4h = this.detectStructureBreaks(htfCandles, atr4h);
 
-    // Detect Trading Range on 15m
-    const tradingRange = this.detectTradingRange(ltfCandles);
+    // Detect Trading Range on 15m with Bollinger Bands squeeze filter
+    const tradingRange = this.detectTradingRange(
+      ltfCandles,
+      this.config.rangeLookback,
+      this.config.bollingerPeriod,
+      this.config.bollingerStdDev,
+      this.config.bollingerSqueezePercentile,
+      this.config.bollingerSqueezeLookback
+    );
 
     // === Add BSL/SSL from 4H swing points ===
     // BSL = Buy Side Liquidity = Swing Highs (where buy stops are placed above)
@@ -1080,6 +1192,7 @@ export class PatternRecognizer {
       swingPoints: [...swingPoints15m, ...swingPoints4h],
       atr15m,
       atr4h,
+      patternRecognizer: this as any,
     };
   }
 }

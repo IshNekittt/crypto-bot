@@ -63,12 +63,12 @@ export class Scenario7_AMD extends BaseScenario {
     const asianLow = asianRange.low;
 
     // FILTER: Asian Range must be Accumulation (tight range), not trending
-    // Height must be < 1.5 * ATR(4H)
+    // Height must be < 3.0 * ATR(4H) - increased from 1.5 for crypto volatility
     const atr4h = patternData.atr4h || new Decimal('0.01');
     const asianRangeHeight = asianHigh.minus(asianLow);
-    const maxAllowedHeight = atr4h.mul(1.5);
+    const maxAllowedHeight = atr4h.mul(3.0);
     if (asianRangeHeight.gt(maxAllowedHeight)) {
-      this.logRejection(`Asian Range too wide for accumulation: ${asianRangeHeight.toFixed(2)} > 1.5*ATR4H (${maxAllowedHeight.toFixed(2)})`);
+      this.logRejection(`Asian Range too wide for accumulation: ${asianRangeHeight.toFixed(2)} > 3.0*ATR4H (${maxAllowedHeight.toFixed(2)})`);
       Scenario7_AMD.rejectionStats.asianRangeTooWide++;
       return false;
     }
@@ -145,22 +145,32 @@ export class Scenario7_AMD extends BaseScenario {
 
     // Entry at 0.5 (Equilibrium) of FVG
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
-    const sl = fvg.bottom.minus(atr15m.mul(0.5));
-    const tp = asianHigh; // Target: Asian High
 
-    // Verify R:R >= 1:3
-    const risk = entry.minus(sl);
-    const reward = tp.minus(entry);
+    // Use centralized calculateLevels for safe SL/TP geometry
+    const levels = this.calculateLevels(
+      entry,
+      { top: fvg.top, bottom: fvg.bottom, direction: 'BULLISH' },
+      'BULLISH',
+      atr15m
+    );
+
+    // Verify R:R >= 1:3 (calculateLevels already uses 1:3 RR)
+    const risk = levels.entry.minus(levels.stopLoss);
+    const reward = levels.takeProfit.minus(levels.entry);
     if (reward.div(risk).lt(3)) {
       this.logRejection(`R:R < 1:3 (risk: ${risk.toFixed(4)}, reward: ${reward.toFixed(4)})`);
       return false;
     }
 
-    this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
-    });
+    // Override TP to target Asian High if it provides better R:R
+    if (asianHigh.gt(levels.takeProfit)) {
+      const customReward = asianHigh.minus(levels.entry);
+      if (customReward.div(risk).gte(3)) {
+        levels.takeProfit = asianHigh;
+      }
+    }
+
+    this.setLevels(levels);
 
     // Set zone details for mitigation tracking (the FVG we entered from)
     this.setZoneDetails({
@@ -172,7 +182,7 @@ export class Scenario7_AMD extends BaseScenario {
       timestamp: fvg.timestamp,
     });
 
-    this.setReason(`AMD: Asian Low swept in ${currentKillzone} killzone (Asian Range height ${asianRangeHeight.toFixed(2)} < 1.5*ATR4H) + CHoCH + FVG 0.5 entry, target Asian High`);
+    this.setReason(`AMD: Asian Low swept in ${currentKillzone} killzone (Asian Range height ${asianRangeHeight.toFixed(2)} < 3.0*ATR4H) + CHoCH + FVG 0.5 entry, target Asian High`);
     return true;
   }
 }

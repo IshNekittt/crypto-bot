@@ -150,6 +150,28 @@ or `None for today` / error state.
 - Supabase PostgreSQL database
 - Telegram Bot Token + Chat ID
 
+#### Getting Telegram Credentials
+
+1. **Bot Token**: Message `@BotFather` on Telegram → `/newbot` → follow instructions → copy token
+2. **Chat ID**: Message `@userinfobot` or `@RawDataBot` → copy your numeric `id`
+3. Add both to `.env`:
+   ```bash
+   TELEGRAM_BOT_TOKEN=123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ
+   TELEGRAM_CHAT_ID=123456789
+   ```
+
+### Understanding Trading Modes: DEMO_TRADING vs TESTNET
+
+| Mode | `DEMO_TRADING` | `TESTNET` | Use Case |
+|------|----------------|-----------|----------|
+| **Demo Trading** | `true` | `false` (ignored) | **Production-like** — real market data, virtual balance, no real money. Recommended for live testing. |
+| **Testnet** | `false` | `true` | Legacy Bybit testnet — separate environment, may have different liquidity. |
+| **Mainnet** | `false` | `false` | **Real money** — only when you're confident. |
+
+> ⚠️ **Critical**: `DEMO_TRADING=true` forces `TESTNET=false`. They cannot both be true.
+> - **Demo Trading** uses your mainnet API keys but routes to Bybit's demo environment (virtual funds, real market data).
+> - **Testnet** requires separate testnet API keys from `testnet.bybit.com`.
+
 ### Local Development
 
 ```bash
@@ -169,13 +191,15 @@ npm run typecheck && npm test
 npm run build && npm start
 ```
 
-### Docker (Production)
+### Docker (Production) — Stateless Architecture
+
+This bot is **fully stateless** — no local database, no persistent volumes. All state lives in **Supabase (PostgreSQL)**.
 
 ```bash
-# Build image (~85 MB final)
+# Build image (~85 MB final, multi-stage)
 docker build -t smc-bot .
 
-# Run with .env
+# Run with .env (loads all environment variables)
 docker run -d \
   --name smc-bot \
   --restart unless-stopped \
@@ -183,9 +207,15 @@ docker run -d \
   -p 3000:3000 \
   smc-bot
 
-# Or use docker-compose
+# Or use docker-compose (recommended)
 docker compose up -d
 ```
+
+**Why no volumes?**
+- Database = Supabase (external, managed PostgreSQL)
+- Logs = stdout/stderr (captured by Docker/Render)
+- Config = `.env` file (mounted via `--env-file` or Render dashboard)
+- Backups = sent to Telegram (no local disk needed)
 
 ---
 
@@ -334,17 +364,131 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 
 ---
 
-## 📱 Telegram Commands
+## 📱 Telegram Commands — Detailed Reference
 
-| Command            | Description                                                                                               | Auth Required |
-| ------------------ | --------------------------------------------------------------------------------------------------------- | ------------- |
-| `/status`          | **Live X-Ray** per engine: Live Price, Last Candle, 4H Trend, Zones in Memory, Nearest Macro %dist, State | ✅            |
-| `/backup`          | Full DB dump (19 cols) → gzip → Telegram via `fetch`+Blob (no disk I/O)                                   | ✅            |
-| `/test_signal`     | Dry-run fake setup → Inline Approve/Reject buttons                                                        | ✅            |
-| `/test_live_order` | **E2E Live Demo** → Real Bybit Demo order (requires `ENABLE_LIVE_TEST_ORDERS=true`)                       | ✅            |
-| `/test_db`         | Integration test: INSERT/SELECT/DELETE with Decimal zoneDetails                                           | ✅            |
+| Command | Description | Auth Required |
+|---------|-------------|---------------|
+| `/status` | **Live X-Ray** per engine: Live Price, Last Candle, 4H Trend, Zones in Memory, Nearest Macro %dist, State. Also shows next high-impact USD news and funding rates. | ✅ |
+| `/backup` | Full DB dump (all 19 trades columns) → gzip → Telegram via `fetch`+Blob (no disk I/O, no `fs` usage). Encrypted with AES-256-CBC if `BACKUP_PASSWORD` set. | ✅ |
+| `/test_signal` | **Dry-run** — creates a fake setup (BTCUSDT, entry 45000, SL 44000, TP 48000) → Inline Approve/Reject buttons → logs `✅ Test trade approved (DRY RUN)`. No real order placed. | ✅ |
+| `/test_live_order` | **E2E Live Demo** — places REAL order on Bybit Demo when approved. Requires `ENABLE_LIVE_TEST_ORDERS=true`. Uses real balance, real position sizing via RiskManager. Full Bybit API response logged. | ✅ |
+| `/test_db` | Integration test: INSERT/SELECT/DELETE with Decimal zoneDetails. Verifies database connectivity and NUMERIC(24,8) precision. | ✅ |
 
-> **Security**: Only `TELEGRAM_CHAT_ID` from `.env` receives responses. All other users are silently ignored — no errors, no visibility.
+> **Security**: Only `TELEGRAM_CHAT_ID` from `.env` receives responses. All other users are **silently ignored** — no errors, no visibility, no `setMyCommands` (bot invisible to strangers).
+
+### `/status` Output Example
+
+```
+📊 SYSTEM STATUS REPORT
+
+🔸 Symbol: BTCUSDT
+📈 Live Price: 67432.5
+⏱ Last Candle: 2026-09-20 14:15:00
+🧭 4H Trend: BULLISH
+🧱 Zones in Memory: 23
+💧 Nearest Macro: 0.85%
+💼 State: SCANNING
+
+🔸 Symbol: ETHUSDT
+📈 Live Price: 2654.2
+⏱ Last Candle: 2026-09-20 14:15:00
+🧭 4H Trend: BEARISH
+🧱 Zones in Memory: 19
+💧 Nearest Macro: 1.20%
+💼 State: SCANNING
+
+📰 Next USD High-Impact News: NFP at 2026-09-15 14:00:00 UTC
+
+📊 Funding Rates:
+🟢 BTC: +0.0100%
+🟢 ETH: +0.0150%
+🟢 SOL: +0.0200%
+```
+
+### `/backup` — How It Works
+
+1. Bot queries `SELECT * FROM trades` (all 19 columns)
+2. Converts to CSV with headers
+3. Gzips the CSV in memory
+4. Encrypts with AES-256-CBC (if `BACKUP_PASSWORD` set)
+5. Sends via **native `fetch` + `Blob` + `FormData`** to `api.telegram.org/bot<token>/sendDocument`
+6. **No `fs.writeFileSync`, no local files, no Telegraf `sendDocument` buffer bug**
+
+### `/test_live_order` — End-to-End Verification
+
+This is the **ultimate integration test**:
+
+1. Fetches last closed 15m candle price from engine
+2. Calculates SL/TP (1% risk, 1:3 R:R)
+3. Calls `RiskManager.calculatePosition()` with real balance
+4. Queues trade in `PendingTradeManager` with `isLiveDemoTest: true`
+5. You approve via ✅ button → **REAL order sent to Bybit Demo**
+6. Full Bybit API response logged: `orderId`, `retCode`, `retMsg`, `ok`
+7. Trade cleaned up (no DB record created)
+
+---
+
+## 🌐 Render Deployment (Recommended)
+
+The bot is designed for **Render's Stateless Web Service** (free tier compatible).
+
+### render.yaml
+
+```yaml
+services:
+  - type: web
+    name: smc-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      - key: SYMBOLS
+        value: BTCUSDT,ETHUSDT,SOLUSDT
+      - key: DATABASE_URL
+        fromDatabase:
+          name: smc-db
+          property: connectionString
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DEMO_TRADING
+        value: "true"
+      - key: AUTO_TRADING
+        value: "false"
+      - key: LOG_LEVEL
+        value: "info"
+    healthCheckPath: /health
+    autoDeploy: true
+```
+
+### Render Setup Steps
+
+1. **Create PostgreSQL Database** (Render → New → PostgreSQL)
+   - Name: `smc-db`
+   - Plan: Free (or Starter for production)
+   - Copy **External Connection String** → `DATABASE_URL`
+
+2. **Create Web Service** (Render → New → Web Service)
+   - Connect your GitHub repo
+   - Render detects `render.yaml` automatically
+   - Set secrets in Environment Variables:
+     - `BYBIT_API_KEY`, `BYBIT_API_SECRET` (sync: false = secret)
+     - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (sync: false)
+     - `BACKUP_PASSWORD` (optional, for encrypted backups)
+
+3. **Deploy** — auto-deploys on push to main
+
+### Why Render Works Perfectly
+
+- **Stateless** — no persistent disk needed (Supabase for DB)
+- **Health check** on `/health` → Render monitors liveness
+- **Auto-deploy** on git push
+- **Free tier**: 750 hrs/month, 512 MB RAM, 0.5 CPU
+- **UTC timezone** — matches SMC killzone calculations
 
 ---
 
@@ -508,7 +652,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (211)
+# All tests (231)
 npm test
 
 # Watch mode

@@ -1,7 +1,11 @@
-import { Decimal } from 'decimal.js';
-import { TAKE_PROFIT_RR_RATIO } from '../smc/smc';
-import { InstrumentInfo, TradeRecord, TradeSide } from '../types';
-import { roundDownToStep } from '../utils/precision';
+import { Decimal } from "decimal.js";
+import { TAKE_PROFIT_RR_RATIO } from "../smc/smc";
+import { InstrumentInfo, TradeRecord, TradeSide } from "../types";
+import {
+  roundDownToStep,
+  formatPrice,
+  formatQuantity,
+} from "../utils/precision";
 
 export interface BalanceSource {
   getUsdtBalance(): Promise<Decimal>;
@@ -69,36 +73,57 @@ export class RiskManager {
   private readonly historySource: TradeHistorySource;
   private readonly options: RiskManagerOptions;
 
-  constructor(balanceSource: BalanceSource, historySource: TradeHistorySource, options: RiskManagerOptions) {
+  constructor(
+    balanceSource: BalanceSource,
+    historySource: TradeHistorySource,
+    options: RiskManagerOptions,
+  ) {
     this.balanceSource = balanceSource;
     this.historySource = historySource;
     this.options = options;
   }
 
   async getEffectiveRiskPercent(): Promise<Decimal> {
-    const recent = await this.historySource.getRecentClosedTrades(DRAWDOWN_LOSING_TRADES_COUNT);
-    if (recent.length >= DRAWDOWN_LOSING_TRADES_COUNT && recent.every(isLosingTrade)) {
+    const recent = await this.historySource.getRecentClosedTrades(
+      DRAWDOWN_LOSING_TRADES_COUNT,
+    );
+    if (
+      recent.length >= DRAWDOWN_LOSING_TRADES_COUNT &&
+      recent.every(isLosingTrade)
+    ) {
       return new Decimal(this.options.reducedRiskPercent);
     }
     return new Decimal(this.options.baseRiskPercent);
   }
 
-  async calculatePosition(input: PositionPlanInput): Promise<PositionPlanResult> {
+  async calculatePosition(
+    input: PositionPlanInput,
+  ): Promise<PositionPlanResult> {
     const tickSize = new Decimal(input.instrument.tickSize);
     const qtyStep = new Decimal(input.instrument.qtyStep);
     const minOrderQty = new Decimal(input.instrument.minOrderQty);
     const maxOrderQty = new Decimal(input.instrument.maxOrderQty);
 
     if (tickSize.lte(0) || qtyStep.lte(0)) {
-      return { ok: false, reason: `${input.symbol}: invalid instrument filters (tickSize=${tickSize}, qtyStep=${qtyStep})` };
+      return {
+        ok: false,
+        reason: `${input.symbol}: invalid instrument filters (tickSize=${tickSize}, qtyStep=${qtyStep})`,
+      };
     }
 
-    const isLong = input.side === 'Buy';
-    const entry = roundDownToStep(input.entryPrice, tickSize);
-    const stopLoss = roundDownToStep(input.stopLossRaw, tickSize);
+    const isLong = input.side === "Buy";
+    const entryRaw = roundDownToStep(input.entryPrice, tickSize);
+    const stopLossRaw = roundDownToStep(input.stopLossRaw, tickSize);
+    const entry = formatPrice(entryRaw, tickSize);
+    const stopLoss = formatPrice(stopLossRaw, tickSize);
 
-    const slDistance = isLong ? entry.minus(stopLoss) : stopLoss.minus(entry);
-    if (slDistance.lte(0)) {
+    const entryDecimal = new Decimal(entry);
+    const stopLossDecimal = new Decimal(stopLoss);
+    const slDistanceDecimal = isLong
+      ? entryDecimal.minus(stopLossDecimal)
+      : stopLossDecimal.minus(entryDecimal);
+
+    if (slDistanceDecimal.lte(0)) {
       return {
         ok: false,
         reason: `${input.symbol}: invalid SL level for ${input.side} side (entry=${entry}, sl=${stopLoss})`,
@@ -106,46 +131,56 @@ export class RiskManager {
     }
 
     const takeProfitRaw = isLong
-      ? entry.plus(slDistance.mul(TAKE_PROFIT_RR_RATIO))
-      : entry.minus(slDistance.mul(TAKE_PROFIT_RR_RATIO));
-    const takeProfit = roundDownToStep(takeProfitRaw, tickSize);
+      ? new Decimal(entry).plus(slDistanceDecimal.mul(TAKE_PROFIT_RR_RATIO))
+      : new Decimal(entry).minus(slDistanceDecimal.mul(TAKE_PROFIT_RR_RATIO));
+    const takeProfit = formatPrice(takeProfitRaw, tickSize);
 
     const riskPercent = await this.getEffectiveRiskPercent();
     const balance = await this.balanceSource.getUsdtBalance();
     if (!balance.isFinite() || balance.lte(0)) {
-      return { ok: false, reason: `${input.symbol}: unusable USDT balance (${balance})` };
-    }
-
-    const riskAmount = balance.mul(riskPercent.div(100));
-    const rawQty = riskAmount.div(slDistance);
-    const qty = roundDownToStep(rawQty, qtyStep);
-
-    if (qty.lt(minOrderQty)) {
       return {
         ok: false,
-        reason: `${input.symbol}: rounded qty ${qty.toFixed()} < minOrderQty ${minOrderQty.toFixed()} — trade aborted`,
+        reason: `${input.symbol}: unusable USDT balance (${balance})`,
       };
     }
-    if (qty.gt(maxOrderQty)) {
+
+    // Margin Buffer: Use 98% of safeBalance to leave 2% for fees/reserve
+    const marginBuffer = balance.mul(0.98);
+    const riskAmountDecimal = marginBuffer.mul(riskPercent.div(100));
+    const rawQty = riskAmountDecimal.div(slDistanceDecimal);
+    const qty = formatQuantity(rawQty, qtyStep);
+
+    if (new Decimal(qty).lt(minOrderQty)) {
       return {
         ok: false,
-        reason: `${input.symbol}: qty ${qty.toFixed()} > maxOrderQty ${maxOrderQty.toFixed()} — trade aborted`,
+        reason: `${input.symbol}: rounded qty ${qty} < minOrderQty ${minOrderQty} — trade aborted`,
       };
     }
+    if (new Decimal(qty).gt(maxOrderQty)) {
+      return {
+        ok: false,
+        reason: `${input.symbol}: qty ${qty} > maxOrderQty ${maxOrderQty} — trade aborted`,
+      };
+    }
+    const slDistance = slDistanceDecimal.toFixed();
+    const riskAmount = riskAmountDecimal.toFixed();
+    const riskPercentApplied = riskPercent.toFixed();
+    const balanceUsdt = balance.toFixed();
+    const qtyString = qty.toString();
 
     return {
       ok: true,
       plan: {
         symbol: input.symbol,
         side: input.side,
-        entryPrice: entry.toFixed(),
-        stopLoss: stopLoss.toFixed(),
-        takeProfit: takeProfit.toFixed(),
-        qty: qty.toFixed(),
-        slDistance: slDistance.toFixed(),
-        riskAmount: riskAmount.toFixed(),
-        riskPercentApplied: riskPercent.toFixed(),
-        balanceUsdt: balance.toFixed(),
+        entryPrice: entry,
+        stopLoss: stopLoss,
+        takeProfit: takeProfit,
+        qty: qtyString,
+        slDistance,
+        riskAmount,
+        riskPercentApplied,
+        balanceUsdt,
         scenarioId: null,
         zoneDetails: input.zoneDetails,
       },

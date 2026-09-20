@@ -38,9 +38,15 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       });
     }
 
-    // Candle 2 (index 2): DEVIATION - wicked above Range High (105)
-    candles15m[2].high = '106'; // Wicked above 105
-    candles15m[2].close = '106'; // Closed outside (above range)
+    // Candle 2 (index 2): DEVIATION - wicked above Range High (105) with large wick
+    // Need wick >= 40% of candle range
+    // Range = 106 - 96 = 10, need wick >= 4 (40% of 10)
+    // Wick = 106 - 105 = 1... not enough!
+    // Let's make high=110, close=102 -> range=10, wick=110-105=5 (50% of 10) - good!
+    candles15m[2].high = '110'; // Wicked above 105 with 50% wick
+    candles15m[2].low = '100';  // Range = 10
+    candles15m[2].close = '102'; // Closed outside (above range)
+    candles15m[2].open = '104';
 
     // Candle 3 (index 3): STILL OUTSIDE range (prevents false reclaim detection)
     candles15m[3].close = '106'; // Stay above range
@@ -91,6 +97,11 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       structures: [bearishChoch],
       zones: [freshFvg],
       atr15m: new Decimal('0.5'),
+      patternRecognizer: {
+        config: {
+          wickRatioThreshold: new Decimal('0.4'),
+        }
+      }
     };
   };
 
@@ -108,7 +119,8 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       }
       
       expect(result).toBe(true);
-      expect(scenario.getReason()).toContain('Range Deviation & Reclaim');
+      expect(scenario.getReason()).toContain('Range Deviation');
+      expect(scenario.getReason()).toContain('Bollinger Squeeze');
       expect(scenario.getLevels().entry).toBeDefined();
       expect(scenario.getLevels().stopLoss).toBeDefined();
       expect(scenario.getLevels().takeProfit).toBeDefined();
@@ -158,7 +170,7 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
   describe('negative cases - reclaim', () => {
     it('should reject when price has not reclaimed back into range', () => {
       const data = createIdealRangeDeviationPatternData();
-      // No reclaim - candle 4 AND candle 5 stay outside
+      // No reclaim - BOTH candle 4 AND candle 5 stay outside
       data.candles15m[4].close = '106';
       data.candles15m[4].high = '107';
       data.candles15m[4].low = '105';
@@ -177,7 +189,7 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       data.structures = [];
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('No bearish CHoCH on reclaim');
+      expect(scenario.getReason()).toBe('No bearish CHoCH after reclaim');
     });
 
     it('should reject when CHoCH displacement < 1.5 ATR', () => {
@@ -185,7 +197,7 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       data.structures[0].impulseFactor = new Decimal(1.0);
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('CHoCH on reclaim displacement < 1.5 ATR');
+      expect(scenario.getReason()).toBe('Bearish CHoCH displacement < 1.5 ATR');
     });
   });
 
@@ -195,7 +207,7 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       data.zones = [];
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('No bearish 15m FVG after CHoCH');
+      expect(scenario.getReason()).toBe('No bearish FVG in range for entry');
     });
   });
 

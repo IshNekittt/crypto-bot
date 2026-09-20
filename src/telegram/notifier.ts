@@ -538,12 +538,20 @@ export class TelegramNotifier {
     pnl: string,
     pnlPercent: string,
   ): Promise<boolean> {
-    const icon = new Decimal(pnl).isNegative() ? "❌" : "✅";
+    const safePnl = pnl ? new Decimal(pnl) : new Decimal(0);
+    const safePnlPct = pnlPercent ? new Decimal(pnlPercent) : new Decimal(0);
+
+    const isWin = safePnl.gt(0);
+    const icon = isWin ? "✅" : (safePnl.isNegative() ? "❌" : "➖");
+    const sign = isWin ? "+" : "";
+
+    const pnlText = `${icon} <b>PnL:</b> ${sign}${safePnl.toFixed(2)} USDT (${sign}${safePnlPct.toFixed(2)}%)`;
+
     const text = [
       `${icon} <b>Позиция закрыта</b>`,
       "",
       `📊 ${symbol}`,
-      `💰 PnL: ${pnl} USDT (${pnlPercent}%)`,
+      pnlText,
     ].join("\n");
     return this.sendMessage(text);
   }

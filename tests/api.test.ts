@@ -41,6 +41,7 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     fundingAlertThreshold: '0.0',
     fundingRestoreThreshold: '0.0001',
     symbolScenarios: new Map(),
+    backtestCsvPath: null,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }
@@ -197,6 +198,7 @@ describe('BybitClient.placeMarketOrderWithTpsl', () => {
       qty: '2.4',
       stopLoss: '97.70',
       takeProfit: '122.90',
+      orderLinkId: 'test_order_link_id',
     });
 
     expect(orderId).toBe('abc-123');
@@ -218,6 +220,7 @@ describe('BybitClient.placeMarketOrderWithTpsl', () => {
     rest.submitOrder.mockResolvedValue({ retCode: 110007, retMsg: 'Insufficient balance', result: {} });
     await expect(client.placeMarketOrderWithTpsl({
       symbol: 'SOLUSDT', side: 'Buy', qty: '1', stopLoss: '1', takeProfit: '2',
+      orderLinkId: 'test_order_link_id',
     })).rejects.toThrow(/\[110007\] Insufficient balance/);
   });
 
@@ -226,6 +229,7 @@ describe('BybitClient.placeMarketOrderWithTpsl', () => {
     rest.submitOrder.mockResolvedValue({ retCode: 0, retMsg: 'OK', result: {} });
     await expect(client.placeMarketOrderWithTpsl({
       symbol: 'SOLUSDT', side: 'Sell', qty: '1', stopLoss: '1', takeProfit: '2',
+      orderLinkId: 'test_order_link_id',
     })).rejects.toThrow();
   });
 });

@@ -31,6 +31,7 @@ export interface BotConfig {
   readonly fundingAlertThreshold: string;
   readonly fundingRestoreThreshold: string;
   readonly symbolScenarios: Map<string, number[]>;
+  readonly backtestCsvPath: string | null;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -169,6 +170,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
 
   const symbols = parseSymbols(requireEnv(env, 'SYMBOLS'));
   const symbolScenarios = parseSymbolScenarios(env, symbols);
+  const backtestCsvPath = optionalEnv(env, 'BACKTEST_CSV_PATH');
 
   return {
     apiKey: requireEnv(env, 'BYBIT_API_KEY'),
@@ -196,5 +198,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     fundingAlertThreshold,
     fundingRestoreThreshold,
     symbolScenarios,
+    backtestCsvPath,
   };
 }

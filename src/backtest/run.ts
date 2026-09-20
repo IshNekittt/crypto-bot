@@ -11,6 +11,14 @@ import { loadCachedOrFetch, getTimeRangeForSixMonths } from './historyLoader';
 import { openTrade, checkAndCloseTrade, getInitialState, TradeResult } from './executionSimulator';
 import { printReport } from './reporter';
 import { Scenario5_HTFLiquiditySweep } from '../engine/scenarios/Scenario5_HTFLiquiditySweep';
+import { Scenario2_FVGFill } from '../engine/scenarios/Scenario2_FVGFill';
+import { Scenario4_MitigationChain } from '../engine/scenarios/Scenario4_MitigationChain';
+import { Scenario7_AMD } from '../engine/scenarios/Scenario7_AMD';
+import { Scenario8_RangeDeviationReclaim } from '../engine/scenarios/Scenario8_RangeDeviationReclaim';
+import { Scenario9_TurtleSoup } from '../engine/scenarios/Scenario9_TurtleSoup';
+import { Scenario10_BreakerBlock } from '../engine/scenarios/Scenario10_BreakerBlock';
+import { Scenario11_MitigationBlock } from '../engine/scenarios/Scenario11_MitigationBlock';
+import { loadCandlesFromCSV, aggregateCandles } from './csvLoader';
 
 function parseArgs(config: any): string[] {
   const args = process.argv.slice(2);
@@ -199,92 +207,252 @@ async function main(): Promise<void> {
   logger.info('Starting SMC Backtester...');
 
   const config = loadConfig();
-  const client = BybitClient.create(config);
+  
+  // CSV MODE: Load from local CSV file instead of Bybit API
+  const useCsvMode = config.backtestCsvPath !== null;
+  
+  let client: BybitClient | null = null;
+  let instruments = new Map<string, InstrumentInfo>();
+  let recognizer: PatternRecognizer;
+  let symbolsToTest = parseArgs(config);
 
-  const symbolsToTest = parseArgs(config);
-  logger.info(`Testing symbols: ${symbolsToTest.join(', ')}`);
-
-  const instruments = new Map<string, InstrumentInfo>();
-  for (const symbol of symbolsToTest) {
-    const info = await client.getInstrumentInfo(symbol);
-    instruments.set(symbol, info);
-  }
-
-  const recognizer = new PatternRecognizer(client);
-
-  const { fromMs, toMs } = getTimeRangeForSixMonths();
-  logger.info(`Backtest period: ${new Date(fromMs).toISOString()} - ${new Date(toMs).toISOString()}`);
-
-  // Dynamic candle count based on LTF timeframe (180 days)
-  const ltfMinutes = Number(config.ltfTimeframe);
-  const totalCandles = Math.ceil((180 * 24 * 60) / ltfMinutes);
-  logger.info(`Expected ~${totalCandles} LTF candles for ${ltfMinutes}m timeframe over 180 days`);
-
-  for (const symbol of symbolsToTest) {
-    logger.info(`\n=== Backtesting ${symbol} ===`);
-
-    const instrument = instruments.get(symbol);
-    if (!instrument) {
-      logger.error(`No instrument info for ${symbol}`);
-      continue;
+  if (useCsvMode) {
+    logger.info(`CSV MODE: Loading data from ${config.backtestCsvPath}`);
+    
+    // In CSV mode, we only test the symbol from the CSV file
+    // For simplicity, assume CSV contains single symbol data
+    // We'll extract symbol from filename or use first symbol from config
+    if (symbolsToTest.length === 0) {
+      logger.error('No symbols specified in config for CSV mode');
+      process.exit(1);
+    }
+    
+    // Create dummy client for PatternRecognizer (won't be used for fetching)
+    client = BybitClient.create(config);
+    recognizer = new PatternRecognizer(client!);
+    
+// Load candles from CSV
+    logger.info(`Loading candles from CSV...`);
+    const candlesLtf = loadCandlesFromCSV(config.backtestCsvPath);
+    logger.info(`Loaded ${candlesLtf.length} LTF candles from CSV`);
+    logger.info(`First candle: ${new Date(candlesLtf[0].timestamp).toISOString()}, Last candle: ${new Date(candlesLtf[candlesLtf.length - 1].timestamp).toISOString()}`);
+    
+    if (candlesLtf.length === 0) {
+      logger.error('No candles loaded from CSV');
+      process.exit(1);
     }
 
-    const [candlesLtf, candlesHtf] = await Promise.all([
-      loadCachedOrFetch(client, symbol, config.ltfTimeframe as Timeframe, fromMs, toMs),
-      loadCachedOrFetch(client, symbol, config.htfTimeframe as Timeframe, fromMs, toMs),
-    ]);
-
-    logger.info(`Loaded ${candlesLtf.length} ${config.ltfTimeframe}m candles, ${candlesHtf.length} ${config.htfTimeframe}m candles for ${symbol}`);
-
-    if (candlesLtf.length === 0 || candlesHtf.length === 0) {
-      logger.warn(`No data for ${symbol}, skipping`);
-      continue;
+    // Extract symbol from filename (e.g., EURUSD_15m.csv -> EURUSD)
+    const path = require('path');
+    const fileName = path.basename(config.backtestCsvPath);
+    const symbol = fileName.split('_')[0] || 'EURUSD';
+    
+    // Get instrument info (we need this for precision)
+    // In CSV mode, we might be testing forex pairs not on Bybit, so provide fallback
+    client = BybitClient.create(config);
+    let instrument: InstrumentInfo;
+    try {
+      instrument = await client.getInstrumentInfo(symbol);
+      if (!instrument) {
+        throw new Error(`Instrument ${symbol} not found`);
+      }
+    } catch {
+      logger.warn(`Instrument ${symbol} not found on Bybit, using default forex instrument`);
+      instrument = {
+        symbol,
+        tickSize: '0.0001',
+        qtyStep: '0.01',
+        minOrderQty: '0.01',
+        maxOrderQty: '1000000',
+      };
     }
-
+    
+    // Aggregate HTF candles from LTF using config timeframe
+    const htfMinutes = Number(config.htfTimeframe) || 240;
+    const candlesHtf = aggregateCandles(candlesLtf, htfMinutes);
+    logger.info(`Aggregated ${candlesHtf.length} HTF candles from LTF data`);
+    
+    // For macro context, we need daily candles. Aggregate from LTF
+    const dailyMinutes = 1440;
+    const candlesDaily = aggregateCandles(candlesLtf, dailyMinutes);
+    logger.info(`Aggregated ${candlesDaily.length} daily candles from LTF data`);
+    
+    // Also aggregate weekly candles for PWH/PWL macro levels
+    const weeklyMinutes = 10080;
+    const candlesWeekly = aggregateCandles(candlesLtf, weeklyMinutes);
+    logger.info(`Aggregated ${candlesWeekly.length} weekly candles from LTF data`);
+    
+    // Initialize macro context with aggregated daily data
+    // We'll create a mock client that returns our aggregated data
+    const htfInterval = config.htfTimeframe.toString();
+    const mockClient = {
+      getKlines: async (_symbol: string, interval: string, _limit: number) => {
+        if (interval === 'D') return candlesDaily;
+        if (interval === 'W') return candlesWeekly;
+        if (interval === htfInterval) return candlesHtf;
+        return candlesLtf;
+      },
+    } as any;
+    
+    recognizer = new PatternRecognizer(mockClient);
     await recognizer.initializeMacroContext(symbol, config.macroCandles);
-
+    
+    // Get date range from candles BEFORE running backtest (array gets cleared in cleanupMemory)
+    const fromMs = candlesLtf[0]?.timestamp || Date.now();
+    const toMs = candlesLtf[candlesLtf.length - 1]?.timestamp || Date.now();
+    
     const result = await runBacktestForSymbol(
       symbol,
       instrument,
       recognizer,
       candlesLtf,
       candlesHtf,
-      ltfMinutes,
+      Number(config.ltfTimeframe),
       config
     );
+    
     const trades = result.trades;
     const maxDrawdown = result.maxDrawdown;
-
     const initialBalance = new Decimal('1000');
-    const finalBalance = trades.reduce((bal, t) => bal.plus(t.pnl), initialBalance);
+    const finalBalance = trades.reduce((bal, t) => bal.plus(t.pnl), new Decimal('1000'));
 
     printReport(
       symbol,
       initialBalance,
       finalBalance,
-      trades,
+      result.trades,
       new Date(fromMs),
       new Date(toMs),
       Math.round((toMs - fromMs) / (24 * 60 * 60 * 1000)),
       maxDrawdown
     );
 
-    // Print Scenario 5 rejection stats
-    const stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
-    logger.info(`Scenario 5 Rejection Stats: ${JSON.stringify(stats, null, 2)}`);
+    // Print rejection stats (like online mode)
+    logger.info('=== CSV MODE REJECTION STATS ===');
+    const stats2 = Scenario2_FVGFill.getRejectionStats();
+    logger.info(`Scenario 2 (FVG Fill): ${JSON.stringify(stats2, null, 2)}`);
+    Scenario2_FVGFill.resetStats();
+    
+    const stats4 = Scenario4_MitigationChain.getRejectionStats();
+    logger.info(`Scenario 4 (Mitigation Chain): ${JSON.stringify(stats4, null, 2)}`);
+    Scenario4_MitigationChain.resetStats();
+    
+    const stats5 = Scenario5_HTFLiquiditySweep.getRejectionStats();
+    logger.info(`Scenario 5 (HTF Liquidity Sweep): ${JSON.stringify(stats5, null, 2)}`);
     Scenario5_HTFLiquiditySweep.resetStats();
-
+    
+    const stats7 = Scenario7_AMD.getRejectionStats();
+    logger.info(`Scenario 7 (AMD): ${JSON.stringify(stats7, null, 2)}`);
+    Scenario7_AMD.resetStats();
+    
+    const stats8 = Scenario8_RangeDeviationReclaim.getRejectionStats();
+    logger.info(`Scenario 8 (Range Deviation): ${JSON.stringify(stats8, null, 2)}`);
+    Scenario8_RangeDeviationReclaim.resetStats();
+    
+    const stats9 = Scenario9_TurtleSoup.getRejectionStats();
+    logger.info(`Scenario 9 (Turtle Soup): ${JSON.stringify(stats9, null, 2)}`);
+    Scenario9_TurtleSoup.resetStats();
+    
+    const stats10 = Scenario10_BreakerBlock.getRejectionStats();
+    logger.info(`Scenario 10 (Breaker Block): ${JSON.stringify(stats10, null, 2)}`);
+    Scenario10_BreakerBlock.resetStats();
+    
+    const stats11 = Scenario11_MitigationBlock.getRejectionStats();
+    logger.info(`Scenario 11 (Mitigation Block): ${JSON.stringify(stats11, null, 2)}`);
+    Scenario11_MitigationBlock.resetStats();
+    
     // Print PatternRecognizer displacement rejection stats
     const displacementRejections = recognizer.getDisplacementRejections();
     logger.info(`PatternRecognizer Displacement Rejections: ${displacementRejections}`);
     recognizer.resetDisplacementRejections();
 
-    // Force cleanup between symbols to prevent memory leak
-    if (global.gc) global.gc();
-  }
+    logger.info('\nBacktest completed!');
+    process.exit(0);
+    
+  } else {
+    // ONLINE MODE: Original Bybit API logic
+    client = BybitClient.create(config);
+    recognizer = new PatternRecognizer(client);
 
-  logger.info('\nBacktest completed!');
-  process.exit(0);
+    for (const symbol of symbolsToTest) {
+      const info = await client.getInstrumentInfo(symbol);
+      instruments.set(symbol, info);
+    }
+
+    const { fromMs, toMs } = getTimeRangeForSixMonths();
+    logger.info(`Backtest period: ${new Date(fromMs).toISOString()} - ${new Date(toMs).toISOString()}`);
+
+    // Dynamic candle count based on LTF timeframe (180 days)
+    const ltfMinutes = Number(config.ltfTimeframe);
+    const totalCandles = Math.ceil((180 * 24 * 60) / ltfMinutes);
+    logger.info(`Expected ~${totalCandles} LTF candles for ${ltfMinutes}m timeframe over 180 days`);
+
+    for (const symbol of symbolsToTest) {
+      logger.info(`\n=== Backtesting ${symbol} ===`);
+
+      const instrument = instruments.get(symbol);
+      if (!instrument) {
+        logger.error(`No instrument info for ${symbol}`);
+        continue;
+      }
+
+      const [candlesLtf, candlesHtf] = await Promise.all([
+        loadCachedOrFetch(client, symbol, config.ltfTimeframe as Timeframe, fromMs, toMs),
+        loadCachedOrFetch(client, symbol, config.htfTimeframe as Timeframe, fromMs, toMs),
+      ]);
+
+      logger.info(`Loaded ${candlesLtf.length} ${config.ltfTimeframe}m candles, ${candlesHtf.length} ${config.htfTimeframe}m candles for ${symbol}`);
+
+      if (candlesLtf.length === 0 || candlesHtf.length === 0) {
+        logger.warn(`No data for ${symbol}, skipping`);
+        continue;
+      }
+
+      await recognizer.initializeMacroContext(symbol, config.macroCandles);
+
+      const result = await runBacktestForSymbol(
+        symbol,
+        instrument,
+        recognizer,
+        candlesLtf,
+        candlesHtf,
+        ltfMinutes,
+        config
+      );
+      const trades = result.trades;
+      const maxDrawdown = result.maxDrawdown;
+
+      const initialBalance = new Decimal('1000');
+      const finalBalance = trades.reduce((bal, t) => bal.plus(t.pnl), initialBalance);
+
+      printReport(
+        symbol,
+        initialBalance,
+        finalBalance,
+        trades,
+        new Date(fromMs),
+        new Date(toMs),
+        Math.round((toMs - fromMs) / (24 * 60 * 60 * 1000)),
+        maxDrawdown
+      );
+
+      // Print Scenario 5 rejection stats
+      const stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
+      logger.info(`Scenario 5 Rejection Stats: ${JSON.stringify(stats, null, 2)}`);
+      Scenario5_HTFLiquiditySweep.resetStats();
+
+      // Print PatternRecognizer displacement rejection stats
+      const displacementRejections = recognizer.getDisplacementRejections();
+      logger.info(`PatternRecognizer Displacement Rejections: ${displacementRejections}`);
+      recognizer.resetDisplacementRejections();
+
+      // Force cleanup between symbols to prevent memory leak
+      if (global.gc) global.gc();
+    }
+
+    logger.info('\nBacktest completed!');
+    process.exit(0);
+  }
 }
 
 main().catch(err => {

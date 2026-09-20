@@ -42,10 +42,10 @@ export class Scenario9_TurtleSoup extends BaseScenario {
   }
 
   /**
-   * Check rejection wick quality: wick that pierced level must be >= 30% of candle range
+   * Check rejection wick quality: wick that pierced level must be >= 40% of candle range
    * and candle must close in direction of trade (bullish close for long, bearish for short)
    */
-  private checkRejectionWick(candle: any, level: Decimal, direction: 'LONG' | 'SHORT'): boolean {
+  private checkRejectionWick(candle: any, level: Decimal, direction: 'LONG' | 'SHORT', wickThreshold: Decimal): boolean {
     const high = new Decimal(candle.high);
     const low = new Decimal(candle.low);
     const open = new Decimal(candle.open);
@@ -59,13 +59,13 @@ export class Scenario9_TurtleSoup extends BaseScenario {
       const wickBelow = low.lt(level) ? level.minus(low) : new Decimal(0);
       const wickRatio = wickBelow.div(candleRange);
       const bullishClose = close.gt(open);
-      return wickRatio.gte(0.3) && bullishClose;
+      return wickRatio.gte(wickThreshold) && bullishClose;
     } else {
       // Bearish SFP: wick above level, close below level (bearish close)
       const wickAbove = high.gt(level) ? high.minus(level) : new Decimal(0);
       const wickRatio = wickAbove.div(candleRange);
       const bearishClose = close.lt(open);
-      return wickRatio.gte(0.3) && bearishClose;
+      return wickRatio.gte(wickThreshold) && bearishClose;
     }
   }
 
@@ -88,7 +88,6 @@ export class Scenario9_TurtleSoup extends BaseScenario {
 
     const rangeHigh = tradingRange.high;
     const rangeLow = tradingRange.low;
-    const equilibrium = tradingRange.equilibrium;
 
     // Check for EQH/EQL - use tolerance matching (not exact equality)
     const atr15m = patternData.atr15m || new Decimal('0.01');
@@ -98,119 +97,137 @@ export class Scenario9_TurtleSoup extends BaseScenario {
     const hasEql = liquidityPools?.some((p: any) => p.type === 'EQL' && this.levelsEqual(p.priceLevel, rangeLow, eqTolerance)) || false;
 
     if (!hasEqh && !hasEql) {
-      this.logRejection('No clean EQH/EQL on range boundaries (within tolerance)');
+      this.logRejection('No EQH/EQL liquidity at range boundaries');
       Scenario9_TurtleSoup.rejectionStats.noEqhEql++;
       return false;
     }
 
-    // Check for SFP in last 6 candles (SFP candle could be 1-5 candles ago)
-    // SFP: wick pierces EQH/EQL, close back inside range
-    let sfpCandle: any = null;
-    let direction: 'LONG' | 'SHORT' | null = null;
-    let sfpWickPrice: Decimal | null = null;
-    let sfpClosePrice: Decimal | null = null;
+    // Get the last closed candle (the one that just closed)
+    const lastCandle = candles15m[candles15m.length - 1];
+    if (!lastCandle) return false;
 
-    const checkWindow = Math.min(6, candles15m.length);
-    for (let i = candles15m.length - checkWindow; i < candles15m.length; i++) {
-      const c = candles15m[i];
-      const high = new Decimal(c.high);
-      const low = new Decimal(c.low);
-      const close = new Decimal(c.close);
+    const lastHigh = new Decimal(lastCandle.high);
+    const lastLow = new Decimal(lastCandle.low);
+    const lastClose = new Decimal(lastCandle.close);
+    const candleRange = lastHigh.minus(lastLow);
+    if (candleRange.eq(0)) return false;
 
-      // Bearish SFP at EQH/Range High: wicked above, closed back inside
-      if (hasEqh && high.gt(rangeHigh) && close.lt(rangeHigh) && close.gt(rangeLow)) {
-        // Check rejection wick quality
-        if (!this.checkRejectionWick(c, rangeHigh, 'SHORT')) {
-          continue;
+    const wickThreshold = patternData.patternRecognizer?.config?.wickRatioThreshold || new Decimal('0.4');
+
+    // Check for BEARISH Turtle Soup (Range High sweep -> Short)
+    if (hasEqh && lastHigh.gt(rangeHigh)) {
+      // Use helper to check rejection wick
+      if (this.checkRejectionWick(lastCandle, rangeHigh, 'SHORT', wickThreshold)) {
+        // Valid Bearish SFP
+        
+        // Entry first (needed for safe SL calculation)
+        const entry = lastClose; // Enter on close of SFP candle
+        
+        // SL = wick tip + 0.5 * ATR (SAFE: ensure SL > entry for SHORT)
+        const atr = patternData.atr15m || new Decimal('0.01');
+        const slOffset = atr.mul(new Decimal('0.5'));
+        const stopLoss = Decimal.max(lastHigh, entry).plus(slOffset);
+        // For SHORT: TP = entry - (stopLoss - entry) * 3
+        const riskAmount = stopLoss.minus(entry).abs();
+        const takeProfit = entry.minus(riskAmount.mul(3)); // 1:3 RR
+
+        // R:R check - must be >= 1:3
+        const rewardAmount = entry.minus(takeProfit).abs();
+        if (rewardAmount.div(riskAmount).lt(new Decimal('3'))) {
+          this.logRejection('R:R < 1:3');
+          Scenario9_TurtleSoup.rejectionStats.rr++;
+          return false;
         }
-        sfpCandle = c;
-        direction = 'SHORT';
-        sfpWickPrice = high;
-        sfpClosePrice = close;
-        break;
-      }
-      // Bullish SFP at EQL/Range Low: wicked below, closed back inside
-      if (hasEql && low.lt(rangeLow) && close.gt(rangeLow) && close.lt(rangeHigh)) {
-        // Check rejection wick quality
-        if (!this.checkRejectionWick(c, rangeLow, 'LONG')) {
-          continue;
+
+        this.setLevels({
+          entry,
+          stopLoss,
+          takeProfit,
+        });
+
+        this.setReason(`Turtle Soup (Short): Range High SFP + Wick >= 40% + Close Inside + Bollinger Squeeze`);
+        return true;
+      } else {
+        // Rejection wick check failed
+        if (this.wickRatioBelowThreshold(lastCandle, rangeHigh, 'SHORT', wickThreshold)) {
+          this.logRejection('Rejection wick too small: wick < 40% of candle range');
+          Scenario9_TurtleSoup.rejectionStats.noRejectionWick++;
+        } else {
+          this.logRejection('SFP candle closes wrong direction (not bearish close)');
+          Scenario9_TurtleSoup.rejectionStats.noRejectionWick++;
         }
-        sfpCandle = c;
-        direction = 'LONG';
-        sfpWickPrice = low;
-        sfpClosePrice = close;
-        break;
-      }
-      // Stronger SFP: wicked through and closed on opposite side
-      if (hasEqh && high.gt(rangeHigh) && close.lt(rangeLow)) {
-        if (!this.checkRejectionWick(c, rangeHigh, 'SHORT')) {
-          continue;
-        }
-        sfpCandle = c;
-        direction = 'SHORT';
-        sfpWickPrice = high;
-        sfpClosePrice = close;
-        break;
-      }
-      if (hasEql && low.lt(rangeLow) && close.gt(rangeHigh)) {
-        if (!this.checkRejectionWick(c, rangeLow, 'LONG')) {
-          continue;
-        }
-        sfpCandle = c;
-        direction = 'LONG';
-        sfpWickPrice = low;
-        sfpClosePrice = close;
-        break;
+        return false;
       }
     }
 
-    if (!sfpCandle || !direction || !sfpWickPrice || !sfpClosePrice) {
-      this.logRejection('No SFP candle with valid rejection wick (>=30% range, close in direction)');
-      Scenario9_TurtleSoup.rejectionStats.noRejectionWick++;
-      return false;
+    // Check for BULLISH Turtle Soup (Range Low sweep -> Long)
+    if (hasEql && lastLow.lt(rangeLow)) {
+      // Use helper to check rejection wick
+      if (this.checkRejectionWick(lastCandle, rangeLow, 'LONG', wickThreshold)) {
+        // Valid Bullish SFP
+        
+        // Entry first (needed for safe SL calculation)
+        const entry = lastClose; // Enter on close of SFP candle
+        
+        // SL = wick tip - 0.5 * ATR (SAFE: ensure SL < entry for LONG)
+        const atr = patternData.atr15m || new Decimal('0.01');
+        const slOffset = atr.mul(new Decimal('0.5'));
+        const stopLoss = Decimal.min(lastLow, entry).minus(slOffset);
+        const takeProfit = entry.plus(stopLoss.minus(entry).mul(3)); // 1:3 RR
+
+        // R:R check - must be >= 1:3
+        const riskAmount = entry.minus(stopLoss).abs();
+        const reward = takeProfit.minus(entry).abs();
+        if (reward.div(riskAmount).lt(new Decimal('3'))) {
+          this.logRejection('R:R < 1:3');
+          Scenario9_TurtleSoup.rejectionStats.rr++;
+          return false;
+        }
+
+        this.setLevels({
+          entry,
+          stopLoss,
+          takeProfit,
+        });
+
+        this.setReason(`Turtle Soup (Long): Range Low SFP + Wick >= 40% + Close Inside + Bollinger Squeeze`);
+        return true;
+      } else {
+        // Rejection wick check failed
+        if (this.wickRatioBelowThreshold(lastCandle, rangeLow, 'LONG', wickThreshold)) {
+          this.logRejection('Rejection wick too small: wick < 40% of candle range');
+          Scenario9_TurtleSoup.rejectionStats.noRejectionWick++;
+        } else {
+          this.logRejection('SFP candle closes wrong direction (not bullish close)');
+          Scenario9_TurtleSoup.rejectionStats.noRejectionWick++;
+        }
+        return false;
+      }
     }
 
-    // CRITICAL: Entry is IMMEDIATELY at market on SFP candle CLOSE
-    const entry = sfpClosePrice;
+    // No valid SFP found
+    Scenario9_TurtleSoup.rejectionStats.noSfp++;
+    return false;
+  }
 
-    // SL: At the wick extreme (true invalidation point) + buffer (0.5 ATR)
-    // If price goes back beyond the manipulation wick, the setup failed
-    const slBuffer = atr15m.mul(0.5); // Increased from 0.2 to 0.5 ATR
-    const sl = direction === 'LONG' ? sfpWickPrice.minus(slBuffer) : sfpWickPrice.plus(slBuffer);
-
-    // TP: Range Equilibrium (0.5) instead of opposite boundary - better R:R and higher hit rate
-    const tp = equilibrium;
-
-    // Verify R:R >= 1:3
-    const risk = direction === 'LONG' ? entry.minus(sl) : sl.minus(entry);
-    const reward = direction === 'LONG' ? tp.minus(entry) : entry.minus(tp);
-    if (reward.div(risk).lt(3)) {
-      this.logRejection(`R:R < 1:3 (risk: ${risk.toFixed(4)}, reward: ${reward.toFixed(4)})`);
-      Scenario9_TurtleSoup.rejectionStats.rr++;
-      return false;
+  /**
+   * Check if rejection wick ratio is below threshold (helper for specific rejection reasons)
+   */
+  private wickRatioBelowThreshold(candle: any, level: Decimal, direction: 'LONG' | 'SHORT', wickThreshold: Decimal): boolean {
+    const high = new Decimal(candle.high);
+    const low = new Decimal(candle.low);
+    
+    const candleRange = high.minus(low);
+    if (candleRange.eq(0)) return true;
+    
+    if (direction === 'LONG') {
+      const wickBelow = low.lt(level) ? level.minus(low) : new Decimal(0);
+      const wickRatio = wickBelow.div(candleRange);
+      return wickRatio.lt(wickThreshold);
+    } else {
+      const wickAbove = high.gt(level) ? high.minus(level) : new Decimal(0);
+      const wickRatio = wickAbove.div(candleRange);
+      return wickRatio.lt(wickThreshold);
     }
-
-    // Verify entry is in correct Premium/Discount zone
-    // Longs only in Discount (below 0.5), Shorts only in Premium (above 0.5)
-    const pdZone = entry.gt(equilibrium) ? 'PREMIUM' : entry.lt(equilibrium) ? 'DISCOUNT' : 'EQUILIBRIUM';
-    if (direction === 'LONG' && pdZone !== 'DISCOUNT') {
-      this.logRejection('Long entry not in Discount zone');
-      Scenario9_TurtleSoup.rejectionStats.premiumDiscount++;
-      return false;
-    }
-    if (direction === 'SHORT' && pdZone !== 'PREMIUM') {
-      this.logRejection('Short entry not in Premium zone');
-      Scenario9_TurtleSoup.rejectionStats.premiumDiscount++;
-      return false;
-    }
-
-    this.setLevels({
-      entry: entry.toFixed(2),
-      stopLoss: sl.toFixed(2),
-      takeProfit: tp.toFixed(2),
-    });
-
-    this.setReason(`Turtle Soup: SFP on ${hasEqh ? 'EQH' : 'EQL'} in ${killzone} killzone, rejection wick >=30%, immediate market entry on SFP candle close, SL at wick extreme + 0.5 ATR, target range equilibrium`);
-    return true;
   }
 }

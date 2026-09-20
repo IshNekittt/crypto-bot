@@ -1,7 +1,7 @@
-# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-09-10)
+# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-09-20)
 
 > **Single source of truth for any AI agent working on this codebase.**
-> Every architectural decision, invariant, and convention is documented here.
+> Every architectural decision, invariant, convention, and lesson learned in blood is documented here.
 > If it's not in this file, it doesn't exist.
 
 ---
@@ -47,6 +47,7 @@ src/
 │   ├── strategyEngine.ts  # State machine per symbol
 │   ├── scenarioRouter.ts  # Evaluates 11 scenarios, filters mitigatedZones
 │   ├── pendingTradeManager.ts  # Manual approval queue + Slippage Guard
+│   ├── baseScenario.ts    # Shared calculateLevels() — single SL source of truth
 │   └── scenarios/         # 11 scenario implementations (S1–S11)
 ├── execution/
 │   └── executionEngine.ts # Market order + TP/SL placement
@@ -55,7 +56,9 @@ src/
 ├── risk/
 │   └── riskManager.ts     # Position sizing, Drawdown Guard, minOrderQty
 ├── services/
-│   └── backupService.ts   # 24h auto-backup + /backup cmd (Blob+fetch)
+│   ├── backupService.ts   # 24h auto-backup + /backup cmd (Blob+fetch)
+│   ├── newsService.ts     # News Embargo filter (FXMacroData API)
+│   └── fundingMonitorService.ts  # Delta-neutral funding rate monitor
 ├── smc/
 │   └── patternRecognizer.ts  # SMC core: swings, OB, FVG, SMS, ranges, macro
 ├── telegram/
@@ -118,7 +121,7 @@ All REST calls wrapped in `executeWithRetry()`:
 
 ## 4. TELEGRAM UI & SECURITY
 
-### 4.1 Security Middleware — `src/telegram/notifier.ts:186-192`
+### 4.1 Security Middleware — `src/telegram/notifier.ts:197-204`
 
 ```typescript
 this.bot.use(async (ctx, next) => {
@@ -207,7 +210,7 @@ Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 - **NO** Order Blocks, Breakers, Mitigation on macro timeframes.
 - Daily 00:00 UTC refresh: atomic cache replacement.
 
-### 6.5 Strict Stop-Loss Calculation — `BaseScenario.calculateLevels()` — **NEW v2026-09-10**
+### 6.5 Strict Stop-Loss Calculation — `BaseScenario.calculateLevels()` — **SINGLE SOURCE OF TRUTH**
 
 **Problem**: Zone objects (OB, FVG, Breaker, MB) can have arbitrary `top`/`bottom` ordering (not guaranteed `top > bottom`). Naive SL formulas like `zone.bottom - offset` fail when zone is inverted.
 
@@ -246,46 +249,7 @@ public calculateLevels(
 - Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - Tests call this method directly — no full pattern recognition needed
 
-### 6.6 Strict Stop-Loss Calculation — `BaseScenario.calculateLevels()` — **NEW v2026-09-10**
-
-**Problem**: Zone objects (OB, FVG, Breaker, MB) can have arbitrary `top`/`bottom` ordering (not guaranteed `top > bottom`). Naive SL formulas like `zone.bottom - offset` fail when zone is inverted.
-
-**Solution**: Centralized `BaseScenario.calculateLevels()` method — single source of truth for all scenarios with zone-based entries.
-
-```typescript
-// In BaseScenario (src/engine/baseScenario.ts)
-public calculateLevels(
-  entry: Decimal,
-  zone: { top: Decimal; bottom: Decimal; direction: 'BULLISH' | 'BEARISH' },
-  direction: 'BULLISH' | 'BEARISH',
-  atr: Decimal,
-  rr: Decimal = new Decimal(3),
-  offsetMultiplier: Decimal = new Decimal(0.5)
-): TradeLevels {
-  const offset = atr.mul(offsetMultiplier);
-  
-  // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
-  // BULLISH (Long): SL must be BELOW entry. Use min(zone.bottom, entry) - offset
-  // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, entry) + offset
-  const sl = direction === 'BULLISH'
-    ? Decimal.min(zone.bottom, entry).minus(offset)
-    : Decimal.max(zone.top, entry).plus(offset);
-  const tp = direction === 'BULLISH'
-    ? entry.plus(entry.minus(sl).mul(rr))
-    : entry.minus(sl.minus(entry).mul(rr));
-
-  return { entry, stopLoss: sl, takeProfit: tp };
-}
-```
-
-**Key invariants guaranteed by this formula:**
-- **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
-- **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
-- `Decimal.min/max` handles inverted zones automatically
-- Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
-- Tests call this method directly — no full pattern recognition needed
-
-### 6.7 Dynamic Backtester Architecture — `src/backtest/run.ts` — **NEW v2026-09-15**
+### 6.6 Dynamic Backtester Architecture — `src/backtest/run.ts`
 
 **Problem**: Hardcoded '15m'/'240' timeframes and fixed 17280 candle count (180 days of 15m) prevented testing other timeframes. Cache filenames were hardcoded to '15', causing 5m cache to overwrite 15m cache.
 
@@ -313,7 +277,7 @@ public calculateLevels(
 - ✅ Progress: `candle ${i}/${candlesLtf.length} (${((i / candlesLtf.length) * 100).toFixed(1)}%)`
 - ✅ `runBacktestForSymbol` receives `ltfMinutes` parameter for dynamic calculations
 
-### 6.8 News Filter (News Embargo) — `src/services/newsService.ts` — **NEW v2026-09-12**
+### 6.7 News Filter (News Embargo) — `src/services/newsService.ts`
 
 **Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
 
@@ -332,7 +296,7 @@ public calculateLevels(
 | **Method** | `isNewsEmbargo(ts: number): boolean` — returns `true` if `ts` within ±30 min of any cached high-impact USD event |
 | **Resilience** | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws (fail-open) |
 
-**Integration Points**:
+**Integration Points:**
 
 1. **Bootstrap** (`src/index.ts`):
    - `newsService.fetchNews()` at startup
@@ -347,15 +311,7 @@ public calculateLevels(
 3. **Telegram /status**:
    - `getNextHighImpactNews()` → shows next USD high-impact event or "None for today"
 
-**Tests** (`tests/newsService.test.ts`, `tests/strategyEngine.test.ts`):
-- Filtering: only high impact, confirmed events stored
-- Boundary checks: 13:29:59→false, 13:30:00→true, 14:30:00→true, 14:30:01→false
-- Resilience: network/HTTP/parse errors → empty cache + warn, no crash
-- Engine integration: embargo blocks scan, logs message, doesn't call evaluate
-
----
-
-### 6.9 Funding Monitor (Delta-Neutral Arbitrage) — `src/services/fundingMonitorService.ts` — **NEW v2026-09-16**
+### 6.8 Funding Monitor (Delta-Neutral Arbitrage) — `src/services/fundingMonitorService.ts`
 
 **Problem**: Delta-neutral arbitrage positions (long spot + short perp) earn funding when rates are positive but lose money when rates turn negative. Need passive monitoring with alerts.
 
@@ -375,7 +331,7 @@ public calculateLevels(
 | **Telegram Alert (Restore)** | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate*100}% (APY: ~{rate*3*365*100}%)\nМожно снова открывать арбитраж!` |
 | **Public API** | `getCurrentRates(): Map<string, Decimal>` for `/status` command |
 
-**Integration Points**:
+**Integration Points:**
 
 1. **Bootstrap** (`src/index.ts`):
    - Conditionally created if `ENABLE_FUNDING_MONITOR=true` and symbols configured
@@ -387,12 +343,6 @@ public calculateLevels(
 
 3. **Telegram /status** (`src/telegram/notifier.ts`):
    - Shows `📊 Funding: BTC: +0.0100% | ETH: +0.0150% | SOL: +0.0200%` or `Disabled`
-
-**Tests** (`tests/services/fundingMonitor.test.ts`):
-- Alert triggers when rate ≤ threshold and not already alerted
-- Restore triggers when rate ≥ restore threshold and was alerted
-- No duplicate alerts (state tracking)
-- `getCurrentRates()` returns cloned map
 
 ---
 
@@ -524,7 +474,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (221 tests, all green)
+npm test             # jest (231 tests, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -707,4 +657,60 @@ docker compose up -d --build
 
 ---
 
-_Last updated: 2026-09-16. All 221 tests green. Build passes. Enterprise-ready._
+## 15. CRITICAL ANTI-PATTERNS & LESSONS LEARNED (BLOOD-SIGNED)
+
+> These rules exist because we **lost money, time, or sanity** discovering them. Do NOT "optimize" them away.
+
+### 15.1 ❌ FORBIDDEN: O(N²) and `while` loops in Math Hot Paths
+**Root Cause**: `detectEqualLevels()` used nested `for` loops on 17,000 candles → 100% CPU, event loop blocked.
+**Fix**: All candle iteration is **strictly `for (let i = 0; i < n; i++)`** with index pointers. Macro context builds in <10ms via single linear passes.
+**Rule**: No nested loops over candles. No `while (true)` with break conditions. Use pre-computed arrays + pointer advancement.
+
+### 15.2 ❌ FORBIDDEN: Inline Stop-Loss Calculations in Scenarios
+**Root Cause**: `invalid SL level` errors — zone `top`/`bottom` ordering was arbitrary (not guaranteed `top > bottom`). `zone.bottom - offset` produced SL *above* entry for Longs when zone was inverted.
+**Fix**: **ONLY** `BaseScenario.calculateLevels()` — single source of truth.
+- **Long**: `Decimal.min(zone.bottom, entry).minus(offset)` — SL *always* below entry
+- **Short**: `Decimal.max(zone.top, entry).plus(offset)` — SL *always* above entry
+**Rule**: Zero inline SL math in scenarios. Call `this.calculateLevels(...)` and use returned levels.
+
+### 15.3 ❌ FORBIDDEN: `toFixed(2)` or Hardcoded Decimal Places for Prices
+**Root Cause**: Forex pairs (JPY) and crypto with 4-5 decimals got truncated. Bybit rejected orders with `Invalid price precision`.
+**Fix**: `utils/precision.ts` — `formatPrice(price, tickSize, 'nearest')` and `formatQuantity(qty, qtyStep, 'down')`. Rounding uses instrument's actual `tickSize`/`qtyStep`.
+**Rule**: Never hardcode decimal places. Always format via instrument precision.
+
+### 15.4 ❌ FORBIDDEN: `fs.writeFileSync` / Local File I/O in Telegram Backup
+**Root Cause**: Node 26 + Telegraf `sendDocument({ source: buffer })` → `socket hang up` / `ECONNRESET`. Telegraf's internal `form-data` + `fs.createReadStream` from Buffer is broken on Node 26.
+**Fix**: Convert Buffer → `Uint8Array` → **Web API `Blob`** → `fetch` + `FormData` to `api.telegram.org/bot<token>/sendDocument`. **Zero disk I/O**.
+**Rule**: No `fs` in Telegram file sending. Use native `fetch` + `Blob` + `FormData`.
+
+### 15.5 ❌ FORBIDDEN: Local Time for Daily Schedulers
+**Root Cause**: `new Date().setHours(0,0,0,0)` uses **local timezone**. On Render (UTC) vs dev machine (local) → macro refresh at wrong hour, clock drift unnoticed.
+**Fix**: `new Date().setUTCHours(0,0,0,0); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)` — **strictly UTC**.
+**Rule**: All time calculations use `DateTime.setZone('UTC')` or `setUTCHours`/`setUTCDate`. Never `Date.now()` + local offsets.
+
+### 15.6 ❌ FORBIDDEN: Multiple Concurrent Trades per Symbol
+**Root Cause**: Missing `IN_TRADE` guard in `ScenarioRouter` → 400 trades/day on choppy market (machine gun). Account blown.
+**Fix**: `ScenarioRouter` **hard-blocked** if `engine.openTrade !== null` (or `state === IN_TRADE`). Strictly **1 trade per symbol**.
+**Rule**: State machine must be `SCANNING` → `ENTRY_STAGED` → `IN_TRADE` → `SCANNING`. No parallel entries.
+
+### 15.7 🔒 CRYPTO 15m/4H ACTIVE SCENARIOS: ONLY 1, 5, 6, 10
+**Evidence**: 180-day backtest (3 symbols, 457 trades):
+- **S2 (FVG Fill)**: `NoLiqCtx: 120` rejections — imbalances without liquidity context are noise
+- **S4 (Mitigation Chain)**: `NoBOS: 1,570` rejections — OB→BOS chain too rare on 15m crypto
+- **S7, S8, S9 (Range-based)**: AMD/Range Dev/Turtle Soup — negative expectancy on 15m crypto (range trading fails in trending crypto)
+- **S11 (Mitigation Block)**: Strict SMS pattern → 0 trades (too rare)
+
+**Config** (`.env`):
+```bash
+# Production config — only profitable scenarios for crypto 15m/4H
+ACTIVE_SCENARIOS=1,5,6,10
+# Per-symbol overrides (if needed):
+# SCENARIOS_BTCUSDT=1,5,6
+# SCENARIOS_ETHUSDT=1,5,6
+# SCENARIOS_SOLUSDT=5,6,10
+```
+**Rule**: Do NOT enable S2, S3, S4, S7, S8, S9, S11 for crypto 15m/4H without 6-month forward test proof.
+
+---
+
+_Last updated: 2026-09-20. All 231 tests green. Build passes. Enterprise-ready._

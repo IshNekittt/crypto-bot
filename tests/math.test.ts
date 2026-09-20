@@ -39,9 +39,11 @@ describe('Bybit Precision Formatter', () => {
   });
 
   describe('formatPrice', () => {
-    it('rounds prices down to tickSize multiples', () => {
-      expect(formatPrice(new Decimal('99.99999'), new Decimal('0.01'))).toBe('99.99');
-      expect(formatPrice(new Decimal('100'), new Decimal('0.01'))).toBe('100');
+    it('rounds prices to nearest tickSize multiples', () => {
+      // 99.99999 with tickSize 0.01 -> nearest is 100.00
+      expect(formatPrice(new Decimal('99.99999'), new Decimal('0.01'))).toBe('100.00');
+      expect(formatPrice(new Decimal('100'), new Decimal('0.01'))).toBe('100.00');
+      // 65000.125 with tickSize 0.1 -> nearest is 65000.1
       expect(formatPrice(new Decimal('65000.125'), new Decimal('0.1'))).toBe('65000.1');
     });
   });

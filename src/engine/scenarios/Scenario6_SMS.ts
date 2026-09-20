@@ -32,7 +32,7 @@ export class Scenario6_SMS extends BaseScenario {
     // SMS direction tells us the reversal direction
     // Bearish SMS = failed to make higher high -> expect BEARISH CHoCH down
     // Bullish SMS = failed to make lower low -> expect BULLISH CHoCH up
-    const expectedDirection = sms.direction === 'BEARISH' ? 'BEARISH' : 'BULLISH';
+    const expectedDirection = sms.direction;
 
     // CRITICAL: Verify aggressive CHoCH in SMS direction
     const choch = structures.find((s: any) => 
@@ -85,9 +85,9 @@ export class Scenario6_SMS extends BaseScenario {
     );
 
     this.setLevels({
-      entry: levels.entry.toFixed(2),
-      stopLoss: levels.stopLoss.toFixed(2),
-      takeProfit: levels.takeProfit.toFixed(2),
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
     this.setReason(`SMS: ${sms.direction} failure swing + ${expectedDirection} CHoCH + SMS OB 0.5 entry`);

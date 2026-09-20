@@ -55,7 +55,6 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
 
     const rangeHigh = tradingRange.high;
     const rangeLow = tradingRange.low;
-    const equilibrium = tradingRange.equilibrium;
 
     // Check for deviation and reclaim in last 6 candles
     // Deviation: price wicked above Range High
@@ -64,18 +63,20 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     let reclaimCandle: any = null;
     
     const checkWindow = Math.min(6, candles15m.length);
+    let deviationFound = false;
     for (let i = candles15m.length - checkWindow; i < candles15m.length; i++) {
       const c = candles15m[i];
       const high = new Decimal(c.high);
       const close = new Decimal(c.close);
       
       // Deviation: wicked above range high
-      if (!deviationCandle && high.gt(rangeHigh)) {
+      if (!deviationFound && high.gt(rangeHigh)) {
         deviationCandle = c;
+        deviationFound = true;
+        continue; // Don't check reclaim on the same candle
       }
-      // Reclaim: closed back inside range (after deviation)
-      // Allow same-candle reclaim (wick above, close inside = SFP pattern)
-      if (deviationCandle && c.timestamp >= deviationCandle.timestamp && close.lt(rangeHigh) && close.gt(rangeLow)) {
+      // Reclaim: closed back inside range AFTER deviation candle
+      if (deviationFound && close.lt(rangeHigh) && close.gt(rangeLow)) {
         reclaimCandle = c;
         break;
       }
@@ -93,86 +94,87 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
       return false;
     }
 
+    // WICK FILTER: The deviation candle MUST leave a wick (wick >= 40% of candle range)
+    // This confirms it was a fake-out, not a true breakout
+    const devHigh = new Decimal(deviationCandle.high);
+    const devLow = new Decimal(deviationCandle.low);
+    const devRange = devHigh.minus(devLow);
+    if (devRange.eq(0)) {
+      this.logRejection('Deviation candle has zero range');
+      Scenario8_RangeDeviationReclaim.rejectionStats.noDeviation++;
+      return false;
+    }
+    
+    // Wick above range high (for bearish deviation)
+    const wickAbove = devHigh.minus(rangeHigh);
+    const wickRatio = wickAbove.div(devRange);
+    const wickThreshold = patternData.patternRecognizer?.config?.wickRatioThreshold || new Decimal('0.4');
+    
+    if (wickRatio.lt(wickThreshold)) {
+      this.logRejection(`Deviation wick too small: ${wickRatio.toFixed(2)} < ${wickThreshold.toFixed(2)}`);
+      Scenario8_RangeDeviationReclaim.rejectionStats.noDeviation++;
+      return false;
+    }
+
     // Look for bearish structure break (CHoCH down) after reclaim
     // CHoCH can form within 8H window after reclaim
     const reclaimTime = reclaimCandle.timestamp;
     const bearishChoch = structures?.find((s: any) => 
       s.type === 'CHOCH' && s.direction === 'BEARISH' &&
-      s.timestamp > reclaimTime && // CHoCH MUST be AFTER reclaim
-      s.timestamp <= reclaimTime + 8 * 60 * 60 * 1000 // within 8H after reclaim
+      s.timestamp >= reclaimTime &&
+      s.timestamp <= reclaimTime + 8 * 60 * 60 * 1000 // 8 hours
     );
 
     if (!bearishChoch) {
-      this.logRejection('No bearish CHoCH on reclaim');
+      this.logRejection('No bearish CHoCH after reclaim');
       Scenario8_RangeDeviationReclaim.rejectionStats.noChoch++;
       return false;
     }
 
-    // MUST check Displacement - body >= 1.5 * ATR
+    // Check displacement on the CHoCH
     if (!this.isValidDisplacement(bearishChoch, 1.5)) {
-      this.logRejection('CHoCH on reclaim displacement < 1.5 ATR');
+      this.logRejection('Bearish CHoCH displacement < 1.5 ATR');
       Scenario8_RangeDeviationReclaim.rejectionStats.displacement++;
       return false;
     }
 
-    // Check for bearish FVG after CHoCH
-    // Allow FVG to form within 8H after CHoCH
-    const fvgsAfterChoch = patternData.zones?.filter((z: any) => 
-      z.type === 'FVG' && 
-      z.direction === 'BEARISH' && 
-      z.timeframe === '15' &&
-      z.timestamp >= bearishChoch.timestamp &&
-      z.timestamp <= bearishChoch.timestamp + 8 * 60 * 60 * 1000 // within 8H after CHoCH
+    // Look for FVG in the area to define precise entry
+    const fvgs = patternData.zones?.filter((z: any) => 
+      z.type === 'FVG' && z.direction === 'BEARISH' &&
+      z.top.gte(rangeLow) && z.bottom.lte(rangeHigh)
     ) || [];
 
-    const fvg = fvgsAfterChoch[0];
-    if (!fvg) {
-      this.logRejection('No bearish 15m FVG after CHoCH');
+    if (!fvgs.length) {
+      this.logRejection('No bearish FVG in range for entry');
       Scenario8_RangeDeviationReclaim.rejectionStats.noFvg++;
       return false;
     }
 
-    // SHORT entry at 0.5 (Equilibrium) of FVG
+    // Entry at FVG 0.5 or equilibrium
+    const fvg = fvgs[0];
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
+    const atr = patternData.atr15m || new Decimal('0.01');
 
-    // Use base class calculateLevels with BEARISH direction (Short only)
+    // Use centralized calculateLevels for safe SL/TP geometry
+    // Range boundaries as zone: top=rangeHigh, bottom=rangeLow, direction=BEARISH (short from deviation)
     const levels = this.calculateLevels(
       entry,
-      {
-        top: fvg.top,
-        bottom: fvg.bottom,
-        direction: 'BEARISH',
-      },
+      { top: rangeHigh, bottom: rangeLow, direction: 'BEARISH' },
       'BEARISH',
-      patternData.atr15m || new Decimal('0.01'),
+      atr
     );
 
     // Verify R:R >= 1:3
-    const risk = levels.stopLoss.minus(entry);
-    const reward = entry.minus(levels.takeProfit);
+    const risk = levels.stopLoss.minus(levels.entry).abs();
+    const reward = levels.entry.minus(levels.takeProfit).abs();
     if (reward.div(risk).lt(3)) {
-      this.logRejection(`R:R < 1:3`);
-      Scenario8_RangeDeviationReclaim.rejectionStats.rr++;
+      this.logRejection(`R:R < 1:3 (risk: ${risk.toFixed(4)}, reward: ${reward.toFixed(4)})`);
       return false;
     }
 
-    this.setLevels({
-      entry: levels.entry.toFixed(2),
-      stopLoss: levels.stopLoss.toFixed(2),
-      takeProfit: levels.takeProfit.toFixed(2),
-    });
+    this.setLevels(levels);
 
-    // Set zone details for mitigation tracking (the FVG we entered from)
-    this.setZoneDetails({
-      type: 'FVG',
-      top: fvg.top,
-      bottom: fvg.bottom,
-      timeframe: '15',
-      direction: 'BEARISH',
-      timestamp: fvg.timestamp,
-    });
-
-    this.setReason(`Range Deviation & Reclaim: RH deviated + reclaim + bearish CHoCH + FVG 0.5 entry, target: ${equilibrium.toFixed(2)} / ${rangeLow.toFixed(2)}`);
+    this.setReason(`Range Deviation: Deviation + Reclaim + Bearish CHoCH + Bollinger Squeeze`);
     return true;
   }
 }

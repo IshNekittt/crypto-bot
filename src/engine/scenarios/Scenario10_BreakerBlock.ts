@@ -286,9 +286,9 @@ export class Scenario10_BreakerBlock extends BaseScenario {
     );
 
     this.setLevels({
-      entry: levels.entry.toFixed(2),
-      stopLoss: levels.stopLoss.toFixed(2),
-      takeProfit: levels.takeProfit.toFixed(2),
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
     this.setReason(`Breaker Block: ${brokenObDirection} OB (liquidity swept, fresh) broken by ${breakEvent.direction} BOS + FVG + mirror test at 0.5, target 2R`);

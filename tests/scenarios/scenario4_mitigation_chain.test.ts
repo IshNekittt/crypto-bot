@@ -16,12 +16,12 @@ describe('Scenario4: Mitigation Chain', () => {
     const FIXED_NOW = 1788675600000; // LONDON killzone
     const OB_TIME = FIXED_NOW - 5 * 900000; // 5 candles ago (75 min)
 
-    // Trend OB (BULLISH): top=102, bottom=100, eq=101
+    // Trend OB (BULLISH): top=101, bottom=99, eq=100 (in Discount zone if equilibrium > 100)
     const trendOb = {
       type: 'OB' as const,
       direction: 'BULLISH' as const,
-      top: new Decimal(102),
-      bottom: new Decimal(100),
+      top: new Decimal(101),
+      bottom: new Decimal(99),
       timestamp: OB_TIME,
       mitigated: false,
       timeframe: '15',
@@ -34,8 +34,8 @@ describe('Scenario4: Mitigation Chain', () => {
       candles15m.push({
         timestamp: ts,
         open: '100',
-        high: '101',
-        low: '99',
+        high: '102',
+        low: '98',
         close: '100',
         volume: '1000',
       });
@@ -44,10 +44,10 @@ describe('Scenario4: Mitigation Chain', () => {
     // OB formation candle (index 0, timestamp = OB_TIME)
     candles15m[0] = {
       timestamp: OB_TIME,
-      open: '101',
-      high: '102.5',
-      low: '100.5',
-      close: '101.5',
+      open: '100',
+      high: '101.5',
+      low: '99.5',
+      close: '100.5',
       volume: '1000',
     };
 
@@ -55,20 +55,20 @@ describe('Scenario4: Mitigation Chain', () => {
     const bosTime = OB_TIME + 3 * 900000; // 45 min after OB
     candles15m[1] = {
       timestamp: bosTime,
-      open: '101',
+      open: '100',
       high: '103', // BOS: broke above recent high
-      low: '100',
+      low: '99',
       close: '102',
       volume: '1000',
     };
 
-    // Current candle (index 5): price at OB equilibrium (101)
+    // Current candle (index 5): price at OB equilibrium (100)
     candles15m[5] = {
       timestamp: FIXED_NOW,
-      high: '101.5',
-      low: '100.5',
-      close: '101', // exactly at OB equilibrium
-      open: '101',
+      high: '100.5',
+      low: '99.5',
+      close: '100', // exactly at OB equilibrium
+      open: '100',
       volume: '1000',
     };
 
@@ -76,7 +76,7 @@ describe('Scenario4: Mitigation Chain', () => {
     const choch = {
       type: 'CHOCH' as const,
       direction: 'BULLISH' as const,
-      price: new Decimal(101),
+      price: new Decimal(100),
       timestamp: FIXED_NOW - 500,
       isValidated: true,
       impulseFactor: new Decimal(2.0),
@@ -100,6 +100,19 @@ describe('Scenario4: Mitigation Chain', () => {
       zones: [trendOb],
       structures: [choch, bos4h],
       atr15m: new Decimal('0.5'),
+      patternRecognizer: {
+        config: {
+          wickRatioThreshold: new Decimal('0.4'),
+        },
+        calculatePremiumDiscount: (candles: any[]) => {
+          const highs = candles.map((c: any) => new Decimal(c.high));
+          const lows = candles.map((c: any) => new Decimal(c.low));
+          const rangeHigh = Decimal.max(...highs);
+          const rangeLow = Decimal.min(...lows);
+          const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
+          return { equilibrium, rangeHigh, rangeLow, isPremium: false, isDiscount: false };
+        }
+      } as any,
     };
   };
 
@@ -181,6 +194,19 @@ describe('Scenario4: Mitigation Chain', () => {
       zones: [trendOb],
       structures: [choch, bos4h],
       atr15m: new Decimal('0.5'),
+      patternRecognizer: {
+        config: {
+          wickRatioThreshold: new Decimal('0.4'),
+        },
+        calculatePremiumDiscount: (candles: any[]) => {
+          const highs = candles.map((c: any) => new Decimal(c.high));
+          const lows = candles.map((c: any) => new Decimal(c.low));
+          const rangeHigh = Decimal.max(...highs);
+          const rangeLow = Decimal.min(...lows);
+          const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
+          return { equilibrium, rangeHigh, rangeLow, isPremium: false, isDiscount: false };
+        }
+      } as any,
     };
   };
 
@@ -234,18 +260,31 @@ describe('Scenario4: Mitigation Chain', () => {
 
   describe('negative cases - BOS validation', () => {
     it('should reject when OB did not produce true BOS after formation', () => {
-      const result = scenario.evaluate(createMitigationChainNoBosAfterOb());
+      const data = createMitigationChainNoBosAfterOb();
+      // Ensure OB is in Discount zone
+      data.zones[0].top = new Decimal(101);
+      data.zones[0].bottom = new Decimal(99);
+      data.candles15m[5].close = '100';
+      data.candles15m[5].high = '100.5';
+      data.candles15m[5].low = '99.5';
+      const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('BOS');
     });
   });
 
   describe('negative cases - 0.5 equilibrium', () => {
-    it('should reject when price has not touched 0.5 of OB', () => {
+it('should reject when price has not touched 0.5 of OB', () => {
       const data = createIdealMitigationChainPatternData();
+      // Price far from OB equilibrium - set to 94
       data.candles15m[5].close = '94';
       data.candles15m[5].high = '95';
       data.candles15m[5].low = '93';
+      // Ensure OB stays in Discount zone despite modified candle
+      // With modified candle (low=93), rangeLow=93, rangeHigh=103, equilibrium=98
+      // OB must be < 98 to be in Discount zone
+      data.zones[0].top = new Decimal(97);
+      data.zones[0].bottom = new Decimal(95);
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('0.5 (Equilibrium) of OB');
@@ -255,6 +294,12 @@ describe('Scenario4: Mitigation Chain', () => {
   describe('negative cases - CHoCH', () => {
     it('should reject when no CHoCH confirming trend direction', () => {
       const data = createIdealMitigationChainPatternData();
+      // Ensure OB is in Discount zone
+      data.zones[0].top = new Decimal(100);
+      data.zones[0].bottom = new Decimal(98);
+      data.candles15m[5].close = '99';
+      data.candles15m[5].high = '100';
+      data.candles15m[5].low = '98';
       data.structures = data.structures.filter(s => s.type !== 'CHOCH');
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
@@ -263,6 +308,12 @@ describe('Scenario4: Mitigation Chain', () => {
 
     it('should reject when CHoCH displacement < 1.5 ATR', () => {
       const data = createIdealMitigationChainPatternData();
+      // Ensure OB is in Discount zone
+      data.zones[0].top = new Decimal(100);
+      data.zones[0].bottom = new Decimal(98);
+      data.candles15m[5].close = '99';
+      data.candles15m[5].high = '100';
+      data.candles15m[5].low = '98';
       data.structures = data.structures.map(s => 
         s.type === 'CHOCH' ? { ...s, impulseFactor: new Decimal(1.0) } : s
       );
@@ -285,6 +336,15 @@ describe('Scenario4: Mitigation Chain', () => {
         isValidated: true,
         impulseFactor: new Decimal(2.0),
       } as any);
+      // Also need to ensure OB is in Discount zone so Premium/Discount filter passes first
+      // OB at 102/100 (mid=101) is above equilibrium (100) -> Premium zone
+      // Change OB to be in Discount zone
+      data.zones[0].top = new Decimal(100);
+      data.zones[0].bottom = new Decimal(98);
+      // Set current candle to touch OB equilibrium (99)
+      data.candles15m[5].close = '99';
+      data.candles15m[5].high = '100';
+      data.candles15m[5].low = '98';
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('4H trend not bullish');

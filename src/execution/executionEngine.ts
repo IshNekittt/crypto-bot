@@ -12,6 +12,7 @@ export interface OrderSubmitter {
     qty: string;
     stopLoss: string;
     takeProfit: string;
+    orderLinkId: string; // Idempotency key
   }): Promise<string>;
 }
 
@@ -46,12 +47,14 @@ export class ExecutionEngine {
 
   async execute(plan: PositionPlan): Promise<ExecutionResult> {
     try {
+      const orderLinkId = `${plan.symbol}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const orderId = await this.submitter.placeMarketOrderWithTpsl({
         symbol: plan.symbol,
         side: plan.side,
         qty: plan.qty,
         stopLoss: plan.stopLoss,
         takeProfit: plan.takeProfit,
+        orderLinkId,
       });
       logger.info(
         `Order placed: ${plan.symbol} ${plan.side} qty=${plan.qty} entry≈${plan.entryPrice} sl=${plan.stopLoss} tp=${plan.takeProfit} id=${orderId}`,
@@ -94,12 +97,14 @@ export class ExecutionEngine {
     takeProfit: string;
   }): Promise<{ ok: boolean; orderId?: string; reason?: string; retCode?: number; retMsg?: string }> {
     try {
+      const orderLinkId = `${params.symbol}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const orderId = await this.submitter.placeMarketOrderWithTpsl({
         symbol: params.symbol,
         side: params.side,
         qty: params.qty,
         stopLoss: params.stopLoss,
         takeProfit: params.takeProfit,
+        orderLinkId,
       });
       logger.info(
         `⚡ LIVE DEMO TEST Order placed: ${params.symbol} ${params.side} qty=${params.qty} entry≈${params.entry} sl=${params.stopLoss} tp=${params.takeProfit} id=${orderId}`,

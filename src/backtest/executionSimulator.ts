@@ -11,7 +11,12 @@ export const TAKE_PROFIT_RR = new Decimal('3');
 export const DRAWDOWN_GUARD_TRIGGER = 3; // Number of consecutive losses to trigger reduced risk
 export const MIN_SL_DISTANCE_PCT = new Decimal('0.001'); // 0.1% minimum SL distance
 
+// Debug: Track first 3 trades for detailed logging
+let debugTradeOpenCount = 0;
+let debugTradeCloseCount = 0;
+
 export interface InstrumentInfo {
+  symbol: string;
   tickSize: string;
   qtyStep: string;
   minOrderQty: string;
@@ -163,6 +168,22 @@ export function openTrade(
   }
 
   const slDistanceAdjusted = entryPrice.minus(slPriceAdjusted).abs();
+  
+  // ASSERT: SL must be on correct side of entry
+  // Buy (Long): SL must be BELOW entry
+  // Sell (Short): SL must be ABOVE entry
+  if (side === 'Buy') {
+    if (slPriceAdjusted.gte(entryPrice)) {
+      logger.error(`ASSERT FAILED: Buy trade has SL (${slPriceAdjusted.toFixed(4)}) >= entry (${entryPrice.toFixed(4)})`);
+      throw new Error(`Invalid SL for Buy: SL=${slPriceAdjusted.toFixed(4)} >= Entry=${entryPrice.toFixed(4)}`);
+    }
+  } else {
+    if (slPriceAdjusted.lte(entryPrice)) {
+      logger.error(`ASSERT FAILED: Sell trade has SL (${slPriceAdjusted.toFixed(4)}) <= entry (${entryPrice.toFixed(4)})`);
+      throw new Error(`Invalid SL for Sell: SL=${slPriceAdjusted.toFixed(4)} <= Entry=${entryPrice.toFixed(4)}`);
+    }
+  }
+  
   if (slDistanceAdjusted.lte(0)) {
     return { state, tradeOpened: false };
   }
@@ -230,6 +251,12 @@ export function openTrade(
 
   logger.debug(`Backtest OPEN: ${scenarioName} ${side} entry=${entryPrice.toFixed(4)} SL=${slPriceAdjusted.toFixed(4)} TP=${tpPrice.toFixed(4)} qty=${qty.toFixed(6)} balance=${newBalance.toFixed(2)}`);
 
+  // Debug: Log first 3 trades opening
+  if (debugTradeOpenCount < 3) {
+    debugTradeOpenCount++;
+    logger.warn(`[TRADE OPEN #${debugTradeOpenCount}] Symbol: UNKNOWN | Side: ${side} | Entry: ${entryPrice.toFixed(4)} | SL: ${slPriceAdjusted.toFixed(4)} | TP: ${tpPrice.toFixed(4)} | Candle: O=${candle.open} H=${candle.high} L=${candle.low} C=${candle.close}`);
+  }
+
   return { state: newState, tradeOpened: true };
 }
 
@@ -242,6 +269,11 @@ export function checkAndCloseTrade(
   }
 
   const trade = state.openTrade;
+  
+  // Skip closing on the same candle the trade was opened
+  if (candle.timestamp <= trade.entryTime) {
+    return { state, tradeResult: null };
+  }
   const isLong = trade.side === 'Buy';
   const high = new Decimal(candle.high);
   const low = new Decimal(candle.low);
@@ -325,6 +357,13 @@ export function checkAndCloseTrade(
   } else {
     exitPrice = trade.slPrice;
     closedBy = 'SL';
+  }
+
+  // Debug: Log first 3 trades closing
+  if (debugTradeCloseCount < 3) {
+    debugTradeCloseCount++;
+    const reason = hitTP ? 'TP hit' : 'SL hit';
+    logger.warn(`[TRADE CLOSE #${debugTradeCloseCount}] Exit Price: ${exitPrice.toFixed(4)} | Reason: ${reason} (Hit ${closedBy} on candle H=${candle.high} L=${candle.low})`);
   }
 
   const exitFee = exitPrice.mul(trade.qty).mul(TAKER_FEE_RATE);
