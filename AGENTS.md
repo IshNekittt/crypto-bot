@@ -216,6 +216,10 @@ Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 
 **Solution**: Centralized `BaseScenario.calculateLevels()` method — single source of truth for all bidirectional scenarios (S1, S5, S6, S10, S11).
 
+**Evolution v2026-09-20 — Safety Hardening**:
+1. **Minimum offset protection**: ATR can be near-zero in low volatility → zero offset → division by zero in RiskManager. Fixed by `offset = max(atr * 0.5, entry * 0.1%)`.
+2. **Inverted zone defense**: `zone.top` may be < `zone.bottom`. Now uses `min/max` of **all three** (top, bottom, entry) for SL calculation.
+
 ```typescript
 // In BaseScenario (src/engine/baseScenario.ts)
 public calculateLevels(
@@ -226,14 +230,18 @@ public calculateLevels(
   rr: Decimal = new Decimal(3),
   offsetMultiplier: Decimal = new Decimal(0.5)
 ): TradeLevels {
-  const offset = atr.mul(offsetMultiplier);
+  // Safety: minimum offset = 0.1% of entry (prevents zero offset when ATR is near zero)
+  const minOffset = entry.mul(new Decimal('0.001'));
+  const atrOffset = atr.mul(offsetMultiplier);
+  const offset = Decimal.max(atrOffset, minOffset);
   
   // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
-  // BULLISH (Long): SL must be BELOW entry. Use min(zone.bottom, entry) - offset
-  // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, entry) + offset
+  // Use min/max of ALL THREE (top, bottom, entry) to handle inverted zones safely
+  // BULLISH (Long): SL must be BELOW entry. Use min(zone.top, zone.bottom, entry) - offset
+  // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, zone.bottom, entry) + offset
   const sl = direction === 'BULLISH'
-    ? Decimal.min(zone.bottom, entry).minus(offset)
-    : Decimal.max(zone.top, entry).plus(offset);
+    ? Decimal.min(zone.top, zone.bottom, entry).minus(offset)
+    : Decimal.max(zone.top, zone.bottom, entry).plus(offset);
   const tp = direction === 'BULLISH'
     ? entry.plus(entry.minus(sl).mul(rr))
     : entry.minus(sl.minus(entry).mul(rr));
@@ -246,6 +254,7 @@ public calculateLevels(
 - **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
 - **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
 - `Decimal.min/max` handles inverted zones automatically
+- **Offset floor**: `SL` always at least 0.1% from entry (prevents RiskManager division by zero)
 - Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - Tests call this method directly — no full pattern recognition needed
 
@@ -345,6 +354,75 @@ public calculateLevels(
    - Shows `📊 Funding: BTC: +0.0100% | ETH: +0.0150% | SOL: +0.0200%` or `Disabled`
 
 ---
+
+### 6.9 Dynamic Macro Context in Backtester — **Lookahead Bias Elimination** — `src/backtest/run.ts` — **NEW v2026-09-20**
+
+**Problem**: `initializeMacroContext()` was called once before backtest loop, loading daily levels (PDH/PDL, PWH/PWL) from the **end of history** (e.g., September 2026). During simulation of March–August 2026, the bot incorrectly used future levels — causing Scenarios 5, 7, 8, 9 to miss valid sweeps.
+
+**Solution**: Dynamic macro context updated on-the-fly during simulation, strictly using only data available up to the current candle.
+
+**Implementation in `runBacktestForSymbol()`**:
+
+```typescript
+// Dynamic macro context tracking (no lookahead bias)
+let currentDayUtc = -1;
+let currentWeekUtc = -1;
+let runningAth = new Decimal(0);
+let runningAtl = new Decimal('Infinity');
+
+for (let i = 0; i < candlesLtf.length; i++) {
+  const candle = candlesLtf[i];
+  const candleDate = new Date(candle.timestamp);
+  const candleDay = candleDate.getUTCDate();
+  const candleWeek = Math.floor(candleTime / (7 * 24 * 60 * 60 * 1000));
+
+  // Update running ATH/ATL with current candle (historical data only)
+  if (new Decimal(candle.high).gt(runningAth)) runningAth = new Decimal(candle.high);
+  if (new Decimal(candle.low).lt(runningAtl)) runningAtl = new Decimal(candle.low);
+
+  // Check for new day (00:00 UTC boundary)
+  if (candleDay !== currentDayUtc) {
+    currentDayUtc = candleDay;
+
+    // Calculate yesterday's PDH/PDL from CLOSED candles BEFORE current candle
+    const yesterdayCandles = candlesLtf.slice(Math.max(0, i - 96), i); // 96 = 24h/15m
+    if (yesterdayCandles.length > 0) {
+      const pdh = Decimal.max(...yesterdayCandles.map(c => new Decimal(c.high)));
+      const pdl = Decimal.min(...yesterdayCandles.map(c => new Decimal(c.low)));
+      const doPrice = new Decimal(candle.open);
+
+      // Calculate weekly levels if new week (Monday)
+      let pwh = runningAth, pwl = runningAtl, wo = doPrice;
+      if (candleWeek !== currentWeekUtc) {
+        currentWeekUtc = candleWeek;
+        const lastWeekCandles = candlesLtf.slice(Math.max(0, i - 96 * 7), i);
+        if (lastWeekCandles.length > 0) {
+          pwh = Decimal.max(...lastWeekCandles.map(c => new Decimal(c.high)));
+          pwl = Decimal.min(...lastWeekCandles.map(c => new Decimal(c.low)));
+        }
+      }
+
+      // Atomic update — no lookahead!
+      recognizer.setMacroContext(symbol, {
+        ath: runningAth,
+        atl: runningAtl,
+        weeklyLevels: { pwh, pwl, wo },
+        dailyLevels: { pdh, pdl, do: doPrice },
+        liquidityPools: [/* PDH, PDL, PWH, PWL as pools */],
+      });
+    }
+  }
+  // ... rest of simulation loop
+}
+```
+
+**Key points**:
+- ❌ **Removed**: All `initializeMacroContext()` calls before backtest loop (both CSV and online modes)
+- ✅ **Added**: `PatternRecognizer.setMacroContext()` / `getMacroContext()` for atomic cache updates
+- ✅ **Sliding windows**: 96 candles (15m) = 24h for daily; 96×7 = 1 week for weekly
+- ✅ **Strict causality**: Only uses `candlesLtf.slice(0, i)` — data strictly before current candle
+- ✅ **Per-symbol scenarios**: `config.symbolScenarios.get(symbol)` fallback to global `ACTIVE_SCENARIOS` now respected in backtester
+- ✅ **Full rejection stats**: All 8 scenarios (2,4,5,7,8,9,10,11) logged in both modes
 
 ## 7. THE 11 SCENARIOS — `src/engine/scenarios/`
 
@@ -488,7 +566,7 @@ docker compose up -d
 
 1. **No `number` for money** — only `Decimal` + string serialization.
 2. **Single `PatternRecognizer`** instance shared across all engines.
-3. **Macro context initialized ONCE** at bootstrap, never in hot path.
+3. **Macro context initialized ONCE** at bootstrap (live), **DYNAMICALLY UPDATED** in backtester — never static in hot path.
 4. **`mitigatedZones`** is the ONLY re-entry protection (no "freshness" hacks).
 5. **`reconcileWithTrade`** receives `zoneDetails` for mitigation tracking.
 6. **Slippage Guard** runs at approval time, not order time.
@@ -496,8 +574,9 @@ docker compose up -d
 8. **Global 429 circuit breaker** pauses ALL REST for 5 min.
 9. **WS Watchdog** 3-min silence = force reconnect.
 10. **Daily clock sync** at 00:00 UTC + hourly in reconciliation.
-11. **SL calculation** uses `Decimal.min(zone.bottom, entry)` for Longs and `Decimal.max(zone.top, entry)` for Shorts — guarantees correct SL side regardless of zone top/bottom ordering.
+11. **SL calculation** uses `Decimal.min(zone.top, zone.bottom, entry)` for Longs and `Decimal.max(zone.top, zone.bottom, entry)` for Shorts — guarantees correct SL side regardless of zone top/bottom ordering.
 12. **Backtester is fully dynamic** — no hardcoded timeframes or candle counts; all derived from `config.ltfTimeframe` / `config.htfTimeframe`; cache filenames include timeframe.
+13. **Backtester macro context is dynamic** — no lookahead bias; PDH/PDL/PWH/PWL calculated from sliding windows of closed candles only.
 
 ---
 
@@ -693,24 +772,24 @@ docker compose up -d --build
 **Fix**: `ScenarioRouter` **hard-blocked** if `engine.openTrade !== null` (or `state === IN_TRADE`). Strictly **1 trade per symbol**.
 **Rule**: State machine must be `SCANNING` → `ENTRY_STAGED` → `IN_TRADE` → `SCANNING`. No parallel entries.
 
-### 15.7 🔒 CRYPTO 15m/4H ACTIVE SCENARIOS: ONLY 1, 5, 6, 10
-**Evidence**: 180-day backtest (3 symbols, 457 trades):
-- **S2 (FVG Fill)**: `NoLiqCtx: 120` rejections — imbalances without liquidity context are noise
-- **S4 (Mitigation Chain)**: `NoBOS: 1,570` rejections — OB→BOS chain too rare on 15m crypto
-- **S7, S8, S9 (Range-based)**: AMD/Range Dev/Turtle Soup — negative expectancy on 15m crypto (range trading fails in trending crypto)
-- **S11 (Mitigation Block)**: Strict SMS pattern → 0 trades (too rare)
+### 15.8 ❌ FORBIDDEN: Static Macro Context in Backtester (Lookahead Bias)
+**Root Cause**: `initializeMacroContext()` called once before backtest loop loaded daily levels (PDH/PDL, PWH/PWL) from **end of history** (e.g., September 2026). During simulation of March–August, the bot used future levels — Scenarios 5, 7, 8, 9 missed valid sweeps.
+**Fix**: Dynamic macro context in `runBacktestForSymbol()`:
+- Track `currentDayUtc` / `currentWeekUtc` per candle
+- Running ATH/ATL updated with each candle (historical only)
+- On new day (00:00 UTC): PDH/PDL from yesterday's **closed** candles (`slice(0, i)`)
+- On new week (Monday): PWH/PWL from last 7 days of closed candles
+- Atomic `recognizer.setMacroContext()` update
+**Rule**: Never call `initializeMacroContext()` before backtest loop. Macro levels must be computed on-the-fly from data strictly before current candle.
 
-**Config** (`.env`):
-```bash
-# Production config — only profitable scenarios for crypto 15m/4H
-ACTIVE_SCENARIOS=1,5,6,10
-# Per-symbol overrides (if needed):
-# SCENARIOS_BTCUSDT=1,5,6
-# SCENARIOS_ETHUSDT=1,5,6
-# SCENARIOS_SOLUSDT=5,6,10
-```
-**Rule**: Do NOT enable S2, S3, S4, S7, S8, S9, S11 for crypto 15m/4H without 6-month forward test proof.
+### 15.9 ❌ FORBIDDEN: Zero Stop-Loss Offset (Division by Zero in RiskManager)
+**Root Cause**: In low volatility, ATR ≈ 0 → offset = 0 → SL = Entry → `slDistance = 0` → division by zero in RiskManager position sizing.
+**Fix**: Minimum offset floor in `BaseScenario.calculateLevels()`: `offset = max(atr * 0.5, entry * 0.1%)`. SL always at least 0.1% from entry.
+**Rule**: Always enforce minimum offset in SL calculation. Never allow SL == Entry.
 
----
+### 15.10 ❌ FORBIDDEN: Inverted Zone Stop-Loss (Stop Inside Entry Block)
+**Root Cause**: Zone objects can have `top < bottom` (not guaranteed `top > bottom`). `min(zone.bottom, entry)` for Long fails when zone is inverted — SL ends up *above* entry.
+**Fix**: `Decimal.min(zone.top, zone.bottom, entry)` for Long, `Decimal.max(zone.top, zone.bottom, entry)` for Short — min/max of ALL THREE guarantees correct SL side.
+**Rule**: Always use min/max of top, bottom, AND entry for SL. Never assume zone ordering.
 
 _Last updated: 2026-09-20. All 231 tests green. Build passes. Enterprise-ready._

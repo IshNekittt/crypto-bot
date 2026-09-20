@@ -1054,6 +1054,21 @@ export class PatternRecognizer {
   }
 
   /**
+   * Directly set macro context cache (for backtesting with dynamic updates)
+   * Allows atomic update without fetching from API
+   */
+  public setMacroContext(symbol: string, context: MacroContext): void {
+    this.macroCache.set(`${symbol}_macro`, context);
+  }
+
+  /**
+   * Get current macro context from cache
+   */
+  public getMacroContext(symbol: string): MacroContext | undefined {
+    return this.macroCache.get(`${symbol}_macro`);
+  }
+
+  /**
    * Build complete pattern data for a symbol
    * Uses pre-initialized macro context from cache (initialized at startup)
    * @param currentCandleTimestamp - Timestamp of the current 15m candle being analyzed (for killzone calculation)

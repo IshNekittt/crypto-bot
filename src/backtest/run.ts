@@ -53,6 +53,46 @@ interface MitigatedZone {
   timestamp: number;
 }
 
+// Calculate daily levels from LTF candles (sliding window of ~96 candles for 15m timeframe)
+function calculateDailyLevels(candles: Candle[], ltfMinutes: number): { pdh: Decimal; pdl: Decimal; doPrice: Decimal } | null {
+  const candlesPerDay = Math.floor(1440 / ltfMinutes);
+  if (candles.length < candlesPerDay) return null;
+  
+  const yesterdayCandles = candles.slice(-candlesPerDay);
+  let pdh = new Decimal(0);
+  let pdl = new Decimal('Infinity');
+  
+  for (const c of yesterdayCandles) {
+    const high = new Decimal(c.high);
+    const low = new Decimal(c.low);
+    if (high.gt(pdh)) pdh = high;
+    if (low.lt(pdl)) pdl = low;
+  }
+  
+  const doPrice = new Decimal(candles[candles.length - 1].open);
+  return { pdh, pdl, doPrice };
+}
+
+// Calculate weekly levels from LTF candles (sliding window of ~96*7 candles)
+function calculateWeeklyLevels(candles: Candle[], ltfMinutes: number): { pwh: Decimal; pwl: Decimal; woPrice: Decimal } | null {
+  const candlesPerWeek = Math.floor((1440 * 7) / ltfMinutes);
+  if (candles.length < candlesPerWeek) return null;
+  
+  const lastWeekCandles = candles.slice(-candlesPerWeek);
+  let pwh = new Decimal(0);
+  let pwl = new Decimal('Infinity');
+  
+  for (const c of lastWeekCandles) {
+    const high = new Decimal(c.high);
+    const low = new Decimal(c.low);
+    if (high.gt(pwh)) pwh = high;
+    if (low.lt(pwl)) pwl = low;
+  }
+  
+  const woPrice = new Decimal(candles[candles.length - 1].open);
+  return { pwh, pwl, woPrice };
+}
+
 async function runBacktestForSymbol(
   symbol: string,
   instrument: InstrumentInfo,
@@ -73,12 +113,16 @@ async function runBacktestForSymbol(
 
   const htfTimestamps = candlesHtf.map(c => c.timestamp).sort((a, b) => a - b);
 
+  // Use per-symbol scenarios (SCENARIOS_<SYMBOL>) or fall back to global ACTIVE_SCENARIOS
+  const symbolScenarios = config.symbolScenarios?.get(symbol) ?? config.activeScenarios;
+  logger.warn(`[${symbol}] Active scenarios for backtest: ${symbolScenarios.join(',')}`);
+
   // Create router ONCE outside the loop (performance optimization)
   const router = new ScenarioRouter({
     symbol,
     patternRecognizer: recognizer,
     notifier: { sendMessage: async () => false } as any,
-    activeScenarios: config.activeScenarios,
+    activeScenarios: symbolScenarios,
   });
 
   // Pattern data cache - avoid recomputing from scratch every candle
@@ -87,6 +131,12 @@ async function runBacktestForSymbol(
   let lastCachedCandleIndex = -1;
   let lastCachedMitigatedZonesLength = 0;
   const CACHE_REBUILD_INTERVAL = 10; // Rebuild cache every N candles when no trade is open (reduced for accuracy)
+
+  // Dynamic macro context tracking (lookahead-bias-free)
+  let currentDayUtc = -1;
+  let currentWeekUtc = -1;
+  let runningAth = new Decimal(0);
+  let runningAtl = new Decimal('Infinity');
 
   // Silence all info/debug logs - only keep warn for progress
   logger.level = 'warn';
@@ -101,6 +151,68 @@ async function runBacktestForSymbol(
 
     const candleLtf = candlesLtf[i];
     const candleTime = candleLtf.timestamp;
+
+    // === DYNAMIC MACRO CONTEXT UPDATE (no lookahead bias) ===
+    const candleDate = new Date(candleTime);
+    const candleDay = candleDate.getUTCDate();
+    const candleWeek = Math.floor(candleTime / (7 * 24 * 60 * 60 * 1000));
+
+    // Update running ATH/ATL with current candle (historical data only)
+    const candleHigh = new Decimal(candleLtf.high);
+    const candleLow = new Decimal(candleLtf.low);
+    if (candleHigh.gt(runningAth)) runningAth = candleHigh;
+    if (candleLow.lt(runningAtl)) runningAtl = candleLow;
+
+    // Check for new day (00:00 UTC boundary)
+    if (candleDay !== currentDayUtc) {
+      currentDayUtc = candleDay;
+
+      // Calculate yesterday's PDH/PDL from closed candles BEFORE current candle
+      const dailyLevels = calculateDailyLevels(candlesLtf.slice(0, i), ltfMinutes);
+      
+      // Calculate weekly levels if new week (Monday)
+      let pwh = new Decimal(0);
+      let pwl = new Decimal(0);
+      let wo = new Decimal(0);
+      
+      if (candleWeek !== currentWeekUtc) {
+        currentWeekUtc = candleWeek;
+        const weeklyLevels = calculateWeeklyLevels(candlesLtf.slice(0, i), ltfMinutes);
+        if (weeklyLevels) {
+          pwh = weeklyLevels.pwh;
+          pwl = weeklyLevels.pwl;
+          wo = weeklyLevels.woPrice;
+        }
+      } else {
+        // Use existing weekly levels from cache
+        const existing = recognizer.getMacroContext(symbol);
+        pwh = existing?.weeklyLevels.pwh ?? new Decimal(0);
+        pwl = existing?.weeklyLevels.pwl ?? new Decimal(0);
+        wo = existing?.weeklyLevels.wo ?? new Decimal(0);
+      }
+
+      if (dailyLevels) {
+        // Atomic update of macro context - no lookahead!
+        recognizer.setMacroContext(symbol, {
+          ath: runningAth,
+          atl: runningAtl,
+          htfFvgs: [],
+          htfObs: [],
+          weeklyLevels: { pwh, pwl, wo },
+          dailyLevels: { 
+            pdh: dailyLevels.pdh, 
+            pdl: dailyLevels.pdl, 
+            do: dailyLevels.doPrice 
+          },
+          liquidityPools: [
+            { type: 'PDH', priceLevel: dailyLevels.pdh, points: [], isTaken: false, timestamp: candleTime },
+            { type: 'PDL', priceLevel: dailyLevels.pdl, points: [], isTaken: false, timestamp: candleTime },
+            { type: 'PWH', priceLevel: pwh, points: [], isTaken: false, timestamp: candleTime },
+            { type: 'PWL', priceLevel: pwl, points: [], isTaken: false, timestamp: candleTime },
+          ],
+        });
+      }
+    }
 
     // HARD CHECK: If we have an open trade, ONLY check TP/SL. Skip ALL heavy math (router, patternRecognizer)
     if (state.openTrade) {
@@ -295,7 +407,6 @@ async function main(): Promise<void> {
     } as any;
     
     recognizer = new PatternRecognizer(mockClient);
-    await recognizer.initializeMacroContext(symbol, config.macroCandles);
     
     // Get date range from candles BEFORE running backtest (array gets cleared in cleanupMemory)
     const fromMs = candlesLtf[0]?.timestamp || Date.now();
@@ -408,8 +519,6 @@ async function main(): Promise<void> {
         continue;
       }
 
-      await recognizer.initializeMacroContext(symbol, config.macroCandles);
-
       const result = await runBacktestForSymbol(
         symbol,
         instrument,
@@ -436,11 +545,40 @@ async function main(): Promise<void> {
         maxDrawdown
       );
 
-      // Print Scenario 5 rejection stats
-      const stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
-      logger.info(`Scenario 5 Rejection Stats: ${JSON.stringify(stats, null, 2)}`);
+      // Print rejection stats for ALL scenarios (like CSV mode)
+      logger.info('=== ONLINE MODE REJECTION STATS ===');
+      const stats2 = Scenario2_FVGFill.getRejectionStats();
+      logger.info(`Scenario 2 (FVG Fill): ${JSON.stringify(stats2, null, 2)}`);
+      Scenario2_FVGFill.resetStats();
+      
+      const stats4 = Scenario4_MitigationChain.getRejectionStats();
+      logger.info(`Scenario 4 (Mitigation Chain): ${JSON.stringify(stats4, null, 2)}`);
+      Scenario4_MitigationChain.resetStats();
+      
+      const stats5 = Scenario5_HTFLiquiditySweep.getRejectionStats();
+      logger.info(`Scenario 5 (HTF Liquidity Sweep): ${JSON.stringify(stats5, null, 2)}`);
       Scenario5_HTFLiquiditySweep.resetStats();
-
+      
+      const stats7 = Scenario7_AMD.getRejectionStats();
+      logger.info(`Scenario 7 (AMD): ${JSON.stringify(stats7, null, 2)}`);
+      Scenario7_AMD.resetStats();
+      
+      const stats8 = Scenario8_RangeDeviationReclaim.getRejectionStats();
+      logger.info(`Scenario 8 (Range Deviation): ${JSON.stringify(stats8, null, 2)}`);
+      Scenario8_RangeDeviationReclaim.resetStats();
+      
+      const stats9 = Scenario9_TurtleSoup.getRejectionStats();
+      logger.info(`Scenario 9 (Turtle Soup): ${JSON.stringify(stats9, null, 2)}`);
+      Scenario9_TurtleSoup.resetStats();
+      
+      const stats10 = Scenario10_BreakerBlock.getRejectionStats();
+      logger.info(`Scenario 10 (Breaker Block): ${JSON.stringify(stats10, null, 2)}`);
+      Scenario10_BreakerBlock.resetStats();
+      
+      const stats11 = Scenario11_MitigationBlock.getRejectionStats();
+      logger.info(`Scenario 11 (Mitigation Block): ${JSON.stringify(stats11, null, 2)}`);
+      Scenario11_MitigationBlock.resetStats();
+      
       // Print PatternRecognizer displacement rejection stats
       const displacementRejections = recognizer.getDisplacementRejections();
       logger.info(`PatternRecognizer Displacement Rejections: ${displacementRejections}`);

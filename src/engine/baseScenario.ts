@@ -87,14 +87,18 @@ export abstract class BaseScenario implements IScenario {
     rr: Decimal = new Decimal(3),
     offsetMultiplier: Decimal = new Decimal(0.5)
   ): TradeLevels {
-    const offset = atr.mul(offsetMultiplier);
+    // Safety: minimum offset = 0.1% of entry (prevents zero offset when ATR is near zero)
+    const minOffset = entry.mul(new Decimal('0.001'));
+    const atrOffset = atr.mul(offsetMultiplier);
+    const offset = Decimal.max(atrOffset, minOffset);
     
     // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
-    // BULLISH (Long): SL must be BELOW entry. Use min(zone.bottom, entry) - offset
-    // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, entry) + offset
+    // Use min/max of ALL THREE (top, bottom, entry) to handle inverted zones safely
+    // BULLISH (Long): SL must be BELOW entry. Use min(zone.top, zone.bottom, entry) - offset
+    // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, zone.bottom, entry) + offset
     const sl = direction === 'BULLISH'
-      ? Decimal.min(zone.bottom, entry).minus(offset)
-      : Decimal.max(zone.top, entry).plus(offset);
+      ? Decimal.min(zone.top, zone.bottom, entry).minus(offset)
+      : Decimal.max(zone.top, zone.bottom, entry).plus(offset);
     const tp = direction === 'BULLISH'
       ? entry.plus(entry.minus(sl).mul(rr))
       : entry.minus(sl.minus(entry).mul(rr));

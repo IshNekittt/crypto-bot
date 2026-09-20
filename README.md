@@ -46,11 +46,15 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ---
 
-## 🎯 Strict Stop-Loss Calculation (NEW v2026-09-10)
+## 🎯 Strict Stop-Loss Calculation (v2026-09-20 — Safety Hardened)
 
 **Problem**: Zone objects (OB, FVG, Breaker, Mitigation) can have arbitrary `top`/`bottom` ordering — not guaranteed `top > bottom`. Naive SL formulas fail when zone is inverted.
 
 **Solution**: Centralized `BaseScenario.calculateLevels()` — single source of truth for all bidirectional scenarios (S1, S5, S6, S10, S11).
+
+**Evolution v2026-09-20 — Safety Hardening**:
+1. **Minimum offset protection**: ATR can be near-zero in low volatility → zero offset → division by zero in RiskManager. Fixed by `offset = max(atr * 0.5, entry * 0.1%)`.
+2. **Inverted zone defense**: `zone.top` may be < `zone.bottom`. Now uses `min/max` of **all three** (top, bottom, entry) for SL calculation.
 
 ```typescript
 // In BaseScenario (src/engine/baseScenario.ts)
@@ -62,14 +66,18 @@ public calculateLevels(
   rr: Decimal = new Decimal(3),
   offsetMultiplier: Decimal = new Decimal(0.5)
 ): TradeLevels {
-  const offset = atr.mul(offsetMultiplier);
-
+  // Safety: minimum offset = 0.1% of entry (prevents zero offset when ATR is near zero)
+  const minOffset = entry.mul(new Decimal('0.001'));
+  const atrOffset = atr.mul(offsetMultiplier);
+  const offset = Decimal.max(atrOffset, minOffset);
+  
   // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
-  // BULLISH (Long): SL must be BELOW entry. Use min(zone.bottom, entry) - offset
-  // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, entry) + offset
+  // Use min/max of ALL THREE (top, bottom, entry) to handle inverted zones safely
+  // BULLISH (Long): SL must be BELOW entry. Use min(zone.top, zone.bottom, entry) - offset
+  // BEARISH (Short): SL must be ABOVE entry. Use max(zone.top, zone.bottom, entry) + offset
   const sl = direction === 'BULLISH'
-    ? Decimal.min(zone.bottom, entry).minus(offset)
-    : Decimal.max(zone.top, entry).plus(offset);
+    ? Decimal.min(zone.top, zone.bottom, entry).minus(offset)
+    : Decimal.max(zone.top, zone.bottom, entry).plus(offset);
   const tp = direction === 'BULLISH'
     ? entry.plus(entry.minus(sl).mul(rr))
     : entry.minus(sl.minus(entry).mul(rr));
@@ -83,6 +91,7 @@ public calculateLevels(
 - **BULLISH (Long)**: `SL < Entry < TP` — always, even if `zone.top < zone.bottom`
 - **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
 - `Decimal.min/max` handles inverted zones automatically
+- **Offset floor**: `SL` always at least 0.1% from entry (prevents RiskManager division by zero)
 - Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - 16 dedicated tests verify geometry: 4 scenarios × 2 directions × 2 zone orientations
 
@@ -138,6 +147,31 @@ or `None for today` / error state.
 - Started via `fundingMonitor.start()` in bootstrap
 - Graceful shutdown via `fundingMonitor.stop()`
 - `/status` shows: `📊 Funding: BTC: +0.0100% | ETH: +0.0150% | SOL: +0.0200%` or `Disabled`
+
+---
+
+## 📈 Dynamic Macro Context in Backtester — **Lookahead Bias Elimination** — v2026-09-20
+
+**Problem**: `initializeMacroContext()` was called once before backtest loop, loading daily levels (PDH/PDL, PWH/PWL) from the **end of history** (e.g., September 2026). During simulation of March–August 2026, the bot incorrectly used future levels — causing Scenarios 5, 7, 8, 9 to miss valid sweeps.
+
+**Solution**: Dynamic macro context updated on-the-fly during simulation, strictly using only data available up to the current candle.
+
+**Implementation in `runBacktestForSymbol()`**:
+
+| Component | Detail |
+|-----------|--------|
+| **Tracking** | `currentDayUtc`, `currentWeekUtc`, running ATH/ATL |
+| **Daily Update** | On new day (00:00 UTC): PDH/PDL from yesterday's **closed** candles (`candlesLtf.slice(0, i)`) |
+| **Weekly Update** | On Monday: PWH/PWL from last 7 days of **closed** candles |
+| **Atomic Update** | `recognizer.setMacroContext(symbol, {...})` — no lookahead! |
+| **Sliding Windows** | 96 candles (15m) = 24h for daily; 96×7 = 1 week for weekly |
+
+**Key Changes**:
+- ❌ **Removed**: All `initializeMacroContext()` calls before backtest loop (both CSV and online modes)
+- ✅ **Added**: `PatternRecognizer.setMacroContext()` / `getMacroContext()` for atomic cache updates
+- ✅ **Strict causality**: Only uses data strictly before current candle (`slice(0, i)`)
+- ✅ **Per-symbol scenarios**: `config.symbolScenarios.get(symbol)` now respected in backtester
+- ✅ **Full rejection stats**: All 8 scenarios (2,4,5,7,8,9,10,11) logged in both modes
 
 ---
 
