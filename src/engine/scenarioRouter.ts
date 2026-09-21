@@ -138,6 +138,10 @@ export class ScenarioRouter {
               reason,
               zoneDetails,
             };
+          } else {
+            // Debug log for rejected scenario
+            const rejectionReason = scenario.getReason() || 'Conditions not met';
+            logger.debug(`[${this.symbol}] ${scenario.name} rejected: ${rejectionReason}`);
           }
         } catch (err) {
           logger.error('Scenario evaluation error', {
