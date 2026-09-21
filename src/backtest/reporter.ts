@@ -91,6 +91,37 @@ export function generateReport(
   lines.push(`   Max Drawdown:      ${maxDrawdown.toFixed(2)}%`);
   lines.push(`   Total Fees Paid:   $${totalFees.toFixed(2)}`);
   lines.push('');
+
+  // ─── Dry Spells / Trade Clustering Analysis ───
+  if (trades.length >= 2) {
+    // Sort trades by entry time
+    const sortedTrades = [...trades].sort((a, b) => a.entryTime - b.entryTime);
+    
+    let maxDrySpellDays = 0;
+    let drySpellsGt3 = 0;
+    let drySpellsGt5 = 0;
+    let drySpellsGt7 = 0;
+
+    for (let i = 1; i < sortedTrades.length; i++) {
+      const prevExit = sortedTrades[i - 1].exitTime;
+      const currEntry = sortedTrades[i].entryTime;
+      const gapDays = (currEntry - prevExit) / (1000 * 60 * 60 * 24);
+
+      if (gapDays > maxDrySpellDays) {
+        maxDrySpellDays = gapDays;
+      }
+      if (gapDays > 3) drySpellsGt3++;
+      if (gapDays > 5) drySpellsGt5++;
+      if (gapDays > 7) drySpellsGt7++;
+    }
+
+    lines.push('⏳ TRADE CLUSTERING & DRY SPELLS');
+    lines.push(`   Max consecutive days without trades: ${maxDrySpellDays.toFixed(1)} days`);
+    lines.push(`   Periods > 3 days without trades: ${drySpellsGt3} times`);
+    lines.push(`   Periods > 5 days without trades: ${drySpellsGt5} times`);
+    lines.push(`   Periods > 7 days without trades: ${drySpellsGt7} times`);
+    lines.push('');
+  }
   lines.push('📋 SCENARIO BREAKDOWN');
   lines.push('   Scenario                    | Trades |  Win | Loss | Win%  | Profit $');
   lines.push('   ────────────────────────────┼────────┼──────┼──────┼───────┼───────────');
