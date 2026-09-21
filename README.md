@@ -175,6 +175,38 @@ or `None for today` / error state.
 
 ---
 
+## 🎯 Scenario 11 — Mitigation Block — Full Implementation Details — v2026-09-21
+
+**File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
+
+**Core Logic**: Mitigation Block is a reversal pattern that forms after a Failed Swing (SMS):
+1. Price attempts a higher high (bearish SMS) / lower low (bullish SMS) but fails
+2. Price reverses with a CHoCH in opposite direction (≥1.5 ATR displacement)
+3. The Order Block that formed the failed swing extreme becomes the Mitigation Block
+4. Trade triggers on retest of this MB by current 15m candle
+
+**Critical Implementation Details (v2026-09-21 — Critical Bug Fixes):**
+
+| Aspect | Implementation | Why Critical |
+|--------|---------------|--------------|
+| **SMS Selection** | `structures.filter(s => s.type === 'SMS')` → `smsList[smsList.length-1]` | `.find()` returns OLDEST; must take NEWEST SMS |
+| **CHoCH Selection** | `structures.filter(s => ...)` → `validChochs[validChochs.length-1]` | Must take NEWEST CHoCH after the chosen SMS |
+| **MB Selection** | `zones.filter(...)` → `mbObs[mbObs.length-1]` | Must take NEWEST OB before SMS (formed the failed swing) |
+| **Retest Logic** | **Current 15m candle ONLY** (`candles15m[candles15m.length-1]`) | No historical search — trade triggers NOW |
+| **Time Window** | `0 < timeSinceChoch ≤ 12h` | Blocks stale setups; 12h max hold |
+| **Retest Condition** | Current candle wicks touch MB zone (`high ≥ mbBottom && low ≤ mbTop`) AND closes inside zone in trade direction | Confirms institutional interest at MB |
+| **Premium/Discount** | Dynamic equilibrium from `SMS price → CHoCH price` impulse | Long = Discount (below eq), Short = Premium (above eq) |
+| **Rejection Stats** | `NoSms`, `InvalidSmsPattern`, `NoChoch`, `Displacement`, `NoMB`, `NoRetest`, `PremDisc` | Full observability |
+
+**Key Invariants:**
+- `structures` and `zones` arrays are timestamp-ascending (oldest first)
+- **Always use `[array.length-1]` for "newest"** — never `[0]` or `.find()`
+- Retest is **current candle only** — no historical search
+- P/D equilibrium calculated from `SMS price → CHoCH price` impulse
+- Maximum 12h from CHoCH to retest (prevents stale setups)
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites

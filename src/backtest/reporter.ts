@@ -133,7 +133,7 @@ export function generateReport(
   lines.push('   Scenario 10 (Breaker Block):');
   lines.push(`     Total: ${scenario10Stats.totalEvals} | Killzone: ${scenario10Stats.killzone} | NoBreak: ${scenario10Stats.noBreak} | NoBrokenOB: ${scenario10Stats.noBrokenOb} | NoLiqSweep: ${scenario10Stats.noLiquiditySweep} | NotBOS: ${scenario10Stats.notBos} | OBNotFresh: ${scenario10Stats.obNotFresh} | NoFvg: ${scenario10Stats.noFvg} | NoRetest: ${scenario10Stats.noRetest} | Disp: ${scenario10Stats.displacement} | BodyClose: ${scenario10Stats.bodyClose}`);
   lines.push('   Scenario 11 (Mitigation Block):');
-  lines.push(`     Total: ${scenario11Stats.totalEvals} | Killzone: ${scenario11Stats.killzone} | NoSms: ${scenario11Stats.noSms} | NoChoch: ${scenario11Stats.noChoch} | Displacement: ${scenario11Stats.displacement} | NoMB: ${scenario11Stats.noMitigationBlock} | NoRetest: ${scenario11Stats.noRetest}`);
+  lines.push(`     Total: ${scenario11Stats.totalEvals} | Killzone: ${scenario11Stats.killzone} | NoSms: ${scenario11Stats.noSms} | InvalidSms: ${scenario11Stats.invalidSmsPattern} | NoChoch: ${scenario11Stats.noChoch} | Displacement: ${scenario11Stats.displacement} | NoMB: ${scenario11Stats.noMitigationBlock} | NoRetest: ${scenario11Stats.noRetest} | PremDisc: ${scenario11Stats.premiumDiscount}`);
   lines.push('');
 
   return lines.join('\n');

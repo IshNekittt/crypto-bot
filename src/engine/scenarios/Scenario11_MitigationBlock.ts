@@ -1,8 +1,9 @@
-import { BaseScenario } from '../baseScenario';
-import { Decimal } from 'decimal.js';
+import { BaseScenario } from "../baseScenario";
+import { Decimal } from "decimal.js";
 
 export class Scenario11_MitigationBlock extends BaseScenario {
   private static rejectionStats = {
+    missingData: 0,
     killzone: 0,
     noSms: 0,
     invalidSmsPattern: 0,
@@ -10,7 +11,8 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     displacement: 0,
     noMitigationBlock: 0,
     noRetest: 0,
-    totalEvals: 0
+    premiumDiscount: 0,
+    totalEvals: 0,
   };
 
   static getRejectionStats() {
@@ -19,6 +21,7 @@ export class Scenario11_MitigationBlock extends BaseScenario {
 
   static resetStats() {
     this.rejectionStats = {
+      missingData: 0,
       killzone: 0,
       noSms: 0,
       invalidSmsPattern: 0,
@@ -26,169 +29,215 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       displacement: 0,
       noMitigationBlock: 0,
       noRetest: 0,
-      totalEvals: 0
+      premiumDiscount: 0,
+      totalEvals: 0,
     };
   }
 
   constructor() {
-    super(11, 'Mitigation Block');
+    super(11, "Mitigation Block");
   }
 
-  /**
-   * Strict SMS validation: 
-   * - BEARISH SMS: Price tried to make Higher High, failed (formed Lower High or equal high within tolerance),
-   *   then broke down through the swing low that confirmed the failure (CHoCH down)
-   * - BULLISH SMS: Price tried to make Lower Low, failed (formed Higher Low or equal low within tolerance),
-   *   then broke up through the swing high that confirmed the failure (CHoCH up)
-   * The Mitigation Block is the OB that formed the failed swing extreme (Lower High for bearish, Higher Low for bullish)
-   * Returns validation result with specific rejection reason if invalid
-   */
-  private validateSmsPattern(sms: any, structures: any[], zones: any[]): { isValid: boolean; mitigationBlock: any; chochAfterSms: any; rejectionReason?: string } {
-    const smsDirection = sms.direction; // BEARISH = failed higher high, BULLISH = failed lower low
-    const expectedChochDirection = smsDirection === 'BEARISH' ? 'BEARISH' : 'BULLISH';
+  private validateSmsPattern(
+    sms: any,
+    structures: any[],
+    zones: any[],
+  ): {
+    isValid: boolean;
+    mitigationBlock: any;
+    chochAfterSms: any;
+    rejectionReason?: string;
+  } {
+    const smsDirection = sms.direction;
+    const expectedChochDirection =
+      smsDirection === "BEARISH" ? "BEARISH" : "BULLISH";
 
-    // Find CHoCH in opposite direction within 8H after SMS
-    const chochAfterSms = structures.find((s: any) => 
-      s.type === 'CHOCH' && 
-      s.direction === expectedChochDirection &&
-      s.timestamp > sms.timestamp &&
-      s.timestamp <= sms.timestamp + 8 * 60 * 60 * 1000 // within 8H after SMS
+    // Find ALL CHoCHs after this SMS within 8H, take the LAST (newest) one
+    const validChochs = structures.filter(
+      (s: any) =>
+        s.type === "CHOCH" &&
+        s.direction === expectedChochDirection &&
+        s.timestamp > sms.timestamp &&
+        s.timestamp <= sms.timestamp + 8 * 3600 * 1000,
     );
 
-    if (!chochAfterSms) {
-      return { isValid: false, mitigationBlock: null, chochAfterSms: null, rejectionReason: 'No CHoCH after SMS within 8H' };
+    if (!validChochs.length) {
+      return {
+        isValid: false,
+        mitigationBlock: null,
+        chochAfterSms: null,
+        rejectionReason: "No CHoCH after SMS within 8H",
+      };
     }
 
-    // MUST check Displacement on the CHoCH
+    // Take the LAST (newest) CHoCH after this SMS
+    const chochAfterSms = validChochs[validChochs.length - 1];
+
     if (!this.isValidDisplacement(chochAfterSms, 1.5)) {
-      return { isValid: false, mitigationBlock: null, chochAfterSms: null, rejectionReason: 'CHoCH after SMS displacement < 1.5 ATR' };
+      return {
+        isValid: false,
+        mitigationBlock: null,
+        chochAfterSms: null,
+        rejectionReason: "CHoCH after SMS displacement < 1.5 ATR",
+      };
     }
 
-    // The Mitigation Block is the OB that formed the FAILED swing extreme
-    // For BEARISH SMS (failed higher high): the OB that formed the LOWER HIGH (the failed attempt)
-    // For BULLISH SMS (failed lower low): the OB that formed the HIGHER LOW (the failed attempt)
-    // These are the last OB in the opposite direction BEFORE the SMS
-    const mbObs = zones.filter((z: any) => 
-      z.type === 'OB' && 
-      z.direction === (smsDirection === 'BEARISH' ? 'BULLISH' : 'BEARISH') &&
-      z.timestamp < sms.timestamp &&
-      !z.mitigated
+    // Find the LAST (newest) OB before SMS that formed the failed swing
+    const mbObs = zones.filter(
+      (z: any) =>
+        z.type === "OB" &&
+        z.direction === (smsDirection === "BEARISH" ? "BULLISH" : "BEARISH") &&
+        z.timestamp < sms.timestamp &&
+        !z.mitigated,
     );
 
     if (!mbObs.length) {
-      return { isValid: false, mitigationBlock: null, chochAfterSms: null, rejectionReason: 'No Mitigation Block OB found before SMS' };
+      return {
+        isValid: false,
+        mitigationBlock: null,
+        chochAfterSms: null,
+        rejectionReason: "No Mitigation Block OB found before SMS",
+      };
     }
 
-    // The mitigation block is the LAST OB before SMS that formed the failed swing
-    // For bearish SMS: the OB at the lower high (most recent bullish OB before SMS)
-    // For bullish SMS: the OB at the higher low (most recent bearish OB before SMS)
-    const mitigationBlock = mbObs[0];
+    // The LAST OB before SMS (most recent) = mbObs[mbObs.length - 1]
+    // Array is ordered by timestamp ascending, so last element is newest
+    return {
+      isValid: true,
+      mitigationBlock: mbObs[mbObs.length - 1],
+      chochAfterSms,
+    };
+  }
 
-    return { isValid: true, mitigationBlock, chochAfterSms };
+  private checkPremiumDiscount(
+    entry: Decimal,
+    tradeDirection: "BULLISH" | "BEARISH",
+    smsPrice: Decimal,
+    chochPrice: Decimal,
+  ): boolean {
+    const high = Decimal.max(smsPrice, chochPrice);
+    const low = Decimal.min(smsPrice, chochPrice);
+    const equilibrium = low.plus(high.minus(low).div(2));
+
+    if (tradeDirection === "BULLISH") return entry.lt(equilibrium); // Лонг строго в Discount
+    return entry.gt(equilibrium); // Шорт строго в Premium
   }
 
   override evaluate(patternData: any): boolean {
     Scenario11_MitigationBlock.rejectionStats.totalEvals++;
 
-    // Mitigation Block works in active killzones
-    // Check explicit killzone override first
-    if (patternData.currentKillzone === 'NONE') {
-      this.logRejection('Not in active killzone');
-      Scenario11_MitigationBlock.rejectionStats.killzone++;
-      return false;
-    }
-    const candleTimestamp = patternData.candles15m?.[patternData.candles15m.length - 1]?.timestamp ?? Date.now();
-    if (!this.isInKillzone(candleTimestamp)) {
-      this.logRejection('Not in active killzone');
-      Scenario11_MitigationBlock.rejectionStats.killzone++;
-      return false;
-    }
-
     const { candles15m, structures, zones } = patternData;
-    if (!candles15m?.length || !structures?.length || !zones?.length) return false;
+    if (!candles15m?.length || !structures?.length || !zones?.length) {
+      Scenario11_MitigationBlock.rejectionStats.missingData++;
+      return false;
+    }
 
-    // Mitigation Block: ONLY works after SMS (Failure Swing)
-    // Price makes a high, pulls back, tries to make higher high but FAILS (SMS),
-    // then breaks down through the last bullish OB -> that OB becomes Mitigation Block
+    if (patternData.currentKillzone === "NONE") {
+      this.logRejection("Not in active killzone");
+      Scenario11_MitigationBlock.rejectionStats.killzone++;
+      return false;
+    }
 
-    // Find SMS (Smart Money Shift) - failure to make new high/low
-    const sms = structures.find((s: any) => s.type === 'SMS');
-    if (!sms) {
-      this.logRejection('No SMS (Smart Money Shift) detected');
+    const candleTimestamp = candles15m[candles15m.length - 1].timestamp;
+    if (!this.isInKillzone(candleTimestamp)) {
+      this.logRejection("Not in active killzone");
+      Scenario11_MitigationBlock.rejectionStats.killzone++;
+      return false;
+    }
+
+    // Find the LAST (newest) SMS in the structures array
+    const smsList = structures.filter((s: any) => s.type === "SMS");
+    if (!smsList.length) {
+      this.logRejection("No SMS (Smart Money Shift) detected");
       Scenario11_MitigationBlock.rejectionStats.noSms++;
       return false;
     }
+    const sms = smsList[smsList.length - 1]; // Самый свежий SMS!
 
-    // STRICT SMS PATTERN VALIDATION
     const validation = this.validateSmsPattern(sms, structures, zones);
     if (!validation.isValid) {
-      const reason = validation.rejectionReason || 'Invalid SMS pattern';
+      const reason = validation.rejectionReason || "Invalid SMS pattern";
       this.logRejection(reason);
-      if (reason.includes('CHoCH after SMS')) {
+      if (reason.includes("CHoCH after SMS"))
         Scenario11_MitigationBlock.rejectionStats.noChoch++;
-      } else if (reason.includes('displacement')) {
+      else if (reason.includes("displacement"))
         Scenario11_MitigationBlock.rejectionStats.displacement++;
-      } else if (reason.includes('Mitigation Block OB')) {
+      else if (reason.includes("Mitigation Block OB"))
         Scenario11_MitigationBlock.rejectionStats.noMitigationBlock++;
-      } else {
-        Scenario11_MitigationBlock.rejectionStats.invalidSmsPattern++;
-      }
+      else Scenario11_MitigationBlock.rejectionStats.invalidSmsPattern++;
       return false;
     }
 
-    const mitigationBlock = validation.mitigationBlock;
-    const chochAfterSms = validation.chochAfterSms;
+    const { mitigationBlock, chochAfterSms } = validation;
+    const tradeDirection = chochAfterSms.direction;
+    const atr = patternData.atr15m || new Decimal("0.01");
 
-    // Wait for price to return and test the Mitigation Block
-    // SMC RULE: Entry ONLY on RETEST after CHoCH candle CLOSES
-    // Check last 5 candles for retest (retest could be 1-4 candles ago)
-    const mbTop = mitigationBlock.top;
-    const mbBottom = mitigationBlock.bottom;
-    const expectedChochDirection = chochAfterSms.direction;
-    
-    let retestCandle: any = null;
-    const checkWindow = Math.min(5, candles15m.length);
-    for (let i = candles15m.length - checkWindow; i < candles15m.length; i++) {
-      const c = candles15m[i];
-      // Must be AFTER CHoCH candle
-      if (c.timestamp <= chochAfterSms.timestamp) continue;
-      
-      const close = new Decimal(c.close);
-      const high = new Decimal(c.high);
-      const low = new Decimal(c.low);
+    // Ретест должен происходить на ТЕКУЩЕЙ свече (той, что только закрылась)
+    const currentCandle = candles15m[candles15m.length - 1];
 
-      // Price should test the mitigation block zone on RETEST
-      const testingMb = expectedChochDirection === 'BULLISH'
-        ? low.lte(mbTop) && close.gte(mbBottom)
-        : high.gte(mbBottom) && close.lte(mbTop);
-
-      if (testingMb) {
-        retestCandle = c;
-        break;
-      }
+    // Свеча должна быть ПОСЛЕ CHoCH, но не позднее 12 часов после слома
+    const timeSinceChoch = currentCandle.timestamp - chochAfterSms.timestamp;
+    if (timeSinceChoch <= 0) {
+      Scenario11_MitigationBlock.rejectionStats.noRetest++;
+      return false;
     }
-
-    if (!retestCandle) {
-      this.logRejection('Price not testing Mitigation Block zone on retest in last 5 candles');
+    if (timeSinceChoch > 12 * 3600 * 1000) {
       Scenario11_MitigationBlock.rejectionStats.noRetest++;
       return false;
     }
 
-const lastClose = new Decimal(retestCandle.close);
+    const currentHigh = new Decimal(currentCandle.high);
+    const currentLow = new Decimal(currentCandle.low);
+    const currentClose = new Decimal(currentCandle.close);
+    const currentOpen = new Decimal(currentCandle.open);
 
-    // Entry at market on retest candle close
-    const entry = lastClose;
+    const mbTop = new Decimal(mitigationBlock.top);
+    const mbBottom = new Decimal(mitigationBlock.bottom);
 
-    // Use base class calculateLevels with correct trade direction
+    // Ретест — касание зоны блока тенями ТЕКУЩЕЙ свечи
+    const touchedMb =
+      tradeDirection === "BULLISH"
+        ? currentLow.lte(mbTop) && currentHigh.gte(mbBottom)
+        : currentHigh.gte(mbBottom) && currentLow.lte(mbTop);
+
+    // Свеча должна закрыться в направлении сделки И внутри зоны блока
+    const closedInDirectionAndZone =
+      tradeDirection === "BULLISH"
+        ? currentClose.gt(currentOpen) &&
+          currentClose.gte(mbBottom) &&
+          currentClose.lte(mbTop)
+        : currentClose.lt(currentOpen) &&
+          currentClose.lte(mbTop) &&
+          currentClose.gte(mbBottom);
+
+    if (!touchedMb || !closedInDirectionAndZone) {
+      Scenario11_MitigationBlock.rejectionStats.noRetest++;
+      return false;
+    }
+
+    // Entry на закрытии ТЕКУЩЕЙ свечи
+    const entry = new Decimal(currentCandle.close);
+
+    // Premium/Discount check at the entry point
+    // Dynamic equilibrium based on the impulse from SMS price to CHoCH price
+    if (
+      !this.checkPremiumDiscount(
+        entry,
+        tradeDirection,
+        new Decimal(sms.price),
+        new Decimal(chochAfterSms.price),
+      )
+    ) {
+      this.logRejection("Entry not in correct Premium/Discount zone");
+      Scenario11_MitigationBlock.rejectionStats.premiumDiscount++;
+      return false;
+    }
+
     const levels = this.calculateLevels(
       entry,
-      {
-        top: mbTop,
-        bottom: mbBottom,
-        direction: expectedChochDirection, // zone direction = trade direction
-      },
-      expectedChochDirection, // trade direction = CHoCH direction after SMS
-      patternData.atr15m || new Decimal('0.01'),
+      { top: mitigationBlock.top, bottom: mitigationBlock.bottom, direction: tradeDirection },
+      tradeDirection,
+      atr,
     );
 
     this.setLevels({
@@ -197,7 +246,9 @@ const lastClose = new Decimal(retestCandle.close);
       takeProfit: levels.takeProfit,
     });
 
-    this.setReason(`Mitigation Block: ${sms.direction} SMS (strict) + ${expectedChochDirection} CHoCH + MB 0.5 retest`);
+    this.setReason(
+      `Mitigation Block: ${sms.direction} SMS + ${tradeDirection} CHoCH + MB Retest | P/D Valid`,
+    );
     return true;
   }
 }

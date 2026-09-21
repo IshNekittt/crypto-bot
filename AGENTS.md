@@ -455,7 +455,7 @@ for (let i = 0; i < candlesLtf.length; i++) {
 | **8**  | Range Deviation     | Range High/Low deviation → reclaim                         | Wick back inside, equilibrium target                                          |
 | **9**  | Turtle Soup         | Range High sweep (EQH) → short                             | EQH tolerance + SFP on range boundary                                         |
 | **10** | Breaker Block       | OB broken with displacement → retest                       | Body close beyond OB + FVG nearby                                             |
-| **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`) |
+| **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`). **FRESHNESS**: Always takes newest SMS (`smsList[smsList.length-1]`), newest CHoCH after SMS (`validChochs[validChochs.length-1]`), newest OB before SMS (`mbObs[mbObs.length-1]`). **RETEST**: Current 15m candle must test MB zone with wicks, close inside zone in trade direction, within 12h of CHoCH. **P/D**: Entry close tested against SMS→CHoCH impulse equilibrium (Long=Discount, Short=Premium). |
 
 ### 7.1 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
@@ -467,9 +467,39 @@ for (let i = 0; i < candlesLtf.length; i++) {
 
 | Scenario                  | Filter                                       | Rejection Stat               |
 | ------------------------- | -------------------------------------------- | ---------------------------- |
-| **2 (FVG Fill)**          | Liquidity sweep/CHoCH in prior 10-15 candles | `NoLiqCtx`                   |
-| **4 (Mitigation Chain)**  | Originating OB made BOS within 24h           | `NoBOS`                      |
 | **11 (Mitigation Block)** | Valid SMS pattern (failed HH → CHoCH down)   | `NoSms`, `InvalidSmsPattern` |
+
+---
+
+### 7.3 Scenario 11 — Mitigation Block — Full Implementation Details
+
+**File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
+
+**Core Logic**: Mitigation Block is a reversal pattern that forms after a Failed Swing (SMS):
+1. Price attempts a higher high (bearish SMS) / lower low (bullish SMS) but fails
+2. Price reverses with a CHoCH in opposite direction (≥1.5 ATR displacement)
+3. The Order Block that formed the failed swing extreme becomes the Mitigation Block
+4. Trade triggers on retest of this MB by current 15m candle
+
+**Critical Implementation Details (v2026-09-21 — Critical Bug Fixes):**
+
+| Aspect | Implementation | Why Critical |
+|--------|---------------|--------------|
+| **SMS Selection** | `structures.filter(s => s.type === 'SMS')` → `smsList[smsList.length-1]` | `.find()` returns OLDEST; must take NEWEST SMS |
+| **CHoCH Selection** | `structures.filter(s => ...)` → `validChochs[validChochs.length-1]` | Must take NEWEST CHoCH after the chosen SMS |
+| **MB Selection** | `zones.filter(...)` → `mbObs[mbObs.length-1]` | Must take NEWEST OB before SMS (formed the failed swing) |
+| **Retest Logic** | **Current 15m candle ONLY** (`candles15m[candles15m.length-1]`) | No historical search — trade triggers NOW |
+| **Time Window** | `0 < timeSinceChoch ≤ 12h` | Blocks stale setups; 12h max hold |
+| **Retest Condition** | Current candle wicks touch MB zone (`high ≥ mbBottom && low ≤ mbTop`) AND closes inside zone in trade direction | Confirms institutional interest at MB |
+| **Premium/Discount** | Dynamic equilibrium from `SMS price → CHoCH price` impulse | Long = Discount (below eq), Short = Premium (above eq) |
+| **Rejection Stats** | `NoSms`, `InvalidSmsPattern`, `NoChoch`, `Displacement`, `NoMB`, `NoRetest`, `PremDisc` | Full observability |
+
+**Key Invariants:**
+- `structures` and `zones` arrays are timestamp-ascending (oldest first)
+- **Always use `[array.length-1]` for "newest"** — never `[0]` or `.find()`
+- Retest is **current candle only** — no historical search
+- P/D equilibrium calculated from `SMS price → CHoCH price` impulse
+- Maximum 12h from CHoCH to retest (prevents stale setups)
 
 ---
 
