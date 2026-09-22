@@ -175,6 +175,35 @@ or `None for today` / error state.
 
 ---
 
+## 🕐 Timezone Sanity Check (Docker + luxon) — v2026-09-22
+
+**Problem**: luxon's `setZone('America/New_York')` silently falls back to UTC in Docker Alpine containers because the base image lacks the IANA timezone database (`tzdata`). This caused killzone checks to fail at 11:15 UTC (07:15 NY) — the bot saw `hour=11` instead of `hour=7` and rejected valid NY session trades.
+
+**Solution**: Two-layer fix at DevOps + Code level:
+
+| Layer | Fix | Why |
+|-------|-----|-----|
+| **DevOps (Dockerfile)** | `RUN apk add --no-cache tzdata` in runner stage | Installs full IANA tz database; luxon can now resolve `America/New_York` with correct DST (EDT/EST) |
+| **Code (patternRecognizer.ts)** | `DateTime.fromMillis(ts, { zone: 'utc' }).setZone('America/New_York')` | Explicit UTC → NY conversion; fails fast if tzdata missing |
+
+**Timezone Sanity Check (Startup Log)** — `src/index.ts`:
+```typescript
+const nowMs = Date.now();
+const utcTime = DateTime.fromMillis(nowMs).toUTC().toFormat('yyyy-MM-dd HH:mm:ss');
+const nyTime = DateTime.fromMillis(nowMs).setZone('America/New_York');
+const nyTimeStr = nyTime.toFormat('yyyy-MM-dd HH:mm:ss ZZZZ');
+logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): ${nyTimeStr} | NY Hour: ${nyTime.hour}`);
+```
+
+**Example output**:
+```
+[Timezone Sanity Check] Server UTC: 2026-09-22 21:30:00 | Wall Street (NY): 2026-09-22 17:30:00 EDT | NY Hour: 17
+```
+
+**Critical**: Alpine base images lack `tzdata` by default. Always install `tzdata` when using luxon with named IANA zones in Docker.
+
+---
+
 ## 🎯 Scenario 11 — Mitigation Block — Full Implementation Details — v2026-09-21
 
 **File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`

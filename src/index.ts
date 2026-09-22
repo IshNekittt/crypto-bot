@@ -1,5 +1,7 @@
 import 'dotenv/config';
 
+import { DateTime } from 'luxon';
+
 import { BybitClient } from './api/bybitClient';
 import { BybitWebsocket } from './api/wsClient';
 import { runPreflight } from './bootstrap/preflight';
@@ -58,6 +60,13 @@ async function main(): Promise<void> {
   logger.info(
     `Starting SMC bot | mode=${mode} testnet=${config.testnet} demoTrading=${config.demoTrading} symbols=[${config.symbols.join(', ')}] risk=${config.riskPercent}% leverage=${config.leverage}x history=${config.historyCandles} autoTrading=${config.autoTrading}`,
   );
+
+  // Timezone Sanity Check — verify luxon + tzdata works correctly
+  const nowMs = Date.now();
+  const utcTime = DateTime.fromMillis(nowMs).toUTC().toFormat('yyyy-MM-dd HH:mm:ss');
+  const nyTime = DateTime.fromMillis(nowMs).setZone('America/New_York');
+  const nyTimeStr = nyTime.toFormat('yyyy-MM-dd HH:mm:ss ZZZZ');
+  logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): ${nyTimeStr} | NY Hour: ${nyTime.hour}`);
 
   // Initialize PostgreSQL database
   await db.initialize();

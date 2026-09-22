@@ -155,10 +155,11 @@ export class PatternRecognizer {
 
   /**
    * Get current session and killzone based on NY time
-   * @param timestamp - Timestamp in milliseconds (defaults to now for live trading)
+   * @param timestamp - Timestamp in milliseconds
    */
   getCurrentSessionAndKillzone(timestamp: number): { session: 'ASIAN' | 'LONDON' | 'NY' | 'NONE'; killzone: 'ASIAN' | 'LONDON' | 'NY' | 'NONE' } {
-    const nyTime = DateTime.fromMillis(timestamp).setZone(this.timezone);
+    // Use luxon with explicit UTC zone then setZone to NY (tzdata installed in Docker)
+    const nyTime = DateTime.fromMillis(timestamp, { zone: 'utc' }).setZone(this.timezone);
     const hour = nyTime.hour;
     const minute = nyTime.minute;
     const timeInMinutes = hour * 60 + minute;
@@ -173,17 +174,17 @@ export class PatternRecognizer {
     let session: 'ASIAN' | 'LONDON' | 'NY' | 'NONE' = 'NONE';
     let killzone: 'ASIAN' | 'LONDON' | 'NY' | 'NONE' = 'NONE';
 
-    // Asian session: 20:00-24:00
+    // Asian session: 20:00-24:00 NY time
     if (timeInMinutes >= asianStart && timeInMinutes < asianEnd) {
       session = 'ASIAN';
       killzone = 'ASIAN';
     }
-    // London session: 02:00-05:00
+    // London session: 02:00-05:00 NY time
     else if (timeInMinutes >= londonStart && timeInMinutes < londonEnd) {
       session = 'LONDON';
       killzone = 'LONDON';
     }
-    // NY session: 07:00-10:00
+    // NY session: 07:00-10:00 NY time
     else if (timeInMinutes >= nyStart && timeInMinutes < nyEnd) {
       session = 'NY';
       killzone = 'NY';
