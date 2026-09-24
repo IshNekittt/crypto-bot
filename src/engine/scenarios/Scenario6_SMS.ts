@@ -91,6 +91,14 @@ export class Scenario6_SMS extends BaseScenario {
     });
 
     this.setReason(`SMS: ${sms.direction} failure swing + ${expectedDirection} CHoCH + SMS OB 0.5 entry`);
+    
+    // Set structure details for mitigation tracking (CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: choch.timestamp,
+      price: choch.price,
+    });
+    
     return true;
   }
 }

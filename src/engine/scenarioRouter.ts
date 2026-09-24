@@ -1,4 +1,4 @@
-import { IScenario } from '../types';
+import { IScenario, StructureDetails } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { ZoneDetails } from '../types';
@@ -30,12 +30,20 @@ export interface MitigatedZone {
   timestamp: number;
 }
 
+export interface MitigatedStructure {
+  type: 'SMS' | 'CHoCH' | 'BOS';
+  timestamp: number;
+  price: string;
+  direction: 'BULLISH' | 'BEARISH';
+}
+
 export interface RouterResult {
   triggered: boolean;
   scenario: IScenario | null;
   levels: any | null;
   reason: string;
   zoneDetails: ZoneDetails | null;
+  structureDetails: StructureDetails | null;
 }
 
 export class ScenarioRouter {
@@ -93,14 +101,26 @@ export class ScenarioRouter {
     });
   }
 
+  private filterMitigatedStructures(structures: any[], mitigatedStructures: MitigatedStructure[]): any[] {
+    if (!mitigatedStructures.length) return structures;
+    return structures.filter(s => {
+      return !mitigatedStructures.some(ms => 
+        ms.type === s.type &&
+        ms.timestamp === s.timestamp &&
+        ms.direction === s.direction
+      );
+    });
+  }
+
   async evaluate(
     candles15m: any[], 
     candles4h: any[], 
     currentCandleTimestamp: number,
-    mitigatedZones: MitigatedZone[] = []
+    mitigatedZones: MitigatedZone[] = [],
+    mitigatedStructures: MitigatedStructure[] = []
   ): Promise<RouterResult> {
     if (!this.scenarios.length) {
-      return { triggered: false, scenario: null, levels: null, reason: 'No scenarios configured', zoneDetails: null };
+      return { triggered: false, scenario: null, levels: null, reason: 'No scenarios configured', zoneDetails: null, structureDetails: null };
     }
 
     try {
@@ -113,6 +133,8 @@ export class ScenarioRouter {
 
       // Filter out mitigated zones from pattern data
       patternData.zones = this.filterMitigatedZones(patternData.zones, mitigatedZones);
+      // Filter out mitigated structures from pattern data
+      patternData.structures = this.filterMitigatedStructures(patternData.structures, mitigatedStructures);
 
       for (const scenario of this.scenarios) {
         try {
@@ -137,6 +159,7 @@ export class ScenarioRouter {
               levels,
               reason,
               zoneDetails,
+              structureDetails: scenario.getStructureDetails(),
             };
           } else {
             // Debug log for rejected scenario
@@ -152,13 +175,13 @@ export class ScenarioRouter {
         }
       }
 
-      return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched', zoneDetails: null };
+      return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched', zoneDetails: null, structureDetails: null };
     } catch (err) {
       logger.error('Pattern recognition failed', {
         symbol: this.symbol,
         error: err instanceof Error ? err.message : String(err),
       });
-      return { triggered: false, scenario: null, levels: null, reason: 'Pattern recognition error', zoneDetails: null };
+      return { triggered: false, scenario: null, levels: null, reason: 'Pattern recognition error', zoneDetails: null, structureDetails: null };
     }
   }
 }

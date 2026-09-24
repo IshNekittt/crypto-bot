@@ -6,6 +6,7 @@ import { loadConfig } from '../config/env';
 import { logger } from '../utils/logger';
 import { Candle, Timeframe } from '../types';
 import { InstrumentInfo } from './executionSimulator';
+import { MitigatedStructure } from '../engine/scenarioRouter';
 import { Decimal } from 'decimal.js';
 import { loadCachedOrFetch, getTimeRangeForSixMonths } from './historyLoader';
 import { openTrade, checkAndCloseTrade, getInitialState, TradeResult } from './executionSimulator';
@@ -105,6 +106,7 @@ async function runBacktestForSymbol(
   const state = getInitialState();
   const results: TradeResult[] = [];
   const mitigatedZones: MitigatedZone[] = [];
+  const mitigatedStructures: MitigatedStructure[] = [];
 
   const htfMap = new Map<number, Candle>();
   for (const c of candlesHtf) {
@@ -130,6 +132,7 @@ async function runBacktestForSymbol(
   let cachedRouterResult: any = null;
   let lastCachedCandleIndex = -1;
   let lastCachedMitigatedZonesLength = 0;
+  let lastCachedMitigatedStructuresLength = 0;
   const CACHE_REBUILD_INTERVAL = 10; // Rebuild cache every N candles when no trade is open (reduced for accuracy)
 
   // Dynamic macro context tracking (lookahead-bias-free)
@@ -241,6 +244,7 @@ async function runBacktestForSymbol(
     const shouldRebuildCache = 
       cachedPatternData === null ||
       mitigatedZones.length !== lastCachedMitigatedZonesLength ||
+      mitigatedStructures.length !== lastCachedMitigatedStructuresLength ||
       (i - lastCachedCandleIndex) >= CACHE_REBUILD_INTERVAL;
 
     if (shouldRebuildCache) {
@@ -257,12 +261,14 @@ async function runBacktestForSymbol(
         currentLtfCandles,
         currentHtfWindow,
         candleTime,
-        mitigatedZones
+        mitigatedZones,
+        state.mitigatedStructures
       );
       cachedPatternData = routerResultForCache;
       cachedRouterResult = routerResultForCache;
       lastCachedCandleIndex = i;
       lastCachedMitigatedZonesLength = mitigatedZones.length;
+      lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
     }
 
     const routerResult = cachedRouterResult;
@@ -295,7 +301,8 @@ async function runBacktestForSymbol(
             routerResult.scenario!.id,
             routerResult.scenario!.name,
             instrument,
-            zoneDetails
+            zoneDetails,
+            routerResult.structureDetails
           );
 
           if (tradeOpened) {

@@ -137,6 +137,13 @@ export interface IScenario {
   getLevels(): ScenarioLevels;
   getReason(): string;
   getZoneDetails(): ZoneDetails | null;
+  getStructureDetails(): StructureDetails | null;
+}
+
+export interface StructureDetails {
+  type: 'SMS' | 'CHoCH' | 'BOS';
+  timestamp: number;
+  price: Decimal;
 }
 
 export type ScenarioConstructor = new (deps: ScenarioDeps) => IScenario;

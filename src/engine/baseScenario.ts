@@ -1,4 +1,4 @@
-import { IScenario } from '../types';
+import { IScenario, StructureDetails } from '../types';
 import { ScenarioLevels } from '../types';
 import { ZoneDetails } from '../types';
 import { Decimal } from 'decimal.js';
@@ -25,6 +25,7 @@ export abstract class BaseScenario implements IScenario {
   protected levels: ScenarioLevels | null = null;
   protected reason: string = '';
   protected zoneDetails: ZoneDetails | null = null;
+  protected structureDetails: StructureDetails | null = null;
 
   constructor(id: number, name: string) {
     this.id = id;
@@ -47,6 +48,10 @@ export abstract class BaseScenario implements IScenario {
     return this.zoneDetails;
   }
 
+  getStructureDetails(): StructureDetails | null {
+    return this.structureDetails;
+  }
+
   protected setLevels(levels: ScenarioLevels): void {
     this.levels = levels;
   }
@@ -57,6 +62,10 @@ export abstract class BaseScenario implements IScenario {
 
   protected setZoneDetails(zone: ZoneDetails): void {
     this.zoneDetails = zone;
+  }
+
+  protected setStructureDetails(structure: StructureDetails): void {
+    this.structureDetails = structure;
   }
 
   protected logRejection(reason: string): void {

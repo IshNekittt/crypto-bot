@@ -67,15 +67,23 @@ describe('ScenarioRouter', () => {
     it('should evaluate scenarios in registration order', async () => {
       
       const mockScenarios = [
-        { id: 1, name: 'Test1', evaluate: jest.fn().mockReturnValue(false), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test1 reason', getZoneDetails: () => null },
-        { id: 2, name: 'Test2', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test2 reason', getZoneDetails: () => null },
-        { id: 3, name: 'Test3', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test3 reason', getZoneDetails: () => null },
+        { id: 1, name: 'Test1', evaluate: jest.fn().mockReturnValue(false), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test1 reason', getZoneDetails: () => null, getStructureDetails: () => null },
+        { id: 2, name: 'Test2', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test2 reason', getZoneDetails: () => null, getStructureDetails: () => null },
+        { id: 3, name: 'Test3', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test3 reason', getZoneDetails: () => null, getStructureDetails: () => null },
       ] as unknown as IScenario[];
 
       const testRouter = new ScenarioRouter({
         symbol: 'SOLUSDT',
         patternRecognizer: {
-          buildPatternData: jest.fn().mockResolvedValue({}),
+          buildPatternData: jest.fn().mockResolvedValue({
+            structures: [
+              { type: 'CHoCH', direction: 'BULLISH', timestamp: Date.now(), price: '100', isValidated: true, impulseFactor: 2 },
+              { type: 'SMS', direction: 'BEARISH', timestamp: Date.now() - 3600000, price: '105' },
+            ],
+            zones: [],
+            liquidityPools: [{ type: 'PDH', priceLevel: '105' }, { type: 'PDL', priceLevel: '95' }],
+            currentKillzone: 'NY',
+          }),
         },
         notifier: mockNotifier,
         activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
@@ -94,13 +102,23 @@ describe('ScenarioRouter', () => {
 
     it('should return first matching scenario when multiple match', async () => {
       const mockScenarios = [
-        { id: 5, name: 'Scenario5', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario5 reason', getZoneDetails: () => null },
-        { id: 1, name: 'Scenario1', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario1 reason', getZoneDetails: () => null },
+        { id: 5, name: 'Scenario5', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario5 reason', getZoneDetails: () => null, getStructureDetails: () => null },
+        { id: 1, name: 'Scenario1', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Scenario1 reason', getZoneDetails: () => null, getStructureDetails: () => null },
       ] as unknown as IScenario[];
 
       const testRouter = new ScenarioRouter({
         symbol: 'SOLUSDT',
-        patternRecognizer: { buildPatternData: jest.fn().mockResolvedValue({}) },
+        patternRecognizer: {
+          buildPatternData: jest.fn().mockResolvedValue({
+            structures: [
+              { type: 'CHoCH', direction: 'BULLISH', timestamp: Date.now(), price: '100', isValidated: true, impulseFactor: 2 },
+              { type: 'SMS', direction: 'BEARISH', timestamp: Date.now() - 3600000, price: '105' },
+            ],
+            zones: [],
+            liquidityPools: [{ type: 'PDH', priceLevel: '105' }, { type: 'PDL', priceLevel: '95' }],
+            currentKillzone: 'NY',
+          }),
+        },
         notifier: mockNotifier,
         activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
       });

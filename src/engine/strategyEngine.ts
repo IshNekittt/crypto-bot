@@ -73,6 +73,8 @@ export class StrategyEngine {
   private processing = false;
   private lastProcessedCandleTimestamp: number = 0;
   private mitigatedZones: MitigatedZone[] = [];
+  // Cooldown after SL hit (4 hours = 16 * 15min candles)
+  private cooldownUntil: number = 0;
 
   constructor(deps: StrategyEngineDeps) {
     this.symbol = deps.symbol;
@@ -353,6 +355,13 @@ export class StrategyEngine {
       logger.warn(`${this.symbol}: position closed by exchange event, PnL unknown`);
     }
     logger.info(`${this.symbol}: IN_TRADE → SCANNING (position close event)`);
+
+    // Set cooldown after SL hit (4 hours = 16 * 15min)
+    if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
+      this.cooldownUntil = Date.now() + 16 * 15 * 60 * 1000; // 4 hours in ms
+      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for 4H.`);
+    }
+
     this.transition(StrategyState.SCANNING);
   }
 
@@ -425,6 +434,13 @@ export class StrategyEngine {
     // News Embargo check: skip scan if high-impact USD news is within 30 minutes
     if (this.deps.newsService.isNewsEmbargo(candleTimestamp)) {
       logger.info(`[${this.symbol}] ${ltfInterval}m candle closed, but HIGH IMPACT NEWS EMBARGO is active. Skipping scan.`);
+      return;
+    }
+
+    // Cooldown after SL hit (4 hours = 16 * 15min candles)
+    const now = Date.now();
+    if (this.cooldownUntil > 0 && this.cooldownUntil > now) {
+      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for 4H.`);
       return;
     }
 

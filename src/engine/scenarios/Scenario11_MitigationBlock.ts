@@ -249,6 +249,14 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     this.setReason(
       `Mitigation Block: ${sms.direction} SMS + ${tradeDirection} CHoCH + MB Retest | P/D Valid`,
     );
+    
+    // Set structure details for mitigation tracking (CHoCH after SMS is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: chochAfterSms.timestamp,
+      price: chochAfterSms.price,
+    });
+    
     return true;
   }
 }

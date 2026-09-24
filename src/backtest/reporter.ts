@@ -122,6 +122,80 @@ export function generateReport(
     lines.push(`   Periods > 7 days without trades: ${drySpellsGt7} times`);
     lines.push('');
   }
+
+  // ─── Chronological Trade Calendar (Last 30 Days) ───
+  if (trades.length > 0) {
+    // Sort trades by entry time
+    const sortedTrades = [...trades].sort((a, b) => a.entryTime - b.entryTime);
+    
+    // Get the last 30 days of the test period
+    const periodEndMs = periodEnd.getTime();
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    const startMs = periodEndMs - thirtyDaysMs;
+    
+    // Group trades by date (UTC)
+    const tradesByDate = new Map<string, TradeResult[]>();
+    for (const trade of sortedTrades) {
+      if (trade.entryTime >= startMs && trade.entryTime <= periodEndMs) {
+        const date = new Date(trade.entryTime);
+        const dateStr = date.toISOString().split('T')[0]; // YYYY-MM-DD in UTC
+        if (!tradesByDate.has(dateStr)) {
+          tradesByDate.set(dateStr, []);
+        }
+        tradesByDate.get(dateStr)!.push(trade);
+      }
+    }
+    
+    // Generate last 30 days calendar
+    lines.push('🗓️ TRADE TIMELINE (Last 30 Days of Backtest) [Timezone: UTC]');
+    for (let i = 0; i < 30; i++) {
+      const dateMs = periodEndMs - (i * 24 * 60 * 60 * 1000);
+      const date = new Date(dateMs);
+      const dateStr = date.toISOString().split('T')[0];
+      
+      const dayTrades = tradesByDate.get(dateStr) || [];
+      
+      if (dayTrades.length === 0) {
+        lines.push(`[${dateStr}] ❌ No trades (Waiting)`);
+      } else {
+        const dailyPnL = dayTrades.reduce((sum, t) => sum.plus(t.pnl), new Decimal('0'));
+        const pnlSign = dailyPnL.gte(0) ? '+' : '';
+        lines.push(`[${dateStr}] ✅ ${dayTrades.length} trade${dayTrades.length > 1 ? 's' : ''} | Daily PnL: ${pnlSign}${dailyPnL.toFixed(2)}`);
+        
+        // Sort day trades by entry time
+        dayTrades.sort((a, b) => a.entryTime - b.entryTime);
+        for (const trade of dayTrades) {
+          const entryTime = new Date(trade.entryTime).toISOString().split('T')[1].substring(0, 8); // HH:MM:SS UTC
+          const resultLabel = trade.pnl.gte(0) ? 'WIN' : 'LOSS';
+          const pnlSign2 = trade.pnl.gte(0) ? '+' : '';
+          lines.push(`  ↳ ${entryTime} UTC - Scenario ${trade.scenarioId} (${resultLabel}: ${pnlSign2}$${trade.pnl.toFixed(2)})`);
+        }
+      }
+    }
+    lines.push('');
+  }
+
+  // ─── Detailed Recent Trades (Last 5 trades) ───
+  if (trades.length > 0) {
+    const sortedTrades = [...trades].sort((a, b) => a.entryTime - b.entryTime);
+    const last5Trades = sortedTrades.slice(-5);
+    
+    lines.push('🔍 DETAILED RECENT TRADES (Last 5 trades):');
+    for (const trade of last5Trades) {
+      const entryTime = new Date(trade.entryTime).toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+      const exitTime = new Date(trade.exitTime).toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+      const resultLabel = trade.pnl.gte(0) ? 'WIN' : 'LOSS';
+      const pnlSign = trade.pnl.gte(0) ? '+' : '';
+      const pnlPctSign = trade.pnlPercent.gte(0) ? '+' : '';
+      
+      lines.push(`  ↳ ${symbol} | Scenario ${trade.scenarioId} (${trade.scenarioName}) | ${resultLabel}`);
+      lines.push(`     Entry: ${entryTime} | Exit: ${exitTime}`);
+      lines.push(`     Entry: ${trade.entryPrice} | SL: ${trade.slPrice} | TP: ${trade.tpPrice} | Qty: ${trade.qty}`);
+      lines.push(`     PnL: ${pnlSign}$${trade.pnl.toFixed(2)} (${pnlPctSign}${trade.pnlPercent.toFixed(2)}%) | Fees: $${trade.feesPaid.toFixed(2)}`);
+    }
+    lines.push('');
+  }
+
   lines.push('📋 SCENARIO BREAKDOWN');
   lines.push('   Scenario                    | Trades |  Win | Loss | Win%  | Profit $');
   lines.push('   ────────────────────────────┼────────┼──────┼──────┼───────┼───────────');
