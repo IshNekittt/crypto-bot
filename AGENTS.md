@@ -472,6 +472,180 @@ logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): 
 
 ---
 
+### 6.11 Mitigated Structures (Ghost Signal Elimination) — **NEW v2026-09-24**
+
+**Problem**: Scenario 6 (SMS) was generating duplicate entries on the same CHoCH structure. After a trade closed, the CHoCH structure that triggered the entry was NOT marked as "used". When a new killzone arrived, the bot re-detected the same old CHoCH and entered again — same price, 5 hours apart. This created "ghost signals" — fake setups that appeared valid but were actually re-entries on already-consumed structures.
+
+**Solution**: **mitigatedStructures** tracking — structures (SMS, CHoCH, BOS) that have been traded and should never be re-used.
+
+**Implementation**:
+
+1. **`BacktestState`** (`executionSimulator.ts`) — new field:
+```typescript
+mitigatedStructures: MitigatedStructure[];
+```
+
+2. **`MitigatedStructure` interface** (`scenarioRouter.ts`):
+```typescript
+interface MitigatedStructure {
+  type: 'SMS' | 'CHoCH' | 'BOS';
+  timestamp: number;
+  price: string;
+  direction: 'BULLISH' | 'BEARISH';
+}
+```
+
+3. **On trade close** (`checkAndCloseTrade` in `executionSimulator.ts`):
+   - If trade has `structureTimestamp`, add to `mitigatedStructures`:
+   ```typescript
+   mitigatedStructures: structureTimestamp > 0 ? [...state.mitigatedStructures, {
+     type: trade.structureType || 'CHoCH',
+     timestamp: structureTimestamp,
+     price: trade.structurePrice?.toString() || '0',
+     direction: trade.side === 'Buy' ? 'BULLISH' : 'BEARISH',
+   }] : state.mitigatedStructures
+   ```
+
+4. **ScenarioRouter** (`scenarioRouter.ts`):
+   - New `evaluate()` param: `mitigatedStructures: MitigatedStructure[] = []`
+   - New `filterMitigatedStructures()` — filters `patternData.structures` by timestamp+type+direction
+   - Applied in `evaluate()`: `patternData.structures = this.filterMitigatedStructures(patternData.structures, mitigatedStructures)`
+
+5. **`RouterResult`** includes `structureDetails: StructureDetails | null`
+
+6. **Scenarios 6 & 11** now call `setStructureDetails()` with the trigger CHoCH:
+   ```typescript
+   this.setStructureDetails({
+     type: 'CHoCH',
+     timestamp: choch.timestamp,
+     price: choch.price,
+   });
+   ```
+
+7. **Run.ts** passes `state.mitigatedStructures` to `router.evaluate()` and `structureDetails` to `openTrade()`.
+
+**Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
+
+---
+
+### 6.12 Same-Candle SL/TP Resolution (Lookahead Bias Fix) — **NEW v2026-09-24**
+
+**Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
+
+**Fix** (`checkAndCloseTrade` in `executionSimulator.ts`):
+```typescript
+// CRITICAL: Check SL FIRST - if both hit same candle, it's a LOSS (wick hit SL first)
+const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
+const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
+
+// SL checked FIRST
+if (hitSL) {
+  exitPrice = trade.slPrice;
+  closedBy = 'SL';
+} else if (hitTP) {
+  exitPrice = trade.tpPrice;
+  closedBy = 'TP';
+}
+// If both hit same candle → LOSS (BOTH)
+if (hitSL && hitTP) closedBy = 'BOTH';
+```
+
+**Rule**: On same-candle SL+TP hit → ALWAYS treat as LOSS (conservative). This eliminates the "20 wins in a row every 15 min" artifact.
+
+---
+
+### 6.13 Mitigated Zones Fix (Zone Re-entry Bug) — **NEW v2026-09-24**
+
+**Problem**: `mitigatedZones` was only updated on trade CLOSE. Bot would enter, close, then re-enter same zone because the zone wasn't "burned" until after close.
+
+**Fix** (`openTrade` in `executionSimulator.ts`):
+```typescript
+// Add zone to mitigatedZones to prevent re-entry on same zone
+mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
+  type: zoneDetails.type as 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION',
+  top: zoneDetails.top.toString(),
+  bottom: zoneDetails.bottom.toString(),
+  timeframe: zoneDetails.timeframe,
+  direction: zoneDetails.direction,
+  timestamp: zoneDetails.timestamp,
+}] : state.mitigatedZones,
+```
+
+**Result**: Zone is "burned" immediately on entry — no re-entry possible on same zone.
+
+---
+
+### 6.14 Cooldown Logic Fix — **NEW v2026-09-24**
+
+**Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation.
+
+**Fix**: Cooldown ONLY after LOSS (revenge trading protection). After WIN → no cooldown.
+
+```typescript
+// executionSimulator.ts (both BOTH and SL/TP close paths)
+cooldownUntil: netPnl.lt(0) ? candle.timestamp + 16 * 15 * 60 * 1000 : 0,
+
+// strategyEngine.ts (live)
+if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
+  this.cooldownUntil = Date.now() + 16 * 15 * 60 * 1000;
+  logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for 4H.`);
+}
+```
+
+**Rule**: Cooldown = 16 candles (4h) ONLY after LOSS. WIN = no cooldown, ride the trend.
+
+---
+
+### 6.15 Backtest Report Enhancements — **NEW v2026-09-24**
+
+Added two new sections to backtest report (`reporter.ts`):
+
+1. **🗓️ TRADE TIMELINE (Last 30 Days)** — daily calendar with UTC timestamps:
+```
+[2026-09-04] ✅ 10 trades | Daily PnL: +$4138.13
+  ↳ 07:45:00 UTC - Scenario 6 (WIN: +$60.00)
+  ↳ 08:30:00 UTC - Scenario 6 (WIN: +$67.49)
+```
+
+2. **🔍 DETAILED RECENT TRADES (Last 5 trades)** — full UTC timestamps:
+```
+↳ ETHUSDT | Scenario 6 (SMS) | WIN
+   Entry: 2026-05-23 06:30:00 UTC | Exit: 2026-05-23 06:45:00 UTC
+   Entry: 2128.21 | SL: 2135.81 | TP: 2105.42 | Qty: 2.63
+   PnL: +$53.83 (+0.96%) | Fees: $6.12
+```
+
+3. **⏳ DRY SPELLS** — max consecutive days without trades, periods >3/5/7 days.
+
+All timestamps in **UTC** for cross-referencing with live logs.
+
+**Problem**: luxon's `setZone('America/New_York')` silently falls back to UTC in Docker Alpine containers because the base image lacks the IANA timezone database (`tzdata`). This caused killzone checks to fail at 11:15 UTC (07:15 NY) — the bot saw `hour=11` instead of `hour=7` and rejected valid NY session trades.
+
+**Solution**: Two-layer fix at DevOps + Code level:
+
+| Layer | Fix | Why |
+|-------|-----|-----|
+| **DevOps (Dockerfile)** | `RUN apk add --no-cache tzdata` in runner stage | Installs full IANA tz database; luxon can now resolve `America/New_York` with correct DST (EDT/EST) |
+| **Code (patternRecognizer.ts)** | `DateTime.fromMillis(ts, { zone: 'utc' }).setZone('America/New_York')` | Explicit UTC → NY conversion; fails fast if tzdata missing |
+
+**Timezone Sanity Check (Startup Log)** — `src/index.ts`:
+```typescript
+const nowMs = Date.now();
+const utcTime = DateTime.fromMillis(nowMs).toUTC().toFormat('yyyy-MM-dd HH:mm:ss');
+const nyTime = DateTime.fromMillis(nowMs).setZone('America/New_York');
+const nyTimeStr = nyTime.toFormat('yyyy-MM-dd HH:mm:ss ZZZZ');
+logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): ${nyTimeStr} | NY Hour: ${nyTime.hour}`);
+```
+
+**Example output**:
+```
+[Timezone Sanity Check] Server UTC: 2026-09-22 21:30:00 | Wall Street (NY): 2026-09-22 17:30:00 EDT | NY Hour: 17
+```
+
+**Critical**: Alpine base images lack `tzdata` by default. Always install `tzdata` when using luxon with named IANA zones in Docker.
+
+---
+
 ## 7. THE 11 SCENARIOS — `src/engine/scenarios/`
 
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |

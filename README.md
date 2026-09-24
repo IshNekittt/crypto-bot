@@ -236,6 +236,120 @@ logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): 
 
 ---
 
+## 🧠 Mitigated Structures (Ghost Signal Elimination) — v2026-09-24
+
+**Problem**: Scenario 6 (SMS) was generating duplicate entries on the same CHoCH structure. After a trade closed, the CHoCH structure that triggered the entry was NOT marked as "used". When a new killzone arrived, the bot re-detected the same old CHoCH and entered again — same price, 5 hours apart.
+
+**Solution**: **mitigatedStructures** tracking — structures (SMS, CHoCH, BOS) that have been traded and should never be re-used.
+
+| Component | Implementation |
+|-----------|----------------|
+| **BacktestState** | Added `mitigatedStructures: MitigatedStructure[]` |
+| **MitigatedStructure** | `{ type: 'SMS' | 'CHoCH' | 'BOS', timestamp: number, price: string, direction: 'BULLISH' | 'BEARISH' }` |
+| **On trade close** | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures` |
+| **ScenarioRouter** | Filters `patternData.structures` via `filterMitigatedStructures()` |
+| **Scenarios 6 & 11** | Call `setStructureDetails()` with trigger CHoCH |
+
+**Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
+
+---
+
+## ⚡ Same-Candle SL/TP Resolution (Lookahead Bias Fix) — v2026-09-24
+
+**Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
+
+**Fix** (`checkAndCloseTrade` in `executionSimulator.ts`):
+```typescript
+// CRITICAL: Check SL FIRST - if both hit same candle, it's a LOSS (wick hit SL first)
+const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
+const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
+
+// SL checked FIRST
+if (hitSL) {
+  exitPrice = trade.slPrice;
+  closedBy = 'SL';
+} else if (hitTP) {
+  exitPrice = trade.tpPrice;
+  closedBy = 'TP';
+}
+// If both hit same candle → LOSS (BOTH)
+if (hitSL && hitTP) closedBy = 'BOTH';
+```
+
+**Rule**: On same-candle SL+TP hit → ALWAYS treat as LOSS (conservative). This eliminates the "20 wins in a row every 15 min" artifact.
+
+---
+
+## 🔥 Mitigated Zones Fix (Zone Re-entry Bug) — v2026-09-24
+
+**Problem**: `mitigatedZones` was only updated on trade CLOSE. Bot would enter, close, then re-enter same zone because the zone wasn't "burned" until after close.
+
+**Fix** (`openTrade` in `executionSimulator.ts`):
+```typescript
+// Add zone to mitigatedZones to prevent re-entry on same zone
+mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
+  type: zoneDetails.type as 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION',
+  top: zoneDetails.top.toString(),
+  bottom: zoneDetails.bottom.toString(),
+  timeframe: zoneDetails.timeframe,
+  direction: zoneDetails.direction,
+  timestamp: zoneDetails.timestamp,
+}] : state.mitigatedZones,
+```
+
+**Result**: Zone is "burned" immediately on entry — no re-entry possible on same zone.
+
+---
+
+## 🛡 Cooldown Logic Fix — v2026-09-24
+
+**Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation.
+
+**Fix**: Cooldown ONLY after LOSS (revenge trading protection). WIN trades have NO cooldown.
+
+```typescript
+// executionSimulator.ts (both BOTH and SL/TP close paths)
+cooldownUntil: netPnl.lt(0) ? candle.timestamp + 16 * 15 * 60 * 1000 : 0,
+
+// strategyEngine.ts (live)
+if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
+  this.cooldownUntil = Date.now() + 16 * 15 * 60 * 1000;
+  logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for 4H.`);
+}
+```
+
+**Rule**: Cooldown = 16 candles (4h) ONLY after LOSS. WIN = no cooldown, ride the trend.
+
+---
+
+## 📈 Backtest Report Enhancements — v2026-09-24
+
+Added two new sections to backtest report (`reporter.ts`):
+
+### 🗓️ TRADE TIMELINE (Last 30 Days) [Timezone: UTC]
+Daily calendar with UTC timestamps:
+```
+[2026-09-04] ✅ 10 trades | Daily PnL: +$4138.13
+  ↳ 07:45:00 UTC - Scenario 6 (WIN: +$60.00)
+  ↳ 08:30:00 UTC - Scenario 6 (WIN: +$67.49)
+```
+
+### 🔍 DETAILED RECENT TRADES (Last 5 trades)
+Full details with exact UTC timestamps:
+```
+↳ ETHUSDT | Scenario 6 (SMS) | WIN
+   Entry: 2026-05-23 06:30:00 UTC | Exit: 2026-05-23 06:45:00 UTC
+   Entry: 2128.21 | SL: 2135.81 | TP: 2105.42 | Qty: 2.63
+   PnL: +$53.83 (+0.96%) | Fees: $6.12
+```
+
+### ⏳ DRY SPELLS
+Max consecutive days without trades, periods >3/5/7 days.
+
+All timestamps in **UTC** for cross-referencing with live logs.
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
