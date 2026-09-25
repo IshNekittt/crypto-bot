@@ -233,12 +233,12 @@ export class PostgresDatabase {
     }
   }
 
-  async closeTrade(tradeId: string, pnl: string | null, exitPrice: string | null, closedAt: number): Promise<boolean> {
+  async closeTrade(tradeId: string, pnl: string | null, exitPrice: string | null, closedAt: number, reason: string | null): Promise<boolean> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `UPDATE trades SET status = 'CLOSED', pnl = $1, exit_price = $2, closed_at = $3 WHERE id = $4 AND status = 'OPEN'`,
-        [pnl, exitPrice, closedAt, tradeId],
+        `UPDATE trades SET status = 'CLOSED', pnl = $1, exit_price = $2, closed_at = $3, reason = $4 WHERE id = $5 AND status = 'OPEN'`,
+        [pnl, exitPrice, closedAt, reason, tradeId],
       );
       return result.rowCount !== null && result.rowCount > 0;
     } finally {

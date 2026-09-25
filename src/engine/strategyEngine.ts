@@ -343,7 +343,9 @@ export class StrategyEngine {
       logger.warn(`${this.symbol}: Failed to fetch closedPnl, using WS PnL: ${pnlError instanceof Error ? pnlError.message : String(pnlError)}`);
     }
 
-    await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now());
+    // Determine close reason from PnL sign
+    const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
+    await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
 
     // Add the zone used for entry to mitigated zones
     if (trade.zoneDetails) {
@@ -567,7 +569,7 @@ export class StrategyEngine {
     if (hasOpenPosition) return false;
     const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (trade && trade.pnl === null) {
-      await this.deps.db.closeTrade(trade.id, null, null, Date.now());
+      await this.deps.db.closeTrade(trade.id, null, null, Date.now(), 'RECONCILIATION');
     }
     logger.warn(`${this.symbol}: reconciliation force-reset IN_TRADE → SCANNING (no position on exchange)`);
     this.transition(StrategyState.SCANNING);
@@ -677,7 +679,9 @@ export class StrategyEngine {
       }
 
       // Close the trade in DB
-      await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now());
+// Determine close reason from PnL sign
+    const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
+    await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
 
       // Notify Telegram
       if (finalPnlString !== null) {
