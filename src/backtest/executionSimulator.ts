@@ -329,6 +329,7 @@ export function checkAndCloseTrade(
   if (candle.timestamp <= trade.entryTime) {
     return { state, tradeResult: null };
   }
+  
   const isLong = trade.side === 'Buy';
   const high = new Decimal(candle.high);
   const low = new Decimal(candle.low);
@@ -336,116 +337,17 @@ export function checkAndCloseTrade(
   const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
   const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
 
-  // FIX 4: Conservative execution - if BOTH TP and SL hit in same candle (wick), count as LOSS
-  // CRITICAL: Check SL FIRST - if both hit same candle, it's a LOSS (wick hit SL first)
-  if (hitSL && hitTP) {
-    // Both hit in same candle - treat as loss (conservative)
-    const exitPrice = trade.slPrice; // Exit at SL price
-    
-    const exitFee = exitPrice.mul(trade.qty).mul(TAKER_FEE_RATE);
-    const totalFees = trade.entryFee.plus(exitFee);
-
-    const priceDiff = isLong ? exitPrice.minus(trade.entryPrice) : trade.entryPrice.minus(exitPrice);
-    const grossPnl = priceDiff.mul(trade.qty);
-    const netPnl = grossPnl.minus(totalFees);
-    const pnlPercent = netPnl.div(trade.entryPrice.mul(trade.qty)).mul(100);
-
-    const newBalance = state.balance.plus(netPnl);
-    const newPeak = newBalance.gt(state.peakBalance) ? newBalance : state.peakBalance;
-    const drawdown = newPeak.minus(newBalance).div(newPeak).mul(100);
-
-const tradeResult: TradeResult = {
-      entryTime: trade.entryTime,
-      exitTime: candle.timestamp,
-      entryPrice: trade.entryPrice,
-      exitPrice,
-      slPrice: trade.slPrice,
-      tpPrice: trade.tpPrice,
-      qty: trade.qty,
-      side: trade.side,
-      pnl: netPnl,
-      pnlPercent,
-      feesPaid: totalFees,
-      scenarioId: trade.scenarioId,
-      scenarioName: trade.scenarioName,
-      closedBy: 'BOTH',
-      structureType: trade.structureType,
-      structureTimestamp: trade.structureTimestamp,
-      structurePrice: trade.structurePrice,
-    };
-
-    // Prepare mitigated zone info if available
-    let mitigatedZone: { type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION'; top: string; bottom: string; timeframe: string; direction: string; timestamp: number } | undefined;
-    if (trade.zoneType && trade.zoneTop && trade.zoneBottom && trade.zoneTimeframe && trade.zoneDirection && trade.zoneTimestamp) {
-      mitigatedZone = {
-        type: trade.zoneType,
-        top: trade.zoneTop.toString(),
-        bottom: trade.zoneBottom.toString(),
-        timeframe: trade.zoneTimeframe,
-        direction: trade.zoneDirection,
-        timestamp: trade.zoneTimestamp,
-      };
-    }
-
-const isLoss = netPnl.lt(0);
-  const structureTimestamp = trade.structureTimestamp || 0;
-  const newState: BacktestState = {
-    ...state,
-    balance: newBalance,
-    equity: newBalance,
-    peakBalance: newPeak,
-    maxDrawdown: drawdown.gt(state.maxDrawdown) ? drawdown : state.maxDrawdown,
-    trades: [...state.trades, tradeResult],
-    consecutiveLosses: netPnl.lt(0) ? state.consecutiveLosses + 1 : 0,
-    openTrade: null,
-    // Cooldown ONLY after LOSS (protection from revenge trading)
-    cooldownUntil: isLoss ? candle.timestamp + 16 * 15 * 60 * 1000 : 0,
-    // Add structure to mitigatedStructures to prevent re-entry on same structure
-    mitigatedStructures: structureTimestamp > 0 ? [...state.mitigatedStructures, {
-      type: trade.structureType || 'CHoCH',
-      timestamp: structureTimestamp,
-      price: trade.structurePrice?.toString() || '0',
-      direction: trade.side === 'Buy' ? 'BULLISH' : 'BEARISH',
-    }] : state.mitigatedStructures,
-    // Mitigated zones are already handled in openTrade
-    mitigatedZones: state.mitigatedZones,
-  };
-
-    logger.debug(`Backtest CLOSE (BOTH): ${trade.scenarioName} ${trade.side} entry=${trade.entryPrice.toFixed(4)} exit=${exitPrice.toFixed(4)} pnl=${netPnl.toFixed(2)} (BOTH) balance=${newBalance.toFixed(2)}`);
-
-    return { state: newState, tradeResult, mitigatedZone };
-  }
-
-  if (!hitTP && !hitSL) {
+  // No hit - continue holding
+  if (!hitSL && !hitTP) {
     return { state, tradeResult: null };
   }
 
-  // CRITICAL: Check SL FIRST - if both hit same candle, it's a LOSS (wick hit SL first)
-  let exitPrice: Decimal;
-  let closedBy: 'TP' | 'SL' | 'BOTH';
-
-  if (hitSL) {
-    exitPrice = trade.slPrice;
-    closedBy = 'SL';
-  } else if (hitTP) {
-    exitPrice = trade.tpPrice;
-    closedBy = 'TP';
-  } else {
-    // Should not reach here
-    return { state, tradeResult: null };
-  }
-
-  // If BOTH hit same candle, treat as LOSS (conservative)
-  if (hitSL && hitTP) {
-    closedBy = 'BOTH';
-  }
-
-  // Debug: Log first 3 trades closing
-  if (debugTradeCloseCount < 3) {
-    debugTradeCloseCount++;
-    const reason = hitTP ? 'TP hit' : 'SL hit';
-    logger.warn(`[TRADE CLOSE #${debugTradeCloseCount}] Exit Price: ${exitPrice.toFixed(4)} | Reason: ${reason} (Hit ${closedBy} on candle H=${candle.high} L=${candle.low})`);
-  }
+  // CONSERVATIVE PRIORITY: If BOTH SL and TP hit in same candle wick -> LOSS at SL price
+  // This prevents fake wins where price spiked both ways
+  const bothHit = hitSL && hitTP;
+  const exitPrice = bothHit ? trade.slPrice : (hitSL ? trade.slPrice : trade.tpPrice);
+  const closedBy = bothHit ? 'BOTH' : (hitSL ? 'SL' : 'TP');
+  const isLoss = closedBy === 'SL' || closedBy === 'BOTH';
 
   const exitFee = exitPrice.mul(trade.qty).mul(TAKER_FEE_RATE);
   const totalFees = trade.entryFee.plus(exitFee);
@@ -459,7 +361,31 @@ const isLoss = netPnl.lt(0);
   const newPeak = newBalance.gt(state.peakBalance) ? newBalance : state.peakBalance;
   const drawdown = newPeak.minus(newBalance).div(newPeak).mul(100);
 
-const tradeResult: TradeResult = {
+  // Prepare mitigated zone info from trade's zoneDetails (for run.ts local cache sync)
+  let mitigatedZone: { type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION'; top: string; bottom: string; timeframe: string; direction: string; timestamp: number } | undefined;
+  if (trade.zoneType && trade.zoneTop && trade.zoneBottom && trade.zoneTimeframe && trade.zoneDirection && trade.zoneTimestamp) {
+    mitigatedZone = {
+      type: trade.zoneType,
+      top: trade.zoneTop.toString(),
+      bottom: trade.zoneBottom.toString(),
+      timeframe: trade.zoneTimeframe,
+      direction: trade.zoneDirection,
+      timestamp: trade.zoneTimestamp,
+    };
+  }
+
+  // Structure mitigation: ALWAYS add trigger structure on close (win or loss)
+  // Uses trade.structureDetails set by scenario via openTrade
+  const structureTimestamp = trade.structureTimestamp ?? 0;
+  const hasValidStructure = structureTimestamp > 0 && trade.structureType;
+
+  const newState: BacktestState = {
+    ...state,
+    balance: newBalance,
+    equity: newBalance,
+    peakBalance: newPeak,
+    maxDrawdown: drawdown.gt(state.maxDrawdown) ? drawdown : state.maxDrawdown,
+    trades: [...state.trades, {
       entryTime: trade.entryTime,
       exitTime: candle.timestamp,
       entryPrice: trade.entryPrice,
@@ -477,45 +403,29 @@ const tradeResult: TradeResult = {
       structureType: trade.structureType,
       structureTimestamp: trade.structureTimestamp,
       structurePrice: trade.structurePrice,
-    };
-
-  // Prepare mitigated zone info if available
-  let mitigatedZone: { type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION'; top: string; bottom: string; timeframe: string; direction: string; timestamp: number } | undefined;
-  if (trade.zoneType && trade.zoneTop && trade.zoneBottom && trade.zoneTimeframe && trade.zoneDirection && trade.zoneTimestamp) {
-    mitigatedZone = {
-      type: trade.zoneType,
-      top: trade.zoneTop.toString(),
-      bottom: trade.zoneBottom.toString(),
-      timeframe: trade.zoneTimeframe,
-      direction: trade.zoneDirection,
-      timestamp: trade.zoneTimestamp,
-    };
-  }
-
-  const structureTimestamp = trade.structureTimestamp || 0;
-  const newState: BacktestState = {
-    ...state,
-    balance: newBalance,
-    equity: newBalance,
-    peakBalance: newPeak,
-    maxDrawdown: drawdown.gt(state.maxDrawdown) ? drawdown : state.maxDrawdown,
-    trades: [...state.trades, tradeResult],
-    consecutiveLosses: netPnl.lt(0) ? state.consecutiveLosses + 1 : 0,
+    }],
+    consecutiveLosses: isLoss ? state.consecutiveLosses + 1 : 0,
     openTrade: null,
     // Cooldown ONLY after LOSS (protection from revenge trading)
-    cooldownUntil: netPnl.lt(0) ? candle.timestamp + 16 * 15 * 60 * 1000 : 0,
-    // Add structure to mitigatedStructures to prevent re-entry on same structure
-    mitigatedStructures: structureTimestamp > 0 ? [...state.mitigatedStructures, {
-      type: trade.structureType || 'CHoCH',
+    cooldownUntil: isLoss ? candle.timestamp + 16 * 15 * 60 * 1000 : 0,
+    // Add structure to mitigatedStructures to prevent re-entry on same structure (SMS/CHoCH/BOS)
+    mitigatedStructures: hasValidStructure ? [...state.mitigatedStructures, {
+      type: trade.structureType!,
       timestamp: structureTimestamp,
       price: trade.structurePrice?.toString() || '0',
       direction: trade.side === 'Buy' ? 'BULLISH' : 'BEARISH',
     }] : state.mitigatedStructures,
-    // Mitigated zones are already handled in openTrade
+    // Mitigated zones already added in openTrade (burned on entry), preserve here
     mitigatedZones: state.mitigatedZones,
   };
 
+  // Debug: Log first 3 trades closing
+  if (debugTradeCloseCount < 3) {
+    debugTradeCloseCount++;
+    logger.warn(`[TRADE CLOSE #${debugTradeCloseCount}] Exit: ${exitPrice.toFixed(4)} | ${closedBy} | PnL: ${netPnl.toFixed(2)} | Candle H=${candle.high} L=${candle.low}`);
+  }
+
   logger.debug(`Backtest CLOSE: ${trade.scenarioName} ${trade.side} entry=${trade.entryPrice.toFixed(4)} exit=${exitPrice.toFixed(4)} pnl=${netPnl.toFixed(2)} (${closedBy}) balance=${newBalance.toFixed(2)}`);
 
-  return { state: newState, tradeResult, mitigatedZone };
+  return { state: newState, tradeResult: newState.trades[newState.trades.length - 1], mitigatedZone };
 }
