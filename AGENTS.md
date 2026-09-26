@@ -1,4 +1,4 @@
-# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-09-20)
+# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-09-26)
 
 > **Single source of truth for any AI agent working on this codebase.**
 > Every architectural decision, invariant, convention, and lesson learned in blood is documented here.
@@ -619,32 +619,27 @@ Added two new sections to backtest report (`reporter.ts`):
 
 All timestamps in **UTC** for cross-referencing with live logs.
 
-**Problem**: luxon's `setZone('America/New_York')` silently falls back to UTC in Docker Alpine containers because the base image lacks the IANA timezone database (`tzdata`). This caused killzone checks to fail at 11:15 UTC (07:15 NY) — the bot saw `hour=11` instead of `hour=7` and rejected valid NY session trades.
-
-**Solution**: Two-layer fix at DevOps + Code level:
-
-| Layer | Fix | Why |
-|-------|-----|-----|
-| **DevOps (Dockerfile)** | `RUN apk add --no-cache tzdata` in runner stage | Installs full IANA tz database; luxon can now resolve `America/New_York` with correct DST (EDT/EST) |
-| **Code (patternRecognizer.ts)** | `DateTime.fromMillis(ts, { zone: 'utc' }).setZone('America/New_York')` | Explicit UTC → NY conversion; fails fast if tzdata missing |
-
-**Timezone Sanity Check (Startup Log)** — `src/index.ts`:
-```typescript
-const nowMs = Date.now();
-const utcTime = DateTime.fromMillis(nowMs).toUTC().toFormat('yyyy-MM-dd HH:mm:ss');
-const nyTime = DateTime.fromMillis(nowMs).setZone('America/New_York');
-const nyTimeStr = nyTime.toFormat('yyyy-MM-dd HH:mm:ss ZZZZ');
-logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): ${nyTimeStr} | NY Hour: ${nyTime.hour}`);
-```
-
-**Example output**:
-```
-[Timezone Sanity Check] Server UTC: 2026-09-22 21:30:00 | Wall Street (NY): 2026-09-22 17:30:00 EDT | NY Hour: 17
-```
-
-**Critical**: Alpine base images lack `tzdata` by default. Always install `tzdata` when using luxon with named IANA zones in Docker.
-
 ---
+
+### 6.16 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
+
+**Problem**: Backtest was producing fake results — Scenario 6 (SMS) opened 20+ winning trades in a row every 15 minutes at the same entry price because:
+1. **Mitigated structures not tracked on WIN**: When a trade closed in profit, its trigger structure (CHoCH/SMS) was not added to `mitigatedStructures`, allowing re-entry on the same structure.
+2. **Mitigated zones not burned on entry**: Zones were only added to `mitigatedZones` on trade CLOSE, allowing re-entry on same zone before close.
+3. **Same-candle SL/TP bias**: TP was checked before SL → fake wins when both hit same candle wick.
+4. **DB `reason` field not updated**: Close reason (TP/SL/RECONCILIATION) not persisted.
+
+**Fixes Applied** (`src/backtest/executionSimulator.ts` + `src/db/database.ts` + `src/engine/strategyEngine.ts`):
+
+| Fix | Location | Change |
+|-----|----------|--------|
+| **Mitigated structures on ALL closes** | `checkAndCloseTrade()` | Always push trigger structure (`structureType`, `structureTimestamp`, `structurePrice`) to `state.mitigatedStructures` on close (win or loss) |
+| **Zone burned on ENTRY** | `openTrade()` | Add zone to `mitigatedZones` immediately on trade open — prevents re-entry before close |
+| **SL priority in same candle** | `checkAndCloseTrade()` | Check SL FIRST; if both SL+TP hit → `closedBy = 'BOTH'` = LOSS at SL price (conservative) |
+| **DB closeTrade with reason** | `database.ts:closeTrade()` | Added `reason` parameter; callers pass `'TP' \| 'SL' \| 'RECONCILIATION'` based on PnL sign |
+| **State propagation** | Both functions | Single unified `newState` return ensures `mitigatedStructures` + `mitigatedZones` flow to next candle |
+
+**Result**: Ghost signals eliminated. Scenario 6 on ETHUSDT — duplicate 06:30/11:30 entries at same price removed. CHoCH marked "used" after first trade. Backtest results now reflect realistic execution.
 
 ## 7. THE 11 SCENARIOS — `src/engine/scenarios/`
 
@@ -745,6 +740,21 @@ CREATE TABLE symbol_state (
 **Connection Pool**: `max=5`, `idleTimeout=10s`, `keepAlive=true` (Supabase compatibility).
 **Leak Proof**: Every method uses `const client = await pool.connect(); try {...} finally { client.release() }`.
 
+### 8.1 CRUD Operations Audit — **v2026-09-26**
+
+| Operation | SQL / Code | Status |
+|-----------|------------|--------|
+| **CREATE TABLE** | All 19 columns present: `scenario_id`, `reason`, `zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp` | ✅ |
+| **INSERT (openTrade)** | 16 fields passed incl. all 6 zoneDetails fields with `?? null` fallback | ✅ |
+| **UPDATE (closeTrade)** | `reason` column now updated: `SET ..., reason = $4` | ✅ **FIXED v2026-09-26** |
+| **SELECT (mapRowToTradeRecord)** | `zone_top/bottom` → `new Decimal(row.zone_top)`, `scenario_id` as `number \| null`, `reason` passed through | ✅ |
+| **BACKUP (tradesToCsv)** | All 19 columns exported including zone details | ✅ |
+
+**DB Fix Applied**: `closeTrade(tradeId, pnl, exitPrice, closedAt, reason)` — callers in `strategyEngine.ts`:
+- Line 348: `closeReason = PnL < 0 ? 'SL' : 'TP'`
+- Line 572: `'RECONCILIATION'`
+- Line 684: `closeReason = PnL < 0 ? 'SL' : 'TP'`
+
 ---
 
 ## 9. BACKTEST ENGINE — `src/backtest/`
@@ -829,6 +839,10 @@ docker compose up -d
 11. **SL calculation** uses `Decimal.min(zone.top, zone.bottom, entry)` for Longs and `Decimal.max(zone.top, zone.bottom, entry)` for Shorts — guarantees correct SL side regardless of zone top/bottom ordering.
 12. **Backtester is fully dynamic** — no hardcoded timeframes or candle counts; all derived from `config.ltfTimeframe` / `config.htfTimeframe`; cache filenames include timeframe.
 13. **Backtester macro context is dynamic** — no lookahead bias; PDH/PDL/PWH/PWL calculated from sliding windows of closed candles only.
+14. **Backtester mitigated structures tracked on ALL closes** — `mitigatedStructures` updated on both WIN and LOSS in `checkAndCloseTrade()`, preventing ghost signal re-entries.
+15. **Backtester mitigated zones burned on ENTRY** — zone added to `mitigatedZones` immediately in `openTrade()`, not on close.
+16. **Same-candle SL/TP resolution** — SL checked first; if both hit → `BOTH` = LOSS at SL price (conservative).
+17. **DB `reason` field persisted on close** — `closeTrade()` accepts `reason` parameter ('TP'|'SL'|'RECONCILIATION'), all callers updated.
 
 ---
 
@@ -1044,4 +1058,4 @@ docker compose up -d --build
 **Fix**: `Decimal.min(zone.top, zone.bottom, entry)` for Long, `Decimal.max(zone.top, zone.bottom, entry)` for Short — min/max of ALL THREE guarantees correct SL side.
 **Rule**: Always use min/max of top, bottom, AND entry for SL. Never assume zone ordering.
 
-_Last updated: 2026-09-20. All 231 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-09-26. All 231 tests green. Build passes. Enterprise-ready._

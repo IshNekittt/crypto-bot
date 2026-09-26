@@ -925,7 +925,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full 180-day backtest (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (221 tests)
+npm test             # Jest (231 tests)
 npm run test:watch   # Watch mode
 ```
 
