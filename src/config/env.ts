@@ -32,6 +32,7 @@ export interface BotConfig {
   readonly fundingRestoreThreshold: string;
   readonly symbolScenarios: Map<string, number[]>;
   readonly backtestCsvPath: string | null;
+  readonly cooldownCandles: number;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -172,7 +173,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const symbolScenarios = parseSymbolScenarios(env, symbols);
   const backtestCsvPath = optionalEnv(env, 'BACKTEST_CSV_PATH');
 
+  const cooldownCandles = parsePositiveNumber(
+    optionalEnv(env, 'COOLDOWN_CANDLES') ?? '16',
+    'COOLDOWN_CANDLES'
+  );
+  if (!Number.isInteger(cooldownCandles)) {
+    throw new Error(`COOLDOWN_CANDLES must be an integer, got: ${cooldownCandles}`);
+  }
+
   return {
+    cooldownCandles,
     apiKey: requireEnv(env, 'BYBIT_API_KEY'),
     apiSecret: requireEnv(env, 'BYBIT_API_SECRET'),
     testnet,

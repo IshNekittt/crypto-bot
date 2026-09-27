@@ -575,24 +575,33 @@ mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
 
 ---
 
-### 6.14 Cooldown Logic Fix — **NEW v2026-09-24**
+### 6.14 Cooldown Logic Fix — **NEW v2026-09-24** (Updated v2026-09-27: Dynamic Timeframe Support)
 
-**Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation.
+**Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation. Also, the cooldown was hardcoded to 15-minute timeframe (`16 * 15 * 60 * 1000`), breaking when `LTF_TIMEFRAME` changed.
 
-**Fix**: Cooldown ONLY after LOSS (revenge trading protection). After WIN → no cooldown.
+**Fix**: Cooldown ONLY after LOSS (revenge trading protection). After WIN → no cooldown. Cooldown duration is now fully dynamic: `COOLDOWN_CANDLES × LTF_TIMEFRAME` minutes.
 
 ```typescript
-// executionSimulator.ts (both BOTH and SL/TP close paths)
-cooldownUntil: netPnl.lt(0) ? candle.timestamp + 16 * 15 * 60 * 1000 : 0,
+// executionSimulator.ts (backtest)
+const ltfMinutes = Number(config.ltfTimeframe);
+const cooldownMs = config.cooldownCandles * ltfMinutes * 60 * 1000;
+cooldownUntil: netPnl.lt(0) ? candle.timestamp + cooldownMs : 0;
 
 // strategyEngine.ts (live)
 if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-  this.cooldownUntil = Date.now() + 16 * 15 * 60 * 1000;
-  logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for 4H.`);
+  const ltfMinutes = Number(this.deps.config.ltfTimeframe);
+  const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+  this.cooldownUntil = Date.now() + cooldownMs;
+  const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+  logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h.`);
 }
 ```
 
-**Rule**: Cooldown = 16 candles (4h) ONLY after LOSS. WIN = no cooldown, ride the trend.
+**Rule**: Cooldown = `COOLDOWN_CANDLES` candles (default 16) ONLY after LOSS. WIN = no cooldown, ride the trend.
+**Examples**:
+- `LTF_TIMEFRAME=15`, `COOLDOWN_CANDLES=16` → 4 hours (default)
+- `LTF_TIMEFRAME=5`, `COOLDOWN_CANDLES=16` → 1h 20min
+- `LTF_TIMEFRAME=60`, `COOLDOWN_CANDLES=16` → 16 hours
 
 ---
 
@@ -797,6 +806,9 @@ HTF_TIMEFRAME=240
 # Features
 ENABLE_LIVE_TEST_ORDERS=false
 ACTIVE_SCENARIOS=1,2,3,4,5,6,7,8,9,10,11
+
+# Cooldown after SL hit (in LTF candles, default 16 = 4h for 15m timeframe)
+COOLDOWN_CANDLES=16
 
 # Funding Monitor (delta-neutral arbitrage)
 ENABLE_FUNDING_MONITOR=false

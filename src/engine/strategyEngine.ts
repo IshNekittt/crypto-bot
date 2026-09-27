@@ -358,10 +358,13 @@ export class StrategyEngine {
     }
     logger.info(`${this.symbol}: IN_TRADE → SCANNING (position close event)`);
 
-    // Set cooldown after SL hit (4 hours = 16 * 15min)
+    // Set cooldown after SL hit (cooldownCandles * ltfTimeframe minutes)
     if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-      this.cooldownUntil = Date.now() + 16 * 15 * 60 * 1000; // 4 hours in ms
-      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for 4H.`);
+      const ltfMinutes = Number(this.deps.config.ltfTimeframe);
+      const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+      this.cooldownUntil = Date.now() + cooldownMs;
+      const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h (${this.deps.config.cooldownCandles} candles × ${ltfMinutes}m).`);
     }
 
     this.transition(StrategyState.SCANNING);

@@ -220,7 +220,10 @@ async function runBacktestForSymbol(
     // HARD CHECK: If we have an open trade, ONLY check TP/SL. Skip ALL heavy math (router, patternRecognizer)
     if (state.openTrade) {
       if (state.openTrade.entryTime !== candleTime) {
-        const { state: stateAfterCheck, tradeResult, mitigatedZone } = checkAndCloseTrade(state, candleLtf);
+        const { state: stateAfterCheck, tradeResult, mitigatedZone } = checkAndCloseTrade(state, candleLtf, {
+          cooldownCandles: config.cooldownCandles,
+          ltfTimeframe: config.ltfTimeframe,
+        });
         Object.assign(state, stateAfterCheck);
         if (tradeResult) {
           results.push(tradeResult);

@@ -227,7 +227,8 @@ export function openTrade(
   }
 
   if (state.cooldownUntil > 0 && state.cooldownUntil > candle.timestamp) {
-    logger.info(`[${new Date(candle.timestamp).toISOString()}] Cooldown active after stop-loss. Skipping scan for 4H.`);
+    const cooldownHours = ((state.cooldownUntil - candle.timestamp) / (60 * 60 * 1000)).toFixed(2);
+    logger.info(`[${new Date(candle.timestamp).toISOString()}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h.`);
     return { state, tradeOpened: false };
   }
 
@@ -317,7 +318,8 @@ export function openTrade(
 
 export function checkAndCloseTrade(
   state: BacktestState,
-  candle: Candle
+  candle: Candle,
+  config: { cooldownCandles: number; ltfTimeframe: string }
 ): { state: BacktestState; tradeResult: TradeResult | null; mitigatedZone?: { type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION'; top: string; bottom: string; timeframe: string; direction: string; timestamp: number } } {
   if (!state.openTrade) {
     return { state, tradeResult: null };
@@ -407,7 +409,7 @@ export function checkAndCloseTrade(
     consecutiveLosses: isLoss ? state.consecutiveLosses + 1 : 0,
     openTrade: null,
     // Cooldown ONLY after LOSS (protection from revenge trading)
-    cooldownUntil: isLoss ? candle.timestamp + 16 * 15 * 60 * 1000 : 0,
+    cooldownUntil: isLoss ? candle.timestamp + config.cooldownCandles * Number(config.ltfTimeframe) * 60 * 1000 : 0,
     // Add structure to mitigatedStructures to prevent re-entry on same structure (SMS/CHoCH/BOS)
     mitigatedStructures: hasValidStructure ? [...state.mitigatedStructures, {
       type: trade.structureType!,

@@ -42,6 +42,7 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     fundingRestoreThreshold: '0.0001',
     symbolScenarios: new Map(),
     backtestCsvPath: null,
+    cooldownCandles: 16,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }
