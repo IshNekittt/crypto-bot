@@ -18,6 +18,7 @@ export interface PendingTrade {
   createdAt: number;
   messageId?: number; // Telegram message ID for timeout editing
   originalText?: string; // Original message text for timeout editing
+  idealEntry?: string; // Ideal entry price from scenario (for dynamic Market/Limit decision)
   isTest?: boolean;           // Flag for dry-run test trades
   isLiveDemoTest?: boolean;   // Flag for live demo test trades (real order on Demo)
 }
@@ -27,7 +28,7 @@ export class PendingTradeManager {
   private readonly approvalTimeoutMs: number;
   private readonly pendingTrades: Map<string, PendingTrade> = new Map();
   private tradeIdCounter = 0;
-  private readonly slippageThresholdPct = new Decimal('0.002'); // 0.2%
+  
   private getCurrentPrice?: (symbol: string) => string | null;
 
   constructor(notifier: TelegramNotifier, approvalTimeoutMinutes: number) {
@@ -51,7 +52,8 @@ export class PendingTradeManager {
     scenarioId: number,
     reason: string,
     side: 'Buy' | 'Sell',
-    qty: string
+    qty: string,
+    idealEntry?: string
   ): Promise<boolean> {
     const tradeId = this.generateTradeId(symbol);
 
@@ -107,6 +109,7 @@ export class PendingTradeManager {
         createdAt: Date.now(),
         messageId: undefined,
         originalText: text,
+        idealEntry: idealEntry ?? entry,
       };
 
       this.pendingTrades.set(tradeId, pending);
@@ -136,58 +139,63 @@ export class PendingTradeManager {
     return msg.message_id;
   }
 
-  handleApproval(tradeId: string, approved: boolean): boolean {
+  handleApproval(tradeId: string, approved: boolean): { approved: boolean; orderType: 'Market' | 'Limit'; limitPrice?: string } {
     const pending = this.pendingTrades.get(tradeId);
     if (!pending) {
-      return false;
+      return { approved: false, orderType: 'Market' };
     }
 
     if (approved && this.getCurrentPrice) {
       const currentPriceStr = this.getCurrentPrice(pending.symbol);
       if (currentPriceStr) {
         const currentPrice = new Decimal(currentPriceStr);
-        const entryPrice = new Decimal(pending.entry);
         const tpPrice = new Decimal(pending.tp);
+        const idealEntry = pending.idealEntry ? new Decimal(pending.idealEntry) : new Decimal(pending.entry);
+        const smartThreshold = new Decimal('0.0015'); // 0.15% - should match SMART_ENTRY_THRESHOLD_PCT
         
         const isLong = pending.side === 'Buy';
-        let slippagePct: Decimal;
         
+        // Check if price already passed TP - reject in this case
         if (isLong) {
-          // For long: if price moved UP towards TP
           if (currentPrice.gte(tpPrice)) {
             logger.warn(`[Slippage Guard] ${tradeId}: current price ${currentPriceStr} >= TP ${pending.tp}, rejecting`);
             clearTimeout(pending.timeoutHandle);
             this.pendingTrades.delete(tradeId);
             pending.resolve(false);
-            return true;
+            return { approved: false, orderType: 'Market' };
           }
-          slippagePct = currentPrice.minus(entryPrice).div(entryPrice).abs();
         } else {
-          // For short: if price moved DOWN towards TP
           if (currentPrice.lte(tpPrice)) {
             logger.warn(`[Slippage Guard] ${tradeId}: current price ${currentPriceStr} <= TP ${pending.tp}, rejecting`);
             clearTimeout(pending.timeoutHandle);
             this.pendingTrades.delete(tradeId);
             pending.resolve(false);
-            return true;
+            return { approved: false, orderType: 'Market' };
           }
-          slippagePct = entryPrice.minus(currentPrice).div(entryPrice).abs();
         }
-
-        if (slippagePct.gt(this.slippageThresholdPct)) {
-          logger.warn(`[Slippage Guard] ${tradeId}: slippage ${slippagePct.mul(100).toFixed(4)}% > ${this.slippageThresholdPct.mul(100).toFixed(1)}% threshold, rejecting`);
+        
+        // Calculate price difference from idealEntry
+        const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
+        const useMarketOrder = priceDiffPct.lte(smartThreshold);
+        
+        logger.info(`[Dynamic Approval] ${tradeId}: idealEntry=${idealEntry.toFixed(4)} currentPrice=${currentPriceStr} diff=${priceDiffPct.mul(100).toFixed(4)}% threshold=${smartThreshold.mul(100).toFixed(2)}% -> ${useMarketOrder ? 'Market' : 'Limit'}`);
+        
+        if (!useMarketOrder) {
+          // Use Limit order at idealEntry
           clearTimeout(pending.timeoutHandle);
           this.pendingTrades.delete(tradeId);
-          pending.resolve(false);
-          return true;
+          pending.resolve(true);
+          return { approved: true, orderType: 'Limit', limitPrice: idealEntry.toFixed(8) };
         }
+        // Use Market order - fall through to normal approval
       }
     }
-
+    
+    // Default: Market order
     clearTimeout(pending.timeoutHandle);
     this.pendingTrades.delete(tradeId);
     pending.resolve(approved);
-    return true;
+    return { approved, orderType: 'Market' };
   }
 
   /**

@@ -516,11 +516,15 @@ export class PatternRecognizer {
   /**
    * Detect BOS/CHoCH with Displacement (> 1.5 * ATR)
    * Optimized: compute swing points ONCE, then iterate with simple for loops
+   * @param customDisplacementMultiplier - optional override for displacement threshold (e.g., for 1m timeframe)
    */
-  detectStructureBreaks(candles: Candle[], atr: Decimal): Structure[] {
+  detectStructureBreaks(candles: Candle[], atr: Decimal, customDisplacementMultiplier?: Decimal): Structure[] {
     const structures: Structure[] = [];
     let lastValidSwing: SwingPoint | null = null;
     let trend: Direction | null = null;
+
+    // Use custom multiplier if provided, otherwise use config default
+    const displacementMultiplier = customDisplacementMultiplier ?? this.config.displacementMultiplier;
 
     // Pre-compute all swing points ONCE (O(N))
     const allSwingPoints = this.findSwingPoints(candles);
@@ -564,7 +568,7 @@ export class PatternRecognizer {
       const candle = candles[i];
       const close = new Decimal(candle.close);
       const body = new Decimal(candle.close).minus(candle.open).abs();
-      const minBody = atr.mul(this.config.displacementMultiplier);
+      const minBody = atr.mul(displacementMultiplier);
 
       // Check if price breaks the swing level
       const bullishBreak = lastValidSwing.type === 'HIGH' && close.greaterThan(lastValidSwing.price);

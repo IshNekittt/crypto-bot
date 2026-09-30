@@ -1,5 +1,5 @@
 import { Decimal } from 'decimal.js';
-import { Candle } from '../types';
+import { Candle, SniperZone } from '../types';
 import { logger } from '../utils/logger';
 
 export const TAKER_FEE_RATE = new Decimal('0.00055');
@@ -117,6 +117,8 @@ export interface BacktestState {
   mitigatedStructures: MitigatedStructure[];
   // Pending limit order waiting for fill
   pendingLimitOrder: PendingLimitOrder | null;
+  // Sniper Mode: active zone waiting for 1m entry trigger
+  activeSniperZone: SniperZone | null;
 }
 
 export interface MitigatedZone {
@@ -177,6 +179,7 @@ export function getInitialState(): BacktestState {
     mitigatedZones: [],
     mitigatedStructures: [] as MitigatedStructure[],
     pendingLimitOrder: null,
+    activeSniperZone: null,
   };
 }
 
@@ -220,7 +223,8 @@ export function openTrade(
     price: Decimal;
   },
   orderType: 'Market' | 'Limit' = 'Market',
-  limitPrice?: Decimal
+  limitPrice?: Decimal,
+  symbol?: string
 ): { state: BacktestState; tradeOpened: boolean } {
   let slPriceAdjusted = slPrice;
   const slDistance = entryPrice.minus(slPrice).abs();
@@ -386,7 +390,8 @@ export function openTrade(
   // Debug: Log first 3 trades opening
   if (debugTradeOpenCount < 3) {
     debugTradeOpenCount++;
-    logger.warn(`[TRADE OPEN #${debugTradeOpenCount}] Symbol: UNKNOWN | Side: ${side} | Entry: ${entryPrice.toFixed(4)} | SL: ${slPriceAdjusted.toFixed(4)} | TP: ${tpPrice.toFixed(4)} | Candle: O=${candle.open} H=${candle.high} L=${candle.low} C=${candle.close}`);
+    const sym = symbol ?? 'UNKNOWN';
+    logger.warn(`[TRADE OPEN #${debugTradeOpenCount}] Symbol: ${sym} | Side: ${side} | Entry: ${entryPrice.toFixed(4)} | SL: ${slPriceAdjusted.toFixed(4)} | TP: ${tpPrice.toFixed(4)} | Candle: O=${candle.open} H=${candle.high} L=${candle.low} C=${candle.close}`);
   }
 
   return { state: newState, tradeOpened: true };
@@ -395,7 +400,8 @@ export function openTrade(
 export function checkPendingLimitOrder(
   state: BacktestState,
   candle: Candle,
-  config: { limitExpirationCandles: number; ltfTimeframe: string }
+  config: { limitExpirationCandles: number; ltfTimeframe: string },
+  symbol?: string
 ): { state: BacktestState; limitOrderFilled: boolean; limitOrderExpired: boolean } {
   if (!state.pendingLimitOrder) {
     return { state, limitOrderFilled: false, limitOrderExpired: false };
@@ -459,13 +465,15 @@ export function checkPendingLimitOrder(
       mitigatedZones: state.mitigatedZones, // Already added when limit order was placed
     };
 
-    logger.debug(`Backtest LIMIT ORDER FILLED: ${pending.scenarioName} ${pending.side} limitPrice=${pending.limitPrice.toFixed(4)} filled@=${new Decimal(candle.low).toFixed(4)}/${new Decimal(candle.high).toFixed(4)} candlesWaited=${pending.candlesWaited}`);
+    const sym = symbol ?? 'UNKNOWN';
+    logger.debug(`Backtest LIMIT ORDER FILLED: ${sym} ${pending.scenarioName} ${pending.side} limitPrice=${pending.limitPrice.toFixed(4)} filled@=${new Decimal(candle.low).toFixed(4)}/${new Decimal(candle.high).toFixed(4)} candlesWaited=${pending.candlesWaited}`);
     return { state: newState, limitOrderFilled: true, limitOrderExpired: false };
   }
 
   if (expired) {
     // Limit order expired - cancel it
-    logger.debug(`Backtest LIMIT ORDER EXPIRED: ${pending.scenarioName} ${pending.side} limitPrice=${pending.limitPrice.toFixed(4)} after ${pending.candlesWaited} candles`);
+    const sym = symbol ?? 'UNKNOWN';
+    logger.debug(`Backtest LIMIT ORDER EXPIRED: ${sym} ${pending.scenarioName} ${pending.side} limitPrice=${pending.limitPrice.toFixed(4)} after ${pending.candlesWaited} candles`);
     const newState: BacktestState = {
       ...state,
       pendingLimitOrder: null,
@@ -488,14 +496,15 @@ export function checkPendingLimitOrder(
 export function checkAndCloseTrade(
   state: BacktestState,
   candle: Candle,
-  config: { cooldownCandles: number; ltfTimeframe: string; limitExpirationCandles: number }
+  config: { cooldownCandles: number; ltfTimeframe: string; limitExpirationCandles: number; breakevenRrTrigger: number },
+  symbol?: string
 ): { state: BacktestState; tradeResult: TradeResult | null; mitigatedZone?: { type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION'; top: string; bottom: string; timeframe: string; direction: string; timestamp: number } } {
   // First check pending limit orders
   if (state.pendingLimitOrder) {
     const limitCheck = checkPendingLimitOrder(state, candle, {
       limitExpirationCandles: config.limitExpirationCandles,
       ltfTimeframe: config.ltfTimeframe,
-    });
+    }, symbol);
     // If limit order was filled, we now have an open trade - continue to check for close on same candle
     // If limit order expired, just return the updated state
     if (limitCheck.limitOrderExpired || !limitCheck.limitOrderFilled) {
@@ -509,8 +518,8 @@ export function checkAndCloseTrade(
     return { state, tradeResult: null };
   }
 
-  const trade = state.openTrade;
-  
+const trade = state.openTrade;
+   
   // Skip closing on the same candle the trade was opened
   if (candle.timestamp <= trade.entryTime) {
     return { state, tradeResult: null };
@@ -520,8 +529,42 @@ export function checkAndCloseTrade(
   const high = new Decimal(candle.high);
   const low = new Decimal(candle.low);
 
-  const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
+  // === BREAKEVEN LOGIC ===
+  // Check if price has moved in favor by breakevenRrTrigger * risk distance
+  // If so, move SL to breakeven (entry price) permanently
+  let effectiveSlPrice = trade.slPrice;
+  let breakevenTriggered = false;
+  if (config.breakevenRrTrigger > 0) {
+    const riskDistance = isLong 
+      ? trade.entryPrice.minus(trade.slPrice).abs()
+      : trade.slPrice.minus(trade.entryPrice).abs();
+    const breakevenTriggerPrice = isLong
+      ? trade.entryPrice.plus(riskDistance.mul(config.breakevenRrTrigger))
+      : trade.entryPrice.minus(riskDistance.mul(config.breakevenRrTrigger));
+    
+    const breakevenHit = isLong ? high.gte(breakevenTriggerPrice) : low.lte(breakevenTriggerPrice);
+    if (breakevenHit) {
+      effectiveSlPrice = trade.entryPrice; // Move SL to breakeven
+      breakevenTriggered = true;
+      logger.debug(`Breakeven triggered: ${trade.scenarioName} ${trade.side} SL moved to entry ${effectiveSlPrice.toFixed(4)}`);
+    }
+  }
+
+  const hitSL = isLong ? low.lte(effectiveSlPrice) : high.gte(effectiveSlPrice);
   const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
+
+  // If breakeven was triggered but no SL/TP hit, update the trade's SL in state
+  if (breakevenTriggered && !hitSL && !hitTP) {
+    const updatedTrade: OpenTrade = {
+      ...trade,
+      slPrice: trade.entryPrice,
+    };
+    const updatedState: BacktestState = {
+      ...state,
+      openTrade: updatedTrade,
+    };
+    return { state: updatedState, tradeResult: null };
+  }
 
   // No hit - continue holding
   if (!hitSL && !hitTP) {
@@ -608,10 +651,177 @@ export function checkAndCloseTrade(
   // Debug: Log first 3 trades closing
   if (debugTradeCloseCount < 3) {
     debugTradeCloseCount++;
-    logger.warn(`[TRADE CLOSE #${debugTradeCloseCount}] Exit: ${exitPrice.toFixed(4)} | ${closedBy} | PnL: ${netPnl.toFixed(2)} | Candle H=${candle.high} L=${candle.low}`);
+    const sym = symbol ?? 'UNKNOWN';
+    logger.warn(`[TRADE CLOSE #${debugTradeCloseCount}] Symbol: ${sym} | Exit: ${exitPrice.toFixed(4)} | ${closedBy} | PnL: ${netPnl.toFixed(2)} | Candle H=${candle.high} L=${candle.low}`);
   }
 
-  logger.debug(`Backtest CLOSE: ${trade.scenarioName} ${trade.side} entry=${trade.entryPrice.toFixed(4)} exit=${exitPrice.toFixed(4)} pnl=${netPnl.toFixed(2)} (${closedBy}) balance=${newBalance.toFixed(2)}`);
+  const sym = symbol ?? 'UNKNOWN';
+  logger.debug(`Backtest CLOSE: ${sym} ${trade.scenarioName} ${trade.side} entry=${trade.entryPrice.toFixed(4)} exit=${exitPrice.toFixed(4)} pnl=${netPnl.toFixed(2)} (${closedBy}) balance=${newBalance.toFixed(2)}`);
 
   return { state: newState, tradeResult: newState.trades[newState.trades.length - 1], mitigatedZone };
+}
+
+/**
+ * Process 1m candle in Sniper Mode
+ * Checks for zone invalidation and 1m CHoCH trigger
+ */
+export interface SniperModeConfig {
+  enableSniperMode: boolean;
+  smcSlAtrOffset: string;
+  smcDisplacementMultiplier: string;
+}
+
+export interface SniperMode1mStructure {
+  type: 'CHoCH' | 'BOS' | 'SMS';
+  direction: 'BULLISH' | 'BEARISH';
+  timestamp: number;
+  price: Decimal;
+  impulseFactor?: Decimal;
+}
+
+export function processSniperMode1mCandle(
+  state: BacktestState,
+  candle1m: Candle,
+  activeSniperZone: { top: Decimal; bottom: Decimal; direction: 'BULLISH' | 'BEARISH'; scenarioId: string; scenarioName: string } | null,
+  structures1m: SniperMode1mStructure[],
+  config: SniperModeConfig & { 
+    ltfTimeframe: string; 
+    limitExpirationCandles: number; 
+    cooldownCandles: number;
+    breakevenRrTrigger: number;
+    smcSlAtrOffset: string;
+    smcDisplacementMultiplier: string;
+  },
+instrument: InstrumentInfo,
+  _symbol?: string
+): { state: BacktestState; tradeOpened: boolean; tradeResult: TradeResult | null; sniperZoneCleared: boolean } {
+  // If no active sniper zone, nothing to do
+  if (!activeSniperZone) {
+    return { state, tradeOpened: false, tradeResult: null, sniperZoneCleared: false };
+  }
+
+  const isLong = activeSniperZone.direction === 'BULLISH';
+  const high = new Decimal(candle1m.high);
+  const low = new Decimal(candle1m.low);
+
+  // === CHECK ZONE INVALIDATION ===
+  // If price breaks through the zone completely, invalidate the zone
+  const zoneInvalidated = isLong 
+    ? low.lt(activeSniperZone.bottom)  // Price went below zone bottom for long
+    : high.gt(activeSniperZone.top);   // Price went above zone top for short
+
+  if (zoneInvalidated) {
+    logger.debug(`Sniper zone invalidated: ${activeSniperZone.scenarioName} ${activeSniperZone.direction} zone broken by price`);
+    return {
+      state: { ...state, activeSniperZone: null },
+      tradeOpened: false,
+      tradeResult: null,
+      sniperZoneCleared: true
+    };
+  }
+
+  // === LOOK FOR 1m CHoCH TRIGGER ===
+  // Look for CHoCH in the direction of the sniper zone, formed after we entered SNIPER_MODE
+  const validChoch = structures1m.find(s => 
+    s.type === 'CHoCH' && 
+    s.direction === activeSniperZone.direction &&
+    s.impulseFactor && s.impulseFactor.gte(new Decimal(config.smcDisplacementMultiplier))
+  );
+
+  if (!validChoch) {
+    // No valid trigger found, continue waiting
+    return { state, tradeOpened: false, tradeResult: null, sniperZoneCleared: false };
+  }
+
+  // === TRIGGER FOUND - CALCULATE ENTRY ===
+  // idealEntry = 0.5 of CHoCH impulse (midpoint between CHoCH start and end)
+  const chochStartPrice = validChoch.price;
+  const chochEndPrice = new Decimal(candle1m.close);
+  const idealEntry = chochStartPrice.plus(chochEndPrice).div(2);
+   
+  // Calculate SL using SMC_SL_ATR_OFFSET
+  const atr = new Decimal('0.01'); // Placeholder - in real implementation would use actual ATR
+  const slOffset = atr.mul(new Decimal(config.smcSlAtrOffset));
+  const minSlOffset = idealEntry.mul(new Decimal('0.001')); // 0.1% minimum
+  const effectiveSlOffset = Decimal.max(slOffset, minSlOffset);
+
+  let slPrice: Decimal;
+  let tpPrice: Decimal;
+  const rr = new Decimal(3); // 1:3 risk-reward
+
+  if (isLong) {
+    slPrice = idealEntry.minus(effectiveSlOffset);
+    tpPrice = idealEntry.plus(idealEntry.minus(slPrice).mul(rr));
+  } else {
+    slPrice = idealEntry.plus(effectiveSlOffset);
+    tpPrice = idealEntry.minus(slPrice.minus(idealEntry).mul(rr));
+  }
+
+  // Validate SL is on correct side
+  if (isLong && slPrice.gte(idealEntry)) {
+    logger.warn(`Sniper Mode: Invalid SL for long, skipping`);
+    return { state, tradeOpened: false, tradeResult: null, sniperZoneCleared: false };
+  }
+  if (!isLong && slPrice.lte(idealEntry)) {
+    logger.warn(`Sniper Mode: Invalid SL for short, skipping`);
+    return { state, tradeOpened: false, tradeResult: null, sniperZoneCleared: false };
+  }
+
+  // Open trade using existing openTrade function
+  const { state: newStateAfterTrade, tradeOpened } = openTrade(
+    state,
+    { 
+      timestamp: candle1m.timestamp, 
+      open: candle1m.open, high: candle1m.high, low: candle1m.low, close: candle1m.close, volume: candle1m.volume 
+    },
+    idealEntry,
+    slPrice,
+    tpPrice,
+    isLong ? 'Buy' : 'Sell',
+    parseInt(activeSniperZone.scenarioId) || 99,
+    `Sniper: ${activeSniperZone.scenarioName}`,
+    { 
+      symbol: 'UNKNOWN',
+      tickSize: instrument.tickSize, 
+      qtyStep: instrument.qtyStep, 
+      minOrderQty: instrument.minOrderQty, 
+      maxOrderQty: instrument.maxOrderQty 
+    },
+    undefined,
+    undefined,
+    'Limit',
+    idealEntry
+  );
+
+  // Clear the sniper zone after triggering
+  const finalState = { ...newStateAfterTrade, activeSniperZone: null };
+
+  if (tradeOpened) {
+    logger.info(`Sniper Mode: Triggered ${activeSniperZone.scenarioName} entry at ${idealEntry.toFixed(4)}`);
+  }
+
+  return { 
+    state: finalState, 
+    tradeOpened, 
+    tradeResult: tradeOpened ? { 
+      entryTime: candle1m.timestamp,
+      exitTime: 0,
+      entryPrice: idealEntry,
+      exitPrice: new Decimal(0),
+      slPrice,
+      tpPrice,
+      qty: finalState.openTrade?.qty || new Decimal(0),
+      side: isLong ? 'Buy' : 'Sell',
+      pnl: new Decimal(0),
+      pnlPercent: new Decimal(0),
+      feesPaid: new Decimal(0),
+      scenarioId: parseInt(activeSniperZone.scenarioId) || 99,
+      scenarioName: `Sniper: ${activeSniperZone.scenarioName}`,
+      closedBy: 'TP' as const,
+      structureType: 'CHoCH',
+      structureTimestamp: validChoch.timestamp,
+      structurePrice: validChoch.price,
+    } : null, 
+    sniperZoneCleared: false 
+  };
 }

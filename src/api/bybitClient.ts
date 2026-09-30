@@ -530,4 +530,65 @@ export class BybitClient {
       }));
     }, 'getTickers');
   }
+
+  async fetchHistoricalCandlesInChunks(
+    symbol: string,
+    interval: Timeframe,
+    startTime: number,
+    endTime: number
+  ): Promise<Candle[]> {
+    const allCandles: Candle[] = [];
+    let currentEnd = endTime;
+    const chunkSize = 1000;
+    const maxIterations = Math.ceil((endTime - startTime) / (chunkSize * 60 * 1000)) + 5; // Safety limit
+
+    logger.info(`[${symbol}] Starting historical fetch: interval=${interval}, start=${new Date(startTime).toISOString()}, end=${new Date(endTime).toISOString()}`);
+
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      if (currentEnd <= startTime) break;
+
+      const response = await this.executeWithRetry(async () => {
+        const params: any = {
+          category: 'linear',
+          symbol,
+          interval,
+          limit: chunkSize,
+          end: currentEnd,
+        };
+        return this.rest.getKline(params);
+      }, `fetchHistoricalCandlesInChunks-${symbol}-${interval}`);
+
+      if (response.retCode !== 0) {
+        throw new Error(`Chunk fetch failed for ${symbol} ${interval}: [${response.retCode}] ${response.retMsg}`);
+      }
+
+      const chunk = parseRestKlines(response.result.list);
+      
+      if (chunk.length === 0) {
+        logger.info(`[${symbol}] No more candles returned, stopping at iteration ${iteration}`);
+        break;
+      }
+
+      // Add chunk to beginning (since we're fetching backwards)
+      allCandles.unshift(...chunk);
+
+      // Update currentEnd to the timestamp of the earliest candle in this chunk minus 1ms
+      const earliestTimestamp = chunk[0].timestamp;
+      currentEnd = earliestTimestamp - 1;
+
+      // Rate limit protection: 150ms delay between requests
+      if (currentEnd > startTime) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
+
+      logger.debug(`[${symbol}] Fetched chunk ${iteration + 1}: ${chunk.length} candles, earliest=${new Date(earliestTimestamp).toISOString()}, remaining=${Math.max(0, Math.ceil((currentEnd - startTime) / (60 * 1000)))} min`);
+    }
+
+    // Filter to ensure we only return candles within the requested range
+    const filtered = allCandles.filter(c => c.timestamp >= startTime && c.timestamp <= endTime);
+    
+    logger.info(`[${symbol}] Historical fetch complete: ${filtered.length} candles (${new Date(filtered[0]?.timestamp).toISOString()} to ${new Date(filtered[filtered.length - 1]?.timestamp).toISOString()})`);
+    
+    return filtered;
+  }
 }

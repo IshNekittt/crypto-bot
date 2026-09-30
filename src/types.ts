@@ -23,6 +23,7 @@ export enum StrategyState {
   CONFIRMATION = 'CONFIRMATION',
   ENTRY_STAGED = 'ENTRY_STAGED',
   IN_TRADE = 'IN_TRADE',
+  SNIPER_MODE = 'SNIPER_MODE',
 }
 
 export interface Candle {
@@ -157,6 +158,14 @@ export interface ZoneDetails {
   readonly timeframe: string;
   readonly direction: Direction;
   readonly timestamp: number;
+}
+
+export interface SniperZone {
+  readonly top: Decimal;
+  readonly bottom: Decimal;
+  readonly direction: Direction;
+  readonly scenarioId: string;
+  readonly scenarioName: string;
 }
 
 export interface IScenario {

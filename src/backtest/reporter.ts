@@ -123,15 +123,16 @@ export function generateReport(
     lines.push('');
   }
 
-  // ─── Chronological Trade Calendar (Last 30 Days) ───
+  // ─── Chronological Trade Calendar (Dynamic Days) ───
   if (trades.length > 0) {
     // Sort trades by entry time
     const sortedTrades = [...trades].sort((a, b) => a.entryTime - b.entryTime);
     
-    // Get the last 30 days of the test period
+    // Calculate actual days to show: min(30, totalDays of backtest)
+    const daysToShow = Math.min(30, totalDays);
     const periodEndMs = periodEnd.getTime();
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-    const startMs = periodEndMs - thirtyDaysMs;
+    const daysMs = daysToShow * 24 * 60 * 60 * 1000;
+    const startMs = periodEndMs - daysMs;
     
     // Group trades by date (UTC)
     const tradesByDate = new Map<string, TradeResult[]>();
@@ -146,9 +147,9 @@ export function generateReport(
       }
     }
     
-    // Generate last 30 days calendar
-    lines.push('🗓️ TRADE TIMELINE (Last 30 Days of Backtest) [Timezone: UTC]');
-    for (let i = 0; i < 30; i++) {
+    // Generate calendar for actual days
+    lines.push(`🗓️ TRADE TIMELINE (Last ${daysToShow} Days of Backtest) [Timezone: UTC]`);
+    for (let i = 0; i < daysToShow; i++) {
       const dateMs = periodEndMs - (i * 24 * 60 * 60 * 1000);
       const date = new Date(dateMs);
       const dateStr = date.toISOString().split('T')[0];

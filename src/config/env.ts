@@ -38,6 +38,10 @@ export interface BotConfig {
   readonly smcDisplacementMultiplier: string;
   readonly limitExpirationCandles: number;
   readonly smartEntryThresholdPct: string;
+  readonly breakevenRrTrigger: number;
+  readonly enableSniperMode: boolean;
+  readonly sniperDisplacementMultiplier?: string;
+  readonly backtestDays: number;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -223,6 +227,30 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   );
   const smartEntryThresholdPct = new Decimal(smartEntryThresholdPctRaw).div(100).toFixed(10);
 
+  const breakevenRrTrigger = parsePositiveNumber(
+    optionalEnv(env, 'BREAKEVEN_RR_TRIGGER') ?? '2',
+    'BREAKEVEN_RR_TRIGGER'
+  );
+  if (!Number.isInteger(breakevenRrTrigger)) {
+    throw new Error(`BREAKEVEN_RR_TRIGGER must be an integer, got: ${breakevenRrTrigger}`);
+  }
+
+  const enableSniperMode = (optionalEnv(env, 'ENABLE_SNIPER_MODE') ?? 'false').toLowerCase() === 'true';
+
+  const sniperDisplacementMultiplier = parseDecimalOrDefault(
+    optionalEnv(env, 'SNIPER_DISPLACEMENT_MULTIPLIER'),
+    '0.5',
+    'SNIPER_DISPLACEMENT_MULTIPLIER'
+  );
+
+  const backtestDays = parsePositiveNumber(
+    optionalEnv(env, 'BACKTEST_DAYS') ?? '60',
+    'BACKTEST_DAYS'
+  );
+  if (!Number.isInteger(backtestDays)) {
+    throw new Error(`BACKTEST_DAYS must be an integer, got: ${backtestDays}`);
+  }
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, 'BYBIT_API_KEY'),
@@ -255,5 +283,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     smcDisplacementMultiplier,
     limitExpirationCandles,
     smartEntryThresholdPct,
+    breakevenRrTrigger,
+    enableSniperMode,
+    sniperDisplacementMultiplier,
+    backtestDays,
   };
 }

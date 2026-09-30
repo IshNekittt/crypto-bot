@@ -34,6 +34,9 @@ const mockConfig: BotConfig = {
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
   smartEntryThresholdPct: '0.0015',
+    enableSniperMode: false,
+    backtestDays: 60,
+    breakevenRrTrigger: 2,
 };
 
 describe('Scenario11: Mitigation Block', () => {

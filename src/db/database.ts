@@ -26,6 +26,8 @@ export interface TradeRow {
   zone_timeframe: string | null;
   zone_direction: string | null;
   zone_timestamp: number | null;
+  order_type: string | null;
+  limit_price: string | null;
 }
 
 export interface SymbolStateRow {
@@ -67,6 +69,8 @@ export interface TradeRecord {
   readonly zone_timeframe: string | null;
   readonly zone_direction: string | null;
   readonly zone_timestamp: number | null;
+  readonly order_type: string | null;
+  readonly limit_price: string | null;
 }
 
 export class PostgresDatabase {
@@ -137,8 +141,14 @@ export class PostgresDatabase {
           zone_bottom NUMERIC(24, 8),
           zone_timeframe VARCHAR(10),
           zone_direction VARCHAR(10),
-          zone_timestamp BIGINT
+          zone_timestamp BIGINT,
+          order_type VARCHAR(10),
+          limit_price NUMERIC(24, 8)
         );
+
+        -- Add missing columns if they don't exist (for existing databases)
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS order_type VARCHAR(10);
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS limit_price NUMERIC(24, 8);
 
         CREATE TABLE IF NOT EXISTS symbol_state (
           symbol VARCHAR(20) PRIMARY KEY,
@@ -202,12 +212,14 @@ export class PostgresDatabase {
     zone_timeframe?: string | null;
     zone_direction?: string | null;
     zone_timestamp?: number | null;
+    order_type?: string | null;
+    limit_price?: string | null;
   }): Promise<string> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `INSERT INTO trades (symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        `INSERT INTO trades (symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price)
+         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          RETURNING id`,
         [
           input.symbol,
@@ -225,6 +237,8 @@ export class PostgresDatabase {
           input.zone_timeframe ?? null,
           input.zone_direction ?? null,
           input.zone_timestamp ?? null,
+          input.order_type ?? null,
+          input.limit_price ?? null,
         ],
       );
       return result.rows[0].id;

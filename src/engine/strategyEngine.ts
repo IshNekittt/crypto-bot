@@ -75,6 +75,9 @@ export class StrategyEngine {
   private mitigatedZones: MitigatedZone[] = [];
   // Cooldown after SL hit (4 hours = 16 * 15min candles)
   private cooldownUntil: number = 0;
+  // Sniper Mode: active zone waiting for 1m entry trigger (reserved for live engine implementation)
+  // @ts-expect-error - Reserved for live engine Sniper Mode implementation
+  private _activeSniperZone: { top: Decimal; bottom: Decimal; direction: 'BULLISH' | 'BEARISH'; scenarioId: string; scenarioName: string } | null = null;
 
   constructor(deps: StrategyEngineDeps) {
     this.symbol = deps.symbol;
@@ -241,27 +244,33 @@ export class StrategyEngine {
   }
 
   async handleTradeApproval(tradeId: string, approved: boolean): Promise<void> {
-    const handled = this.deps.pendingTradeManager.handleApproval(tradeId, approved);
-    if (!handled) {
-      logger.warn(`${this.symbol}: approval for unknown/expired trade ${tradeId}`);
-      return;
-    }
-
-    if (!approved) {
-      logger.info(`${this.symbol}: trade ${tradeId} rejected by user`);
+    const approvalResult = this.deps.pendingTradeManager.handleApproval(tradeId, approved);
+    if (!approvalResult.approved) {
+      if (approved) {
+        logger.info(`${this.symbol}: trade ${tradeId} rejected by user`);
+      } else {
+        logger.warn(`${this.symbol}: approval for unknown/expired trade ${tradeId}`);
+      }
       this.transition(StrategyState.SCANNING);
       return;
     }
 
-    // Approved - execute the trade
+    // Approved - execute the trade with dynamic order type
     if (!this.plan) {
       logger.error(`${this.symbol}: no plan for approved trade ${tradeId}`);
       this.transition(StrategyState.SCANNING);
       return;
     }
 
-    logger.info(`${this.symbol}: trade ${tradeId} approved, executing market order`);
-    const result = await this.deps.executionEngine.execute(this.plan);
+    // Create updated plan with dynamic order type (PositionPlan is readonly)
+    const updatedPlan: PositionPlan = {
+      ...this.plan,
+      orderType: approvalResult.orderType,
+      limitPrice: approvalResult.limitPrice ?? null,
+    };
+
+    logger.info(`${this.symbol}: trade ${tradeId} approved, executing ${approvalResult.orderType} order${approvalResult.limitPrice ? ` @ ${approvalResult.limitPrice}` : ''}`);
+    const result = await this.deps.executionEngine.execute(updatedPlan);
     if (!result.ok) {
       logger.error(`${this.symbol}: order execution failed after approval: ${result.reason}`);
       this.transition(StrategyState.SCANNING);
@@ -270,14 +279,16 @@ export class StrategyEngine {
 
     await this.deps.db.openTrade({
       symbol: this.symbol,
-      scenario_id: this.plan.scenarioId ?? null,
-      entry_price: this.plan.entryPrice,
-      sl_price: this.plan.stopLoss,
-      tp_price: this.plan.takeProfit,
-      qty: this.plan.qty,
-      reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
+      scenario_id: updatedPlan.scenarioId ?? null,
+      entry_price: updatedPlan.entryPrice,
+      sl_price: updatedPlan.stopLoss,
+      tp_price: updatedPlan.takeProfit,
+      qty: updatedPlan.qty,
+      reason: `Scenario ${updatedPlan.scenarioId ?? 'N/A'}`,
       opened_at: Date.now(),
-      side: this.plan.side,
+      side: updatedPlan.side,
+      order_type: updatedPlan.orderType,
+      limit_price: updatedPlan.limitPrice,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);
@@ -557,6 +568,8 @@ export class StrategyEngine {
       zone_timeframe: this.plan.zoneDetails?.timeframe ?? null,
       zone_direction: this.plan.zoneDetails?.direction ?? null,
       zone_timestamp: this.plan.zoneDetails?.timestamp ?? null,
+      order_type: this.plan.orderType,
+      limit_price: this.plan.limitPrice,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);
@@ -576,6 +589,7 @@ export class StrategyEngine {
       result.reason,
       this.plan.side,
       this.plan.qty,
+      result.levels.entry  // idealEntry for dynamic Market/Limit decision at approval time
     );
 
     if (!queued) {

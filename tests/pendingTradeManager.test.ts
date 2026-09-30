@@ -110,7 +110,7 @@ describe('PendingTradeManager', () => {
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
       const result = manager.handleApproval(tradeId, true);
 
-      expect(result).toBe(true);
+      expect(result.approved).toBe(true);
       await expect(promise).resolves.toBe(true);
       expect(manager.getPendingCount()).toBe(0);
     });
@@ -123,17 +123,17 @@ describe('PendingTradeManager', () => {
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
       const result = manager.handleApproval(tradeId, false);
 
-      expect(result).toBe(true);
+      expect(result.approved).toBe(false);
       await expect(promise).resolves.toBe(false);
       expect(manager.getPendingCount()).toBe(0);
     });
 
-    it('should return false for unknown trade ID', () => {
+    it('should return approved: false for unknown trade ID', () => {
       const result = manager.handleApproval('UNKNOWN_ID', true);
-      expect(result).toBe(false);
+      expect(result.approved).toBe(false);
     });
 
-    it('should return false for already processed trade', async () => {
+    it('should return approved: false for already processed trade', async () => {
       const promise = manager.queueTrade(
         'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
       );
@@ -143,7 +143,7 @@ describe('PendingTradeManager', () => {
       
       // Try to approve again
       const result = manager.handleApproval(tradeId, true);
-      expect(result).toBe(false);
+      expect(result.approved).toBe(false);
       
       await promise;
     });
@@ -222,17 +222,18 @@ describe('PendingTradeManager', () => {
 
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
       
-      // Price is 100.21 (0.21% above entry 100) - exceeds 0.2% threshold
-      // Should reject because slippage > 0.2%
+      // Price is 100.21 (0.21% above entry 100) - exceeds 0.15% threshold
+      // Should return Limit order instead of rejection
       const result = manager.handleApproval(tradeId, true);
 
-      expect(result).toBe(true); // handleApproval returns true (trade handled)
-      await expect(promise).resolves.toBe(false); // but resolves to false (rejected)
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Limit');
+      await expect(promise).resolves.toBe(true);
       expect(manager.getPendingCount()).toBe(0);
     });
 
-    it('should ACCEPT approval when price moved <= 0.2% towards TP (Long)', async () => {
-      // Update price provider to return price within threshold
+    it('should return Limit order when price moved > 0.15% towards TP (Long)', async () => {
+      // Update price provider to return price just outside threshold
       manager.setPriceProvider(() => '100.19'); // 0.19% above entry
       
       const promise = manager.queueTrade(
@@ -242,13 +243,14 @@ describe('PendingTradeManager', () => {
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
       const result = manager.handleApproval(tradeId, true);
 
-      expect(result).toBe(true);
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Limit');
       await expect(promise).resolves.toBe(true);
       expect(manager.getPendingCount()).toBe(0);
     });
 
-    it('should REJECT approval when price moved > 0.2% towards TP (Short)', async () => {
-      // For short: entry=100, tp=97, current=99.79 (0.21% below entry) - exceeds threshold
+    it('should return Limit order when price moved > 0.15% towards TP (Short)', async () => {
+      // For short: entry=100, tp=97, current=99.79 (0.21% below entry) - exceeds 0.15% threshold
       manager.setPriceProvider(() => '99.79'); // 0.21% below entry
       
       const promise = manager.queueTrade(
@@ -258,8 +260,9 @@ describe('PendingTradeManager', () => {
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
       const result = manager.handleApproval(tradeId, true);
 
-      expect(result).toBe(true);
-      await expect(promise).resolves.toBe(false);
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Limit');
+      await expect(promise).resolves.toBe(true);
       expect(manager.getPendingCount()).toBe(0);
     });
 
@@ -274,7 +277,7 @@ describe('PendingTradeManager', () => {
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
       const result = manager.handleApproval(tradeId, true);
 
-      expect(result).toBe(true);
+      expect(result.approved).toBe(false);
       await expect(promise).resolves.toBe(false);
       expect(manager.getPendingCount()).toBe(0);
     });
@@ -290,11 +293,107 @@ describe('PendingTradeManager', () => {
       const tradeId = Array.from((managerNoPrice as any).pendingTrades.keys())[0] as string;
       const result = managerNoPrice.handleApproval(tradeId, true);
 
-      expect(result).toBe(true);
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Market');
       await expect(promise).resolves.toBe(true);
       expect(managerNoPrice.getPendingCount()).toBe(0);
       
       managerNoPrice.cancelAll();
+    });
+  });
+
+  describe('Dynamic Approval (Market vs Limit based on price deviation)', () => {
+    const createManagerWithPrice = (currentPrice: string) => {
+      const mgr = new PendingTradeManager(mockNotifier, 5);
+      mgr.setPriceProvider(() => currentPrice);
+      return mgr;
+    };
+
+    it('should return Market order when livePrice deviation < 0.15% (Long)', async () => {
+      // idealEntry=100, TP=103, currentPrice=100.10 (0.10% deviation < 0.15%)
+      const manager = createManagerWithPrice('100.10');
+      
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
+    it('should return Limit order when livePrice deviation > 0.15% (Long)', async () => {
+      // idealEntry=100, TP=103, currentPrice=100.20 (0.20% deviation > 0.15%)
+      const manager = createManagerWithPrice('100.20');
+      
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Limit');
+      expect(result.limitPrice).toBe('100.00000000'); // Should use idealEntry as limit price
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
+    it('should return Market order when livePrice deviation < 0.15% (Short)', async () => {
+      // idealEntry=100, TP=97, currentPrice=99.90 (0.10% deviation < 0.15%)
+      const manager = createManagerWithPrice('99.90');
+      
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '101', '97', 1, 'Test', 'Sell', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
+    it('should return Limit order when livePrice deviation > 0.15% (Short)', async () => {
+      // idealEntry=100, TP=97, currentPrice=99.79 (0.21% deviation > 0.15%)
+      const manager = createManagerWithPrice('99.79');
+      
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '101', '97', 1, 'Test', 'Sell', '10'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Limit');
+      expect(result.limitPrice).toBe('100.00000000');
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
+    it('should use idealEntry as limitPrice for Limit orders', async () => {
+      const manager = createManagerWithPrice('100.50'); // Far from ideal entry
+      
+      const promise = manager.queueTrade(
+        'BTCUSDT', '50000', '49900', '50300', 1, 'Test', 'Buy', '0.1'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Limit');
+      expect(result.limitPrice).toBe('50000.00000000'); // idealEntry used as limit price
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
     });
   });
 });

@@ -22,6 +22,20 @@
 
 **Invariant**: All financial values (prices, qty, PnL, balance) are **strings in DB**, **`Decimal` in memory**, **strings on wire**. Never `number`.
 
+### 1.1 V5 Matrix — Sniper Mode (Two-Loop Architecture)
+
+| Layer | Technology | Description |
+|-------|------------|-------------|
+| **Radar (LTF)** | 15m/4H candles | Scans for macro POI (Order Blocks, FVGs, HTF Sweeps, SMS) via existing 11 scenarios |
+| **Sniper (1m)** | 1m candles | Once POI found, switches to `SNIPER_MODE` state; waits for 1m CHoCH inside the zone |
+| **Execution** | Smart Pullback | On 1m CHoCH: `idealEntry = midpoint of CHoCH impulse`; SL under 1m extreme; uses existing Market/Limit logic |
+
+**State Machine Extension** (`types.ts:26`):
+- `StrategyState.SNIPER_MODE` — new state between `SCANNING` and `ENTRY_STAGED`
+- `activeSniperZone` in `StrategyEngine` (live) and `BacktestState` (backtest): `{ top, bottom, direction, scenarioId, scenarioName }`
+
+**Invariant**: Only scenarios 1, 5, 6, 10 (HTF Continuation, HTF Sweep, SMS, Breaker) can trigger Sniper Mode — they produce high-probability zones with clear direction.
+
 ---
 
 ## 2. PROJECT STRUCTURE
@@ -156,6 +170,27 @@ this.bot.use(async (ctx, next) => {
    - If price already **≥ TP** → **REJECT**.
 4. On approve: `ExecutionEngine.execute()` → `db.openTrade()` → `IN_TRADE`.
 
+### 4.4 Dynamic Approval (Anti-Slippage) — **NEW v2026-09-30**
+
+**Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". The old logic always sent a Market order on approval, causing slippage.
+
+**Solution**: Order type (Market vs Limit) is decided **AT APPROVAL TIME** by comparing live price vs `idealEntry` (zone equilibrium from scenario geometry):
+
+| Condition | Order Type | Limit Price |
+|-----------|------------|-------------|
+| `|idealEntry - livePrice| / idealEntry ≤ 0.15%` | **Market** (IOC) | — |
+| `|idealEntry - livePrice| / idealEntry > 0.15%` | **Limit** (GTC) | `idealEntry` |
+
+**Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
+
+**Implementation** (`src/engine/pendingTradeManager.ts`):
+- `queueTrade()` stores `idealEntry` alongside setup.
+- `handleApproval()` fetches live price via `priceProvider()` (injected from `StrategyEngine` → `candleFeed.getCurrentLivePrice()`).
+- Returns `{ approved: true, orderType: 'Market'|'Limit', limitPrice?: string }`.
+- **Slippage Guard still runs**: If live price ≥ TP → reject; if > 0.2% toward TP → reject.
+
+**Invariant**: Decision is **purely at approval moment** — no pre-commitment to order type at signal time.
+
 ---
 
 ## 5. RISK MANAGEMENT — `src/risk/riskManager.ts`
@@ -170,6 +205,7 @@ this.bot.use(async (ctx, next) => {
 | **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop is too tight     | `LEVERAGE` from config                        |
 | **No Double Rounding** | Entry/SL passed directly to `formatPrice()` — no intermediate `roundDownToStep()`     | Instrument `tickSize`                         |
 | **TP From Scenario** | Takes pre-calculated `takeProfitRaw` from `BaseScenario.calculateLevels()` — no RR recalc | N/A                                           |
+| **Breakeven**        | When price reaches `BREAKEVEN_RR_TRIGGER` × risk distance, SL moves to entry price    | `BREAKEVEN_RR_TRIGGER` (default 2)            |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
 
@@ -185,7 +221,21 @@ All three execution pipeline fixes applied in single pass:
 
 4. **TP From Scenario** (`riskManager.ts:131`): Removed internal `TAKE_PROFIT_RR_RATIO` recalculation. Takes `input.takeProfitRaw` (already calculated by `BaseScenario.calculateLevels()` with correct geometry). RiskManager only formats via `formatPrice()`.
 
----
+### 5.2 Breakeven Protection (v2026-09-30)
+
+**Logic** (`src/backtest/executionSimulator.ts:532-560`, `src/engine/strategyEngine.ts`):
+- Trigger: Price moves in favor by `BREAKEVEN_RR_TRIGGER` × risk distance (e.g., 2R)
+- Action: Stop Loss permanently moved to entry price
+- Backtester: Implemented in `checkAndCloseTrade()` — updates `openTrade.slPrice` in state when breakeven hit and trade continues
+- Live: To be implemented in `StrategyEngine` position management
+
+**Config**: `BREAKEVEN_RR_TRIGGER=2` (in `.env`, integer R-multiples)
+
+**Behavior**: 
+- Long: SL → entry when `high ≥ entry + (entry - SL) × trigger`
+- Short: SL → entry when `low ≤ entry - (SL - entry) × trigger`
+- Once moved, SL stays at entry for remainder of trade
+- If price retraces to entry → closes at ~0 PnL (minus fees)
 
 ## 6. SMC MATHEMATICS — `src/smc/patternRecognizer.ts`
 
@@ -215,7 +265,28 @@ All three execution pipeline fixes applied in single pass:
 
 Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 
-### 6.4 Macro Context (Bootstrap Only, ~5-10ms)
+### 6.5 V5 Sniper Mode (1m Execution) — **NEW v2026-09-30**
+
+**Architecture**: Two-loop system — Radar (15m/4H) scans for macro POI, Sniper (1m) waits for precise entry inside zone.
+
+| Phase | Timeframe | Action |
+|-------|-----------|--------|
+| **Radar** | 15m/4H | Scenarios 1, 5, 6, 10 evaluate 15m candles; on valid zone → store in `activeSniperZone`, state → `SNIPER_MODE` |
+| **Sniper** | 1m | Each 1m candle: check zone invalidation (price breaks through zone); run `detectStructureBreaks()` on last 200 1m candles |
+| **Trigger** | 1m | Fresh CHoCH in zone direction (after zone entry) with displacement ≥ 1.5 ATR → calculate `idealEntry` = midpoint of CHoCH impulse |
+| **Execute** | 1m | Smart Pullback: Market if `|idealEntry - currentPrice|/idealEntry ≤ 0.15%`, else Limit @ `idealEntry` |
+
+**State Machine** (`types.ts:26`):
+- `StrategyState.SNIPER_MODE` — between `SCANNING` and `ENTRY_STAGED`
+- `activeSniperZone` in `StrategyEngine` (live) and `BacktestState` (backtest): `{ top, bottom, direction, scenarioId, scenarioName }`
+
+**Zone Invalidation**: Long → `candle.low < zone.bottom`; Short → `candle.high > zone.top` → reset to `SCANNING`.
+
+**Backtester** (`src/backtest/run.ts`): Main loop iterates 1m candles; 15m candles synthesized via timestamp sync; `ScenarioRouter` evaluates on 15m closes only.
+
+---
+
+### 6.6 Macro Context (Bootstrap Only, ~5-10ms)
 
 - **Loaded ONCE** at startup (single `PatternRecognizer` shared across engines).
 - **1W/1D candles** (1000 each) → **linear O(N) passes only**:

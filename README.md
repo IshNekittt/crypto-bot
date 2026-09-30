@@ -7,7 +7,7 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-231%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Tests](https://img.shields.io/badge/Tests-240%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
@@ -18,16 +18,17 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ## 🎯 Features at a Glance
 
-| Category             | Capability                                                                                                                                         |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **11 SMC Scenarios** | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block    |
-| **Risk Management**  | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement                        |
-| **Infrastructure**   | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                              |
-| **PnL Accuracy**     | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                        |
-| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                         |
-| **News Filter**      | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via ForexFactory calendar, auto-refreshed daily at 00:00 UTC |
-| **Telegram UI**      | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                            |
-| **Security**         | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                                |
+| Category             | Capability                                                                                                                                                  |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **11 SMC Scenarios** | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block             |
+| **V5 Sniper Mode**   | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                      |
+| **Risk Management**  | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement, **Breakeven (SL→entry at 2R)** |
+| **Infrastructure**   | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                                       |
+| **PnL Accuracy**     | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                                 |
+| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                                  |
+| **News Filter**      | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via ForexFactory calendar, auto-refreshed daily at 00:00 UTC          |
+| **Telegram UI**      | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                                     |
+| **Security**         | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                                         |
 
 ---
 
@@ -55,21 +56,21 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 ### Decision Logic (`src/engine/strategyEngine.ts`)
 
 ```typescript
-const idealEntry = new Decimal(result.levels.entry);      // Zone equilibrium (e.g., OB 0.5, FVG 0.5)
-const currentPrice = new Decimal(lastCandle.close);       // Signal candle close
+const idealEntry = new Decimal(result.levels.entry); // Zone equilibrium (e.g., OB 0.5, FVG 0.5)
+const currentPrice = new Decimal(lastCandle.close); // Signal candle close
 const smartThreshold = new Decimal(config.smartEntryThresholdPct); // 0.0015 = 0.15%
 
 const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
 const useMarketOrder = priceDiffPct.lte(smartThreshold);
 
-const orderType = useMarketOrder ? 'Market' : 'Limit';
+const orderType = useMarketOrder ? "Market" : "Limit";
 const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 ```
 
-| Condition | Order Type | Price |
-|-----------|------------|-------|
-| `|idealEntry - currentPrice| / idealEntry ≤ 0.15%` | **Market** (IOC) | — |
-| `|idealEntry - currentPrice| / idealEntry > 0.15%` | **Limit** (GTC) | `idealEntry` |
+| Condition | Order Type                | Price                 |
+| --------- | ------------------------- | --------------------- | ---------------- | ------------ |
+| `         | idealEntry - currentPrice | / idealEntry ≤ 0.15%` | **Market** (IOC) | —            |
+| `         | idealEntry - currentPrice | / idealEntry > 0.15%` | **Limit** (GTC)  | `idealEntry` |
 
 **Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
 
@@ -78,6 +79,7 @@ const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 **Expiration**: `LIMIT_EXPIRATION_CANDLES=6` (default 6 × 15m = 1.5 hours).
 
 **ReconciliationLoop** (`src/bootstrap/reconciliation.ts`): Every 10 min, calls `getOpenOrders(symbol)` → for each active Limit order:
+
 - If `orderAge > LIMIT_EXPIRATION_CANDLES × LTF_TIMEFRAME` → **cancel** on exchange (`cancelOrder`).
 - Log: `Cancelled expired LIMIT order ${orderId} (age: X min, limit: 6 candles)`.
 
@@ -101,6 +103,7 @@ SCANNING → [Limit placed] → PENDING (limitPrice, placedAt, candlesWaited=0)
 ```
 
 **Key points**:
+
 - Zone added to `mitigatedZones` **immediately on Limit placement** (not on fill) — prevents re-entry before fill.
 - Fill detection: current candle `low ≤ limitPrice` (Long) / `high ≥ limitPrice` (Short).
 - Filled at exact `limitPrice` (not candle close) — realistic simulation.
@@ -138,6 +141,7 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 **Solution**: Centralized `BaseScenario.calculateLevels()` — single source of truth for all bidirectional scenarios (S1, S5, S6, S10, S11).
 
 **Evolution v2026-09-20 — Safety Hardening**:
+
 1. **Minimum offset protection**: ATR can be near-zero in low volatility → zero offset → division by zero in RiskManager. Fixed by `offset = max(atr * 0.5, entry * 0.1%)`.
 2. **Inverted zone defense**: `zone.top` may be < `zone.bottom`. Now uses `min/max` of **all three** (top, bottom, entry) for SL calculation.
 
@@ -155,7 +159,7 @@ public calculateLevels(
   const minOffset = entry.mul(new Decimal('0.001'));
   const atrOffset = atr.mul(offsetMultiplier);
   const offset = Decimal.max(atrOffset, minOffset);
-  
+
   // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention
   // Use min/max of ALL THREE (top, bottom, entry) to handle inverted zones safely
   // BULLISH (Long): SL must be BELOW entry. Use min(zone.top, zone.bottom, entry) - offset
@@ -243,15 +247,16 @@ or `None for today` / error state.
 
 **Implementation in `runBacktestForSymbol()`**:
 
-| Component | Detail |
-|-----------|--------|
-| **Tracking** | `currentDayUtc`, `currentWeekUtc`, running ATH/ATL |
-| **Daily Update** | On new day (00:00 UTC): PDH/PDL from yesterday's **closed** candles (`candlesLtf.slice(0, i)`) |
-| **Weekly Update** | On Monday: PWH/PWL from last 7 days of **closed** candles |
-| **Atomic Update** | `recognizer.setMacroContext(symbol, {...})` — no lookahead! |
-| **Sliding Windows** | 96 candles (15m) = 24h for daily; 96×7 = 1 week for weekly |
+| Component           | Detail                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| **Tracking**        | `currentDayUtc`, `currentWeekUtc`, running ATH/ATL                                             |
+| **Daily Update**    | On new day (00:00 UTC): PDH/PDL from yesterday's **closed** candles (`candlesLtf.slice(0, i)`) |
+| **Weekly Update**   | On Monday: PWH/PWL from last 7 days of **closed** candles                                      |
+| **Atomic Update**   | `recognizer.setMacroContext(symbol, {...})` — no lookahead!                                    |
+| **Sliding Windows** | 96 candles (15m) = 24h for daily; 96×7 = 1 week for weekly                                     |
 
 **Key Changes**:
+
 - ❌ **Removed**: All `initializeMacroContext()` calls before backtest loop (both CSV and online modes)
 - ✅ **Added**: `PatternRecognizer.setMacroContext()` / `getMacroContext()` for atomic cache updates
 - ✅ **Strict causality**: Only uses data strictly before current candle (`slice(0, i)`)
@@ -266,21 +271,27 @@ or `None for today` / error state.
 
 **Solution**: Two-layer fix at DevOps + Code level:
 
-| Layer | Fix | Why |
-|-------|-----|-----|
-| **DevOps (Dockerfile)** | `RUN apk add --no-cache tzdata` in runner stage | Installs full IANA tz database; luxon can now resolve `America/New_York` with correct DST (EDT/EST) |
-| **Code (patternRecognizer.ts)** | `DateTime.fromMillis(ts, { zone: 'utc' }).setZone('America/New_York')` | Explicit UTC → NY conversion; fails fast if tzdata missing |
+| Layer                           | Fix                                                                    | Why                                                                                                 |
+| ------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **DevOps (Dockerfile)**         | `RUN apk add --no-cache tzdata` in runner stage                        | Installs full IANA tz database; luxon can now resolve `America/New_York` with correct DST (EDT/EST) |
+| **Code (patternRecognizer.ts)** | `DateTime.fromMillis(ts, { zone: 'utc' }).setZone('America/New_York')` | Explicit UTC → NY conversion; fails fast if tzdata missing                                          |
 
 **Timezone Sanity Check (Startup Log)** — `src/index.ts`:
+
 ```typescript
 const nowMs = Date.now();
-const utcTime = DateTime.fromMillis(nowMs).toUTC().toFormat('yyyy-MM-dd HH:mm:ss');
-const nyTime = DateTime.fromMillis(nowMs).setZone('America/New_York');
-const nyTimeStr = nyTime.toFormat('yyyy-MM-dd HH:mm:ss ZZZZ');
-logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): ${nyTimeStr} | NY Hour: ${nyTime.hour}`);
+const utcTime = DateTime.fromMillis(nowMs)
+  .toUTC()
+  .toFormat("yyyy-MM-dd HH:mm:ss");
+const nyTime = DateTime.fromMillis(nowMs).setZone("America/New_York");
+const nyTimeStr = nyTime.toFormat("yyyy-MM-dd HH:mm:ss ZZZZ");
+logger.info(
+  `[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): ${nyTimeStr} | NY Hour: ${nyTime.hour}`,
+);
 ```
 
 **Example output**:
+
 ```
 [Timezone Sanity Check] Server UTC: 2026-09-22 21:30:00 | Wall Street (NY): 2026-09-22 17:30:00 EDT | NY Hour: 17
 ```
@@ -294,6 +305,7 @@ logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): 
 **File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
 
 **Core Logic**: Mitigation Block is a reversal pattern that forms after a Failed Swing (SMS):
+
 1. Price attempts a higher high (bearish SMS) / lower low (bullish SMS) but fails
 2. Price reverses with a CHoCH in opposite direction (≥1.5 ATR displacement)
 3. The Order Block that formed the failed swing extreme becomes the Mitigation Block
@@ -301,18 +313,19 @@ logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): 
 
 **Critical Implementation Details (v2026-09-21 — Critical Bug Fixes):**
 
-| Aspect | Implementation | Why Critical |
-|--------|---------------|--------------|
-| **SMS Selection** | `structures.filter(s => s.type === 'SMS')` → `smsList[smsList.length-1]` | `.find()` returns OLDEST; must take NEWEST SMS |
-| **CHoCH Selection** | `structures.filter(s => ...)` → `validChochs[validChochs.length-1]` | Must take NEWEST CHoCH after the chosen SMS |
-| **MB Selection** | `zones.filter(...)` → `mbObs[mbObs.length-1]` | Must take NEWEST OB before SMS (formed the failed swing) |
-| **Retest Logic** | **Current 15m candle ONLY** (`candles15m[candles15m.length-1]`) | No historical search — trade triggers NOW |
-| **Time Window** | `0 < timeSinceChoch ≤ 12h` | Blocks stale setups; 12h max hold |
-| **Retest Condition** | Current candle wicks touch MB zone (`high ≥ mbBottom && low ≤ mbTop`) AND closes inside zone in trade direction | Confirms institutional interest at MB |
-| **Premium/Discount** | Dynamic equilibrium from `SMS price → CHoCH price` impulse | Long = Discount (below eq), Short = Premium (above eq) |
-| **Rejection Stats** | `NoSms`, `InvalidSmsPattern`, `NoChoch`, `Displacement`, `NoMB`, `NoRetest`, `PremDisc` | Full observability |
+| Aspect               | Implementation                                                                                                  | Why Critical                                             |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| **SMS Selection**    | `structures.filter(s => s.type === 'SMS')` → `smsList[smsList.length-1]`                                        | `.find()` returns OLDEST; must take NEWEST SMS           |
+| **CHoCH Selection**  | `structures.filter(s => ...)` → `validChochs[validChochs.length-1]`                                             | Must take NEWEST CHoCH after the chosen SMS              |
+| **MB Selection**     | `zones.filter(...)` → `mbObs[mbObs.length-1]`                                                                   | Must take NEWEST OB before SMS (formed the failed swing) |
+| **Retest Logic**     | **Current 15m candle ONLY** (`candles15m[candles15m.length-1]`)                                                 | No historical search — trade triggers NOW                |
+| **Time Window**      | `0 < timeSinceChoch ≤ 12h`                                                                                      | Blocks stale setups; 12h max hold                        |
+| **Retest Condition** | Current candle wicks touch MB zone (`high ≥ mbBottom && low ≤ mbTop`) AND closes inside zone in trade direction | Confirms institutional interest at MB                    |
+| **Premium/Discount** | Dynamic equilibrium from `SMS price → CHoCH price` impulse                                                      | Long = Discount (below eq), Short = Premium (above eq)   |
+| **Rejection Stats**  | `NoSms`, `InvalidSmsPattern`, `NoChoch`, `Displacement`, `NoMB`, `NoRetest`, `PremDisc`                         | Full observability                                       |
 
 **Key Invariants:**
+
 - `structures` and `zones` arrays are timestamp-ascending (oldest first)
 - **Always use `[array.length-1]` for "newest"** — never `[0]` or `.find()`
 - Retest is **current candle only** — no historical search
@@ -327,13 +340,13 @@ logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): 
 
 **Solution**: **mitigatedStructures** tracking — structures (SMS, CHoCH, BOS) that have been traded and should never be re-used.
 
-| Component | Implementation |
-|-----------|----------------|
-| **BacktestState** | Added `mitigatedStructures: MitigatedStructure[]` |
-| **MitigatedStructure** | `{ type: 'SMS' | 'CHoCH' | 'BOS', timestamp: number, price: string, direction: 'BULLISH' | 'BEARISH' }` |
-| **On trade close** | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures` |
-| **ScenarioRouter** | Filters `patternData.structures` via `filterMitigatedStructures()` |
-| **Scenarios 6 & 11** | Call `setStructureDetails()` with trigger CHoCH |
+| Component              | Implementation                                                         |
+| ---------------------- | ---------------------------------------------------------------------- | ------- | ------------------------------------------------------------- | ------------ |
+| **BacktestState**      | Added `mitigatedStructures: MitigatedStructure[]`                      |
+| **MitigatedStructure** | `{ type: 'SMS'                                                         | 'CHoCH' | 'BOS', timestamp: number, price: string, direction: 'BULLISH' | 'BEARISH' }` |
+| **On trade close**     | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures` |
+| **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()`     |
+| **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                        |
 
 **Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
 
@@ -344,6 +357,7 @@ logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): 
 **Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
 
 **Fix** (`checkAndCloseTrade` in `executionSimulator.ts`):
+
 ```typescript
 // CRITICAL: Check SL FIRST - if both hit same candle, it's a LOSS (wick hit SL first)
 const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
@@ -352,13 +366,13 @@ const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
 // SL checked FIRST
 if (hitSL) {
   exitPrice = trade.slPrice;
-  closedBy = 'SL';
+  closedBy = "SL";
 } else if (hitTP) {
   exitPrice = trade.tpPrice;
-  closedBy = 'TP';
+  closedBy = "TP";
 }
 // If both hit same candle → LOSS (BOTH)
-if (hitSL && hitTP) closedBy = 'BOTH';
+if (hitSL && hitTP) closedBy = "BOTH";
 ```
 
 **Rule**: On same-candle SL+TP hit → ALWAYS treat as LOSS (conservative). This eliminates the "20 wins in a row every 15 min" artifact.
@@ -370,6 +384,7 @@ if (hitSL && hitTP) closedBy = 'BOTH';
 **Problem**: `mitigatedZones` was only updated on trade CLOSE. Bot would enter, close, then re-enter same zone because the zone wasn't "burned" until after close.
 
 **Fix** (`openTrade` in `executionSimulator.ts`):
+
 ```typescript
 // Add zone to mitigatedZones to prevent re-entry on same zone
 mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
@@ -410,6 +425,7 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 
 **Rule**: Cooldown = `COOLDOWN_CANDLES` candles (default 16) ONLY after LOSS. WIN = no cooldown, ride the trend.
 **Examples**:
+
 - `LTF_TIMEFRAME=15`, `COOLDOWN_CANDLES=16` → 4 hours (default)
 - `LTF_TIMEFRAME=5`, `COOLDOWN_CANDLES=16` → 1h 20min
 - `LTF_TIMEFRAME=60`, `COOLDOWN_CANDLES=16` → 16 hours
@@ -421,7 +437,9 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 Added two new sections to backtest report (`reporter.ts`):
 
 ### 🗓️ TRADE TIMELINE (Last 30 Days) [Timezone: UTC]
+
 Daily calendar with UTC timestamps:
+
 ```
 [2026-09-04] ✅ 10 trades | Daily PnL: +$4138.13
   ↳ 07:45:00 UTC - Scenario 6 (WIN: +$60.00)
@@ -429,7 +447,9 @@ Daily calendar with UTC timestamps:
 ```
 
 ### 🔍 DETAILED RECENT TRADES (Last 5 trades)
+
 Full details with exact UTC timestamps:
+
 ```
 ↳ ETHUSDT | Scenario 6 (SMS) | WIN
    Entry: 2026-05-23 06:30:00 UTC | Exit: 2026-05-23 06:45:00 UTC
@@ -438,6 +458,7 @@ Full details with exact UTC timestamps:
 ```
 
 ### ⏳ DRY SPELLS
+
 Max consecutive days without trades, periods >3/5/7 days.
 
 All timestamps in **UTC** for cross-referencing with live logs.
@@ -465,13 +486,14 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 ### Understanding Trading Modes: DEMO_TRADING vs TESTNET
 
-| Mode | `DEMO_TRADING` | `TESTNET` | Use Case |
-|------|----------------|-----------|----------|
-| **Demo Trading** | `true` | `false` (ignored) | **Production-like** — real market data, virtual balance, no real money. Recommended for live testing. |
-| **Testnet** | `false` | `true` | Legacy Bybit testnet — separate environment, may have different liquidity. |
-| **Mainnet** | `false` | `false` | **Real money** — only when you're confident. |
+| Mode             | `DEMO_TRADING` | `TESTNET`         | Use Case                                                                                              |
+| ---------------- | -------------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
+| **Demo Trading** | `true`         | `false` (ignored) | **Production-like** — real market data, virtual balance, no real money. Recommended for live testing. |
+| **Testnet**      | `false`        | `true`            | Legacy Bybit testnet — separate environment, may have different liquidity.                            |
+| **Mainnet**      | `false`        | `false`           | **Real money** — only when you're confident.                                                          |
 
 > ⚠️ **Critical**: `DEMO_TRADING=true` forces `TESTNET=false`. They cannot both be true.
+>
 > - **Demo Trading** uses your mainnet API keys but routes to Bybit's demo environment (virtual funds, real market data).
 > - **Testnet** requires separate testnet API keys from `testnet.bybit.com`.
 
@@ -515,6 +537,7 @@ docker compose up -d
 ```
 
 **Why no volumes?**
+
 - Database = Supabase (external, managed PostgreSQL)
 - Logs = stdout/stderr (captured by Docker/Render)
 - Config = `.env` file (mounted via `--env-file` or Render dashboard)
@@ -524,39 +547,42 @@ docker compose up -d
 
 ## ⚙️ Environment Variables
 
-| Variable                           | Required |          Default          | Description                                      |
-| ---------------------------------- | :------: | :-----------------------: | ------------------------------------------------ |
-| **BYBIT_API_KEY**                  |    ✅    |             —             | Bybit API Key                                    |
-| **BYBIT_API_SECRET**               |    ✅    |             —             | Bybit API Secret                                 |
-| **SYMBOLS**                        |    ✅    |             —             | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`       |
-| **DATABASE_URL**                   |    ✅    |             —             | Supabase Direct Connection string                |
-| **TELEGRAM_BOT_TOKEN**             |    ✅    |             —             | BotFather token                                  |
-| **TELEGRAM_CHAT_ID**               |    ✅    |             —             | Your numeric chat ID (security)                  |
-| **DEMO_TRADING**                   |          |          `true`           | `true` = Demo, `false` = Mainnet                 |
-| **TESTNET**                        |          |          `false`          | Ignored if `DEMO_TRADING=true`                   |
-| **RISK_PERCENT**                   |          |            `2`            | Base risk per trade (%)                          |
-| **REDUCED_RISK_PERCENT**           |          |            `1`            | Risk after 3 consecutive losses (%)              |
-| **LEVERAGE**                       |          |           `10`            | Isolated margin leverage                         |
-| **AUTO_TRADING**                   |          |          `false`          | `true` = auto-execute, `false` = manual approval |
-| **TRADE_APPROVAL_TIMEOUT_MINUTES** |          |            `5`            | Approval window for manual trades                |
-| **HISTORY_CANDLES**                |          |           `200`           | 15m/4H history (max 1000)                        |
-| **MACRO_CANDLES**                  |          |          `1000`           | 1W/1D macro context (max 1000)                   |
-| **LTF_TIMEFRAME**                  |          |           `15`            | Lower timeframe (15m)                            |
-| **HTF_TIMEFRAME**                  |          |           `240`           | Higher timeframe (4H)                            |
-| **ENABLE_LIVE_TEST_ORDERS**        |          |          `false`          | Enable `/test_live_order` (real Demo orders)     |
-| **ACTIVE_SCENARIOS**               |          |          `1-11`           | Comma-separated: `1,2,3,5,7`                     |
-| **LOG_LEVEL**                      |          |          `info`           | `debug`, `info`, `warn`, `error`                 |
-| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups      |
-| **ENABLE_FUNDING_MONITOR**         |          |          `false`          | Enable funding rate monitoring                   |
-| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates             |
-| **FUNDING_ALERT_THRESHOLD**        |          |           `0.0`           | Alert when funding rate ≤ this value             |
-| **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value     |
-| **SCENARIOS_<SYMBOL>**             |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol. |
+| Variable                           | Required |          Default          | Description                                                                                                           |
+| ---------------------------------- | :------: | :-----------------------: | --------------------------------------------------------------------------------------------------------------------- |
+| **BYBIT_API_KEY**                  |    ✅    |             —             | Bybit API Key                                                                                                         |
+| **BYBIT_API_SECRET**               |    ✅    |             —             | Bybit API Secret                                                                                                      |
+| **SYMBOLS**                        |    ✅    |             —             | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`                                                                            |
+| **DATABASE_URL**                   |    ✅    |             —             | Supabase Direct Connection string                                                                                     |
+| **TELEGRAM_BOT_TOKEN**             |    ✅    |             —             | BotFather token                                                                                                       |
+| **TELEGRAM_CHAT_ID**               |    ✅    |             —             | Your numeric chat ID (security)                                                                                       |
+| **DEMO_TRADING**                   |          |          `true`           | `true` = Demo, `false` = Mainnet                                                                                      |
+| **TESTNET**                        |          |          `false`          | Ignored if `DEMO_TRADING=true`                                                                                        |
+| **RISK_PERCENT**                   |          |            `2`            | Base risk per trade (%)                                                                                               |
+| **REDUCED_RISK_PERCENT**           |          |            `1`            | Risk after 3 consecutive losses (%)                                                                                   |
+| **LEVERAGE**                       |          |           `10`            | Isolated margin leverage                                                                                              |
+| **AUTO_TRADING**                   |          |          `false`          | `true` = auto-execute, `false` = manual approval                                                                      |
+| **TRADE_APPROVAL_TIMEOUT_MINUTES** |          |            `5`            | Approval window for manual trades                                                                                     |
+| **HISTORY_CANDLES**                |          |           `200`           | 15m/4H history (max 1000)                                                                                             |
+| **MACRO_CANDLES**                  |          |          `1000`           | 1W/1D macro context (max 1000)                                                                                        |
+| **LTF_TIMEFRAME**                  |          |           `15`            | Lower timeframe (15m)                                                                                                 |
+| **HTF_TIMEFRAME**                  |          |           `240`           | Higher timeframe (4H)                                                                                                 |
+| **ENABLE_LIVE_TEST_ORDERS**        |          |          `false`          | Enable `/test_live_order` (real Demo orders)                                                                          |
+| **ACTIVE_SCENARIOS**               |          |          `1-11`           | Comma-separated: `1,2,3,5,7`                                                                                          |
+| **LOG_LEVEL**                      |          |          `info`           | `debug`, `info`, `warn`, `error`                                                                                      |
+| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups                                                                           |
+| **ENABLE_FUNDING_MONITOR**         |          |          `false`          | Enable funding rate monitoring                                                                                        |
+| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates                                                                                  |
+| **FUNDING_ALERT_THRESHOLD**        |          |           `0.0`           | Alert when funding rate ≤ this value                                                                                  |
+| **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value                                                                          |
+| **SCENARIOS\_<SYMBOL>**            |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol.          |
 | **COOLDOWN_CANDLES**               |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m. |
-| **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5) |
-| **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5) |
-| **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%) |
-| **LIMIT_EXPIRATION_CANDLES**       |          |           `6`             | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m) |
+| **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5)                                                                            |
+| **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                           |
+| **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                 |
+| **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                        |
+| **BREAKEVEN_RR_TRIGGER**           |          |            `2`            | R-multiple to trigger breakeven (move SL to entry). `2` = 2R                                                          |
+| **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                 |
+| **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                |
 
 ---
 
@@ -579,6 +605,7 @@ SCENARIOS_SOLUSDT=5,6,7,10
 ```
 
 **How it works:**
+
 - If `SCENARIOS_<SYMBOL>` is set, that symbol uses **only** those scenarios
 - If not set, the symbol falls back to `ACTIVE_SCENARIOS`
 - The `ScenarioRouter` for each symbol is instantiated with its specific active scenarios
@@ -674,13 +701,13 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 
 ## 📱 Telegram Commands — Detailed Reference
 
-| Command | Description | Auth Required |
-|---------|-------------|---------------|
-| `/status` | **Live X-Ray** per engine: Live Price, Last Candle, 4H Trend, Zones in Memory, Nearest Macro %dist, State. Also shows next high-impact USD news and funding rates. | ✅ |
-| `/backup` | Full DB dump (all 19 trades columns) → gzip → Telegram via `fetch`+Blob (no disk I/O, no `fs` usage). Encrypted with AES-256-CBC if `BACKUP_PASSWORD` set. | ✅ |
-| `/test_signal` | **Dry-run** — creates a fake setup (BTCUSDT, entry 45000, SL 44000, TP 48000) → Inline Approve/Reject buttons → logs `✅ Test trade approved (DRY RUN)`. No real order placed. | ✅ |
-| `/test_live_order` | **E2E Live Demo** — places REAL order on Bybit Demo when approved. Requires `ENABLE_LIVE_TEST_ORDERS=true`. Uses real balance, real position sizing via RiskManager. Full Bybit API response logged. | ✅ |
-| `/test_db` | Integration test: INSERT/SELECT/DELETE with Decimal zoneDetails. Verifies database connectivity and NUMERIC(24,8) precision. | ✅ |
+| Command            | Description                                                                                                                                                                                          | Auth Required |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `/status`          | **Live X-Ray** per engine: Live Price, Last Candle, 4H Trend, Zones in Memory, Nearest Macro %dist, State. Also shows next high-impact USD news and funding rates.                                   | ✅            |
+| `/backup`          | Full DB dump (all 19 trades columns) → gzip → Telegram via `fetch`+Blob (no disk I/O, no `fs` usage). Encrypted with AES-256-CBC if `BACKUP_PASSWORD` set.                                           | ✅            |
+| `/test_signal`     | **Dry-run** — creates a fake setup (BTCUSDT, entry 45000, SL 44000, TP 48000) → Inline Approve/Reject buttons → logs `✅ Test trade approved (DRY RUN)`. No real order placed.                       | ✅            |
+| `/test_live_order` | **E2E Live Demo** — places REAL order on Bybit Demo when approved. Requires `ENABLE_LIVE_TEST_ORDERS=true`. Uses real balance, real position sizing via RiskManager. Full Bybit API response logged. | ✅            |
+| `/test_db`         | Integration test: INSERT/SELECT/DELETE with Decimal zoneDetails. Verifies database connectivity and NUMERIC(24,8) precision.                                                                         | ✅            |
 
 > **Security**: Only `TELEGRAM_CHAT_ID` from `.env` receives responses. All other users are **silently ignored** — no errors, no visibility, no `setMyCommands` (bot invisible to strangers).
 
@@ -920,13 +947,13 @@ services:
 
 ## 🛡 Risk Management Rules
 
-| Guard                | Logic                                                                    | Config                                        |
-| -------------------- | ------------------------------------------------------------------------ | --------------------------------------------- |
-| **Drawdown Guard**   | 3 consecutive losing trades → risk reduced to 1%                         | `RISK_PERCENT` (base), `REDUCED_RISK_PERCENT` |
-| **Position Sizing**  | `qty = (balance × risk%) / SL_distance` → rounded to `qtyStep`           | `LEVERAGE` (default 10x) via isolated margin  |
-| **Min Order Qty**    | If `rounded_qty < minOrderQty` → **ABORT** + `[WARN]` + state→`SCANNING` | Exchange `minOrderQty`                        |
-| **Max Order Qty**    | If `qty > maxOrderQty` → **ABORT**                                       | Exchange `maxOrderQty`                        |
-| **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                    | Hardcoded in `RiskManager`                    |
+| Guard                | Logic                                                                          | Config                                        |
+| -------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
+| **Drawdown Guard**   | 3 consecutive losing trades → risk reduced to 1%                               | `RISK_PERCENT` (base), `REDUCED_RISK_PERCENT` |
+| **Position Sizing**  | `qty = (balance × risk%) / SL_distance` → rounded to `qtyStep`                 | `LEVERAGE` (default 10x) via isolated margin  |
+| **Min Order Qty**    | If `rounded_qty < minOrderQty` → **ABORT** + `[WARN]` + state→`SCANNING`       | Exchange `minOrderQty`                        |
+| **Max Order Qty**    | If `qty > maxOrderQty` → **ABORT**                                             | Exchange `maxOrderQty`                        |
+| **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                          | Hardcoded in `RiskManager`                    |
 | **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop too tight | `LEVERAGE` from config                        |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
