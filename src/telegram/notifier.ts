@@ -449,12 +449,25 @@ export class TelegramNotifier {
   async sendMessageWithKeyboard(
     text: string,
     keyboard: ReturnType<typeof Markup.inlineKeyboard>,
-  ): Promise<void> {
-    if (!this.chatId) return;
-    await this.bot.telegram.sendMessage(this.chatId, text, {
+  ): Promise<number | null> {
+    if (!this.chatId) return null;
+    const msg = await this.bot.telegram.sendMessage(this.chatId, text, {
       parse_mode: "HTML",
       ...keyboard,
     });
+    return msg.message_id;
+  }
+
+  async editMessageWithTimeout(messageId: number, originalText: string): Promise<void> {
+    if (!this.chatId) return;
+    try {
+      const timeoutText = `${originalText}\n\n<b>[ ⏰ TIMEOUT ]</b>`;
+      await this.bot.telegram.editMessageText(this.chatId, messageId, undefined, timeoutText, {
+        parse_mode: "HTML",
+      });
+    } catch (error) {
+      logger.warn(`Failed to edit message for timeout: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async sendFileViaFetch(

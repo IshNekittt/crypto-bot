@@ -131,6 +131,12 @@ export const DEFAULT_PATTERN_CONFIG: PatternConfig = {
   wickRatioThreshold: new Decimal('0.4'), // 40% wick requirement
 };
 
+export function createPatternConfigFromBotConfig(botConfig: { smcDisplacementMultiplier: string; smcSlAtrOffset: string }): Partial<PatternConfig> {
+  return {
+    displacementMultiplier: new Decimal(botConfig.smcDisplacementMultiplier),
+  };
+}
+
 export class PatternRecognizer {
   private readonly client: BybitClient;
   private readonly config: PatternConfig;

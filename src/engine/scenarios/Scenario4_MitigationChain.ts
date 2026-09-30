@@ -1,5 +1,6 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario4_MitigationChain extends BaseScenario {
   private static rejectionStats = {
@@ -13,6 +14,10 @@ export class Scenario4_MitigationChain extends BaseScenario {
     noBosAfterBounce: 0,
     totalEvals: 0
   };
+
+  constructor(config: BotConfig) {
+    super(4, 'Mitigation Chain', config);
+  }
 
   static getRejectionStats() {
     return { ...this.rejectionStats };
@@ -30,10 +35,6 @@ export class Scenario4_MitigationChain extends BaseScenario {
       noBosAfterBounce: 0,
       totalEvals: 0
     };
-  }
-
-  constructor() {
-    super(4, 'Mitigation Chain');
   }
 
   /**

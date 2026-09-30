@@ -1,9 +1,10 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario6_SMS extends BaseScenario {
-  constructor() {
-    super(6, 'Failure Swing (SMS)');
+  constructor(config: BotConfig) {
+    super(6, 'Failure Swing (SMS)', config);
   }
 
   override evaluate(patternData: any): boolean {

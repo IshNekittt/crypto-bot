@@ -2,6 +2,7 @@ import { PositionListSource } from '../api/bybitClient';
 import { PostgresDatabase } from '../db/database';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../config/env';
 
 export const RECONCILIATION_INTERVAL_MS = 10 * 60 * 1000;
 export const CLOCK_DRIFT_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -33,14 +34,16 @@ export class ReconciliationLoop {
   private readonly source: PositionListSource;
   private readonly db: PostgresDatabase;
   private readonly engines: readonly ReconcilableEngine[];
+  private readonly config: BotConfig;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private lastTimeSync = 0;
 
-  constructor(source: PositionListSource, db: PostgresDatabase, engines: readonly ReconcilableEngine[]) {
+  constructor(source: PositionListSource, db: PostgresDatabase, engines: readonly ReconcilableEngine[], config: BotConfig) {
     this.source = source;
     this.db = db;
     this.engines = engines;
+    this.config = config;
   }
 
   start(): void {
@@ -129,9 +132,49 @@ export class ReconciliationLoop {
           );
         }
       }
+
+      // 3. Check and cancel expired limit orders
+      await this.cancelExpiredLimitOrders();
+
     } finally {
       this.running = false;
     }
     return resets;
+  }
+
+  private async cancelExpiredLimitOrders(): Promise<void> {
+    const limitExpirationMs = this.config.limitExpirationCandles * Number(this.config.ltfTimeframe) * 60 * 1000;
+    const now = Date.now();
+
+    for (const engine of this.engines) {
+      const symbol = engine.symbol;
+      try {
+        const openOrders = await this.source.getOpenOrders(symbol);
+        
+        for (const order of openOrders) {
+          // Only process limit orders that are still active (New or PartiallyFilled)
+          if (order.orderType !== 'Limit') continue;
+          if (order.status !== 'New' && order.status !== 'PartiallyFilled') continue;
+
+          const orderAge = now - order.createdAt;
+          if (orderAge > limitExpirationMs) {
+            // Cancel the expired limit order
+            try {
+              const rest = (this.source as any).rest;
+              await rest.cancelOrder({
+                category: 'linear',
+                symbol: order.symbol,
+                orderId: order.orderId,
+              });
+              logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${this.config.limitExpirationCandles} candles)`);
+            } catch (cancelError) {
+              logger.warn(`[${symbol}] Failed to cancel expired limit order ${order.orderId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`);
+            }
+          }
+        }
+      } catch (error) {
+        logger.error(`[${symbol}] Failed to check open orders: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 }

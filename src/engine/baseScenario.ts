@@ -2,6 +2,7 @@ import { IScenario, StructureDetails } from '../types';
 import { ScenarioLevels } from '../types';
 import { ZoneDetails } from '../types';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../config/env';
 
 export interface Zone {
   type: string;
@@ -26,10 +27,12 @@ export abstract class BaseScenario implements IScenario {
   protected reason: string = '';
   protected zoneDetails: ZoneDetails | null = null;
   protected structureDetails: StructureDetails | null = null;
+  protected readonly config: BotConfig;
 
-  constructor(id: number, name: string) {
+  constructor(id: number, name: string, config: BotConfig) {
     this.id = id;
     this.name = name;
+    this.config = config;
   }
 
   evaluate(_patternData: any): boolean {
@@ -96,9 +99,14 @@ export abstract class BaseScenario implements IScenario {
     rr: Decimal = new Decimal(3),
     offsetMultiplier: Decimal = new Decimal(0.5)
   ): TradeLevels {
+    // Use config value if available, otherwise fallback to parameter (for backward compat in tests)
+    const effectiveOffsetMultiplier = this.config?.smcSlAtrOffset 
+      ? new Decimal(this.config.smcSlAtrOffset)
+      : offsetMultiplier;
+    
     // Safety: minimum offset = 0.1% of entry (prevents zero offset when ATR is near zero)
     const minOffset = entry.mul(new Decimal('0.001'));
-    const atrOffset = atr.mul(offsetMultiplier);
+    const atrOffset = atr.mul(effectiveOffsetMultiplier);
     const offset = Decimal.max(atrOffset, minOffset);
     
     // CRITICAL: Ensure SL is on correct side of Entry regardless of zone top/bottom convention

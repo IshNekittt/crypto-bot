@@ -1,7 +1,7 @@
 import { RestClientV5 } from 'bybit-api';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../config/env';
-import { Candle, InstrumentInfo, MarketOrderRequest, Timeframe } from '../types';
+import { Candle, InstrumentInfo, MarketOrderRequest, LimitOrderRequest, Timeframe, OpenOrder, TradeSide } from '../types';
 import { logger } from '../utils/logger';
 
 export interface TimeSyncResult {
@@ -18,6 +18,7 @@ export interface OpenPosition {
 
 export interface PositionListSource {
   getOpenPositions(symbol: string): Promise<readonly OpenPosition[]>;
+  getOpenOrders(symbol: string): Promise<readonly OpenOrder[]>;
   syncServerTime(): Promise<TimeSyncResult>;
 }
 
@@ -380,6 +381,59 @@ export class BybitClient {
       this.recordSuccess(request.symbol);
       return response.result.orderId;
     }, 'placeMarketOrderWithTpsl');
+  }
+
+  async placeLimitOrderWithTpsl(request: LimitOrderRequest): Promise<string> {
+    if (this.checkCircuitBreaker(request.symbol)) {
+      throw new Error(`Circuit breaker OPEN for ${request.symbol}: order placement blocked for 60s`);
+    }
+
+    return this.executeWithRetry(async () => {
+      const response = await this.rest.submitOrder({
+        category: 'linear',
+        symbol: request.symbol,
+        side: request.side,
+        orderType: 'Limit',
+        qty: request.qty,
+        price: request.price,
+        timeInForce: request.timeInForce,
+        tpslMode: 'Full',
+        stopLoss: request.stopLoss,
+        takeProfit: request.takeProfit,
+        orderLinkId: request.orderLinkId,
+      });
+
+      if (response.retCode !== 0 || !response.result.orderId) {
+        this.recordFailure(request.symbol, response.retCode);
+        throw new Error(`[${response.retCode}] ${response.retMsg}`);
+      }
+
+      this.recordSuccess(request.symbol);
+      return response.result.orderId;
+    }, 'placeLimitOrderWithTpsl');
+  }
+
+  async getOpenOrders(symbol: string): Promise<readonly OpenOrder[]> {
+    return this.executeWithRetry(async () => {
+      const rest = this.rest as any;
+      const response = await rest.getOpenOrders({ category: 'linear', symbol });
+      if (response.retCode !== 0) {
+        throw new Error(`Open orders fetch failed for ${symbol}: [${response.retCode}] ${response.retMsg}`);
+      }
+      return response.result.list.map((order: any) => ({
+        orderId: order.orderId,
+        orderLinkId: order.orderLinkId,
+        symbol: order.symbol,
+        side: order.side as TradeSide,
+        orderType: order.orderType as 'Market' | 'Limit',
+        price: order.price ?? null,
+        qty: order.qty,
+        stopLoss: order.stopLoss ?? null,
+        takeProfit: order.takeProfit ?? null,
+        createdAt: Number(order.createdTime),
+        status: order.orderStatus as 'New' | 'PartiallyFilled' | 'Filled' | 'Cancelled' | 'Rejected',
+      }));
+    }, 'getOpenOrders');
   }
 
   async getOpenPositions(symbol: string): Promise<readonly OpenPosition[]> {

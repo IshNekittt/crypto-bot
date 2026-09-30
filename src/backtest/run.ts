@@ -106,7 +106,7 @@ async function runBacktestForSymbol(
   const state = getInitialState();
   const results: TradeResult[] = [];
   const mitigatedZones: MitigatedZone[] = [];
-  const mitigatedStructures: MitigatedStructure[] = [];
+  let mitigatedStructures: MitigatedStructure[] = [];
 
   const htfMap = new Map<number, Candle>();
   for (const c of candlesHtf) {
@@ -125,6 +125,7 @@ async function runBacktestForSymbol(
     patternRecognizer: recognizer,
     notifier: { sendMessage: async () => false } as any,
     activeScenarios: symbolScenarios,
+    config,
   });
 
   // Pattern data cache - avoid recomputing from scratch every candle
@@ -223,8 +224,11 @@ async function runBacktestForSymbol(
         const { state: stateAfterCheck, tradeResult, mitigatedZone } = checkAndCloseTrade(state, candleLtf, {
           cooldownCandles: config.cooldownCandles,
           ltfTimeframe: config.ltfTimeframe,
+          limitExpirationCandles: config.limitExpirationCandles,
         });
         Object.assign(state, stateAfterCheck);
+        // Sync local mitigatedStructures from state to keep cache invalidation working
+        mitigatedStructures = state.mitigatedStructures;
         if (tradeResult) {
           results.push(tradeResult);
           if (mitigatedZone) {
@@ -351,7 +355,9 @@ async function main(): Promise<void> {
     
     // Create dummy client for PatternRecognizer (won't be used for fetching)
     client = BybitClient.create(config);
-    recognizer = new PatternRecognizer(client!);
+    recognizer = new PatternRecognizer(client!, {
+      displacementMultiplier: new Decimal(config.smcDisplacementMultiplier),
+    });
     
 // Load candles from CSV
     logger.info(`Loading candles from CSV...`);
@@ -416,7 +422,9 @@ async function main(): Promise<void> {
       },
     } as any;
     
-    recognizer = new PatternRecognizer(mockClient);
+    recognizer = new PatternRecognizer(mockClient, {
+      displacementMultiplier: new Decimal(config.smcDisplacementMultiplier),
+    });
     
     // Get date range from candles BEFORE running backtest (array gets cleared in cleanupMemory)
     const fromMs = candlesLtf[0]?.timestamp || Date.now();
@@ -493,7 +501,9 @@ async function main(): Promise<void> {
   } else {
     // ONLINE MODE: Original Bybit API logic
     client = BybitClient.create(config);
-    recognizer = new PatternRecognizer(client);
+    recognizer = new PatternRecognizer(client, {
+      displacementMultiplier: new Decimal(config.smcDisplacementMultiplier),
+    });
 
     for (const symbol of symbolsToTest) {
       const info = await client.getInstrumentInfo(symbol);

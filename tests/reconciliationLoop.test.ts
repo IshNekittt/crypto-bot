@@ -3,6 +3,7 @@ import { PositionListSource, TimeSyncResult } from '../src/api/bybitClient';
 import { PostgresDatabase } from '../src/db/database';
 import { ReconcilableEngine } from '../src/bootstrap/reconciliation';
 import { StrategyState } from '../src/types';
+import { BotConfig } from '../src/config/env';
 import { Decimal } from 'decimal.js';
 
 jest.useFakeTimers();
@@ -19,6 +20,7 @@ describe('ReconciliationLoop', () => {
   beforeEach(() => {
     mockSource = {
       getOpenPositions: jest.fn().mockResolvedValue([]),
+      getOpenOrders: jest.fn().mockResolvedValue([]),
       syncServerTime: jest.fn().mockResolvedValue(mockTimeSync),
     } as jest.Mocked<PositionListSource>;
 
@@ -35,7 +37,41 @@ describe('ReconciliationLoop', () => {
 
     mockEngines = [mockEngine];
 
-    reconciliation = new ReconciliationLoop(mockSource, mockDb, mockEngines);
+    const mockConfig: BotConfig = {
+      apiKey: '',
+      apiSecret: '',
+      testnet: false,
+      demoTrading: true,
+      symbols: ['SOLUSDT'],
+      riskPercent: '2',
+      reducedRiskPercent: '1',
+      leverage: '10',
+      dataDir: 'data',
+      historyCandles: 200,
+      ltfTimeframe: '15',
+      htfTimeframe: '240',
+      macroCandles: 1000,
+      telegramBotToken: null,
+      telegramChatId: null,
+      databaseUrl: null,
+      autoTrading: false,
+      tradeApprovalTimeoutMinutes: 5,
+      enableLiveTestOrders: false,
+      activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+      enableFundingMonitor: false,
+      fundingMonitorSymbols: [],
+      fundingAlertThreshold: '0.0',
+      fundingRestoreThreshold: '0.0001',
+      symbolScenarios: new Map(),
+      backtestCsvPath: null,
+      cooldownCandles: 16,
+      smcSlAtrOffset: '0.5',
+      smcDisplacementMultiplier: '1.5',
+      limitExpirationCandles: 6,
+      smartEntryThresholdPct: '0.0015',
+    };
+
+    reconciliation = new ReconciliationLoop(mockSource, mockDb, mockEngines, mockConfig);
   });
 
   afterEach(() => {

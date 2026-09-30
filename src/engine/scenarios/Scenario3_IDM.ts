@@ -1,9 +1,10 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario3_IDM extends BaseScenario {
-  constructor() {
-    super(3, 'Inducement (IDM)');
+  constructor(config: BotConfig) {
+    super(3, 'IDM', config);
   }
 
   override evaluate(patternData: any): boolean {

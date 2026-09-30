@@ -46,6 +46,91 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ---
 
+## ⚡ Hybrid Smart Entry Architecture (Market vs Limit) — v2026-09-29
+
+**Problem**: Entering Market orders at the close of the 15m signal candle is mathematically unprofitable in SMC. Price has already "run away", SL becomes huge, R:R breaks, and Bybit rejects TP/SL with error [10001] (TP/SL limits).
+
+**Solution**: **Hybrid Smart Pullback Limit Orders** — bot dynamically chooses between Market and Limit (GTC) based on price deviation from ideal entry.
+
+### Decision Logic (`src/engine/strategyEngine.ts`)
+
+```typescript
+const idealEntry = new Decimal(result.levels.entry);      // Zone equilibrium (e.g., OB 0.5, FVG 0.5)
+const currentPrice = new Decimal(lastCandle.close);       // Signal candle close
+const smartThreshold = new Decimal(config.smartEntryThresholdPct); // 0.0015 = 0.15%
+
+const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
+const useMarketOrder = priceDiffPct.lte(smartThreshold);
+
+const orderType = useMarketOrder ? 'Market' : 'Limit';
+const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
+```
+
+| Condition | Order Type | Price |
+|-----------|------------|-------|
+| `|idealEntry - currentPrice| / idealEntry ≤ 0.15%` | **Market** (IOC) | — |
+| `|idealEntry - currentPrice| / idealEntry > 0.15%` | **Limit** (GTC) | `idealEntry` |
+
+**Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
+
+### Smart Cancellation — Limit Order Lifecycle
+
+**Expiration**: `LIMIT_EXPIRATION_CANDLES=6` (default 6 × 15m = 1.5 hours).
+
+**ReconciliationLoop** (`src/bootstrap/reconciliation.ts`): Every 10 min, calls `getOpenOrders(symbol)` → for each active Limit order:
+- If `orderAge > LIMIT_EXPIRATION_CANDLES × LTF_TIMEFRAME` → **cancel** on exchange (`cancelOrder`).
+- Log: `Cancelled expired LIMIT order ${orderId} (age: X min, limit: 6 candles)`.
+
+**Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
+
+### Backtester Simulation (`src/backtest/executionSimulator.ts`)
+
+New state machine for Limit orders:
+
+```
+SCANNING → [Limit placed] → PENDING (limitPrice, placedAt, candlesWaited=0)
+                                    │
+                        ┌───────────┴───────────┐
+                        ▼                       ▼
+              Candle wick touches          candlesWaited > 6
+              limitPrice?                     (expiration)
+                        │                       │
+                        ▼                       ▼
+              PENDING → IN_TRADE          PENDING → CANCELLED
+              (filled at limitPrice)       (no PnL, zone stays mitigated)
+```
+
+**Key points**:
+- Zone added to `mitigatedZones` **immediately on Limit placement** (not on fill) — prevents re-entry before fill.
+- Fill detection: current candle `low ≤ limitPrice` (Long) / `high ≥ limitPrice` (Short).
+- Filled at exact `limitPrice` (not candle close) — realistic simulation.
+- Expired Limit orders leave `mitigatedZones` intact (zone already "burned").
+
+### Execution Engine (`src/execution/executionEngine.ts`)
+
+```typescript
+async execute(plan: PositionPlan): Promise<ExecutionResult> {
+  if (plan.orderType === 'Limit' && plan.limitPrice) {
+    return this.submitter.placeLimitOrderWithTpsl({
+      symbol: plan.symbol,
+      side: plan.side,
+      qty: plan.qty,
+      price: plan.limitPrice,        // idealEntry
+      stopLoss: plan.stopLoss,
+      takeProfit: plan.takeProfit,
+      orderLinkId,
+      timeInForce: 'GTC',
+    });
+  }
+  // Market fallback
+  return this.submitter.placeMarketOrderWithTpsl({...});
+}
+```
+
+**BybitClient** (`src/api/bybitClient.ts`): New method `placeLimitOrderWithTpsl()` with `orderType: 'Limit'`, `timeInForce: 'GTC'`, and TP/SL attached.
+
+---
+
 ## 🎯 Strict Stop-Loss Calculation (v2026-09-20 — Safety Hardened)
 
 **Problem**: Zone objects (OB, FVG, Breaker, Mitigation) can have arbitrary `top`/`bottom` ordering — not guaranteed `top > bottom`. Naive SL formulas fail when zone is inverted.
@@ -468,6 +553,10 @@ docker compose up -d
 | **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value     |
 | **SCENARIOS_<SYMBOL>**             |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol. |
 | **COOLDOWN_CANDLES**               |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m. |
+| **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5) |
+| **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5) |
+| **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%) |
+| **LIMIT_EXPIRATION_CANDLES**       |          |           `6`             | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m) |
 
 ---
 
@@ -761,13 +850,17 @@ services:
 1. **WS Kline** → `CandleFeed` → `StrategyEngine.process()`
 2. **ScenarioRouter** evaluates 11 scenarios against `PatternRecognizer` patterns
 3. **RiskManager** calculates position size with Drawdown Guard
-4. **PendingTradeManager** queues for approval (or auto-executes)
-5. **Slippage Guard** validates price at approval time (0.2% threshold)
-6. **ExecutionEngine** places market order with TP/SL
-7. **DB** records trade with `zoneDetails` (OB/FVG/BREAKER/MITIGATION)
-8. **WS Position/Execution** OR **ReconciliationLoop** detects close
-9. **2.5s delay** → `GET /v5/position/closed-pnl` → exact PnL (fees + funding)
-10. **MitigatedZone** recorded → no re-entry on same zone
+4. **Smart Entry Decision** — compares `idealEntry` (zone equilibrium) vs `lastCandle.close`:
+   - If `|idealEntry - currentPrice| / idealEntry ≤ 0.15%` → **Market** (IOC)
+   - If `|idealEntry - currentPrice| / idealEntry > 0.15%` → **Limit** (GTC) at `idealEntry`
+5. **PendingTradeManager** queues for approval (or auto-executes)
+6. **Slippage Guard** validates price at approval time (0.2% threshold)
+7. **ExecutionEngine** places order (Market IOC or Limit GTC with TP/SL)
+8. **DB** records trade with `zoneDetails` (OB/FVG/BREAKER/MITIGATION) + `orderType`
+9. **WS Position/Execution** OR **ReconciliationLoop** detects close
+10. **2.5s delay** → `GET /v5/position/closed-pnl` → exact PnL (fees + funding)
+11. **MitigatedZone** recorded → no re-entry on same zone
+12. **ReconciliationLoop** (every 10 min) cancels expired Limit orders (> 6 candles)
 
 ---
 

@@ -1,6 +1,7 @@
 import { PositionPlan } from '../risk/riskManager';
 import { TelegramNotifier } from '../telegram/notifier';
 import { logger } from '../utils/logger';
+import { TimeInForce } from '../types';
 
 const RATE_LIMIT_RET_CODE = '10006';
 const INSUFFICIENT_BALANCE_RET_CODE = '110007';
@@ -13,6 +14,17 @@ export interface OrderSubmitter {
     stopLoss: string;
     takeProfit: string;
     orderLinkId: string; // Idempotency key
+  }): Promise<string>;
+
+  placeLimitOrderWithTpsl(request: {
+    symbol: string;
+    side: string;
+    qty: string;
+    price: string;
+    stopLoss: string;
+    takeProfit: string;
+    orderLinkId: string;
+    timeInForce: TimeInForce;
   }): Promise<string>;
 }
 
@@ -48,17 +60,35 @@ export class ExecutionEngine {
   async execute(plan: PositionPlan): Promise<ExecutionResult> {
     try {
       const orderLinkId = `${plan.symbol}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const orderId = await this.submitter.placeMarketOrderWithTpsl({
-        symbol: plan.symbol,
-        side: plan.side,
-        qty: plan.qty,
-        stopLoss: plan.stopLoss,
-        takeProfit: plan.takeProfit,
-        orderLinkId,
-      });
-      logger.info(
-        `Order placed: ${plan.symbol} ${plan.side} qty=${plan.qty} entry≈${plan.entryPrice} sl=${plan.stopLoss} tp=${plan.takeProfit} id=${orderId}`,
-      );
+      let orderId: string;
+
+      if (plan.orderType === 'Limit' && plan.limitPrice) {
+        orderId = await this.submitter.placeLimitOrderWithTpsl({
+          symbol: plan.symbol,
+          side: plan.side,
+          qty: plan.qty,
+          price: plan.limitPrice,
+          stopLoss: plan.stopLoss,
+          takeProfit: plan.takeProfit,
+          orderLinkId,
+          timeInForce: 'GTC',
+        });
+        logger.info(
+          `LIMIT Order placed: ${plan.symbol} ${plan.side} qty=${plan.qty} price=${plan.limitPrice} sl=${plan.stopLoss} tp=${plan.takeProfit} id=${orderId}`,
+        );
+      } else {
+        orderId = await this.submitter.placeMarketOrderWithTpsl({
+          symbol: plan.symbol,
+          side: plan.side,
+          qty: plan.qty,
+          stopLoss: plan.stopLoss,
+          takeProfit: plan.takeProfit,
+          orderLinkId,
+        });
+        logger.info(
+          `MARKET Order placed: ${plan.symbol} ${plan.side} qty=${plan.qty} entry≈${plan.entryPrice} sl=${plan.stopLoss} tp=${plan.takeProfit} id=${orderId}`,
+        );
+      }
       await this.notifier.notifyOrderOpened(plan.symbol, plan.entryPrice, plan.stopLoss, plan.takeProfit);
       return { ok: true, orderId };
     } catch (error) {

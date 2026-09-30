@@ -650,6 +650,93 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 **Result**: Ghost signals eliminated. Scenario 6 on ETHUSDT — duplicate 06:30/11:30 entries at same price removed. CHoCH marked "used" after first trade. Backtest results now reflect realistic execution.
 
+---
+
+### 6.17 Hybrid Smart Entry Architecture (Market vs Limit) — **NEW v2026-09-29**
+
+**Problem**: Entering Market orders at the close of the 15m signal candle is mathematically unprofitable in SMC. Price has already "run away", SL becomes huge, R:R breaks, and Bybit rejects TP/SL with error [10001] (TP/SL limits).
+
+**Solution**: **Hybrid Smart Pullback Limit Orders** — bot dynamically chooses between Market and Limit (GTC) based on price deviation from ideal entry.
+
+#### 6.17.1 Decision Logic (`src/engine/strategyEngine.ts`)
+
+```typescript
+const idealEntry = new Decimal(result.levels.entry);      // Zone equilibrium (e.g., OB 0.5, FVG 0.5)
+const currentPrice = new Decimal(lastCandle.close);       // Signal candle close
+const smartThreshold = new Decimal(config.smartEntryThresholdPct); // 0.0015 = 0.15%
+
+const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
+const useMarketOrder = priceDiffPct.lte(smartThreshold);
+
+const orderType = useMarketOrder ? 'Market' : 'Limit';
+const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
+```
+
+| Condition | Order Type | Price |
+|-----------|------------|-------|
+| `|idealEntry - currentPrice| / idealEntry ≤ 0.15%` | **Market** (IOC) | — |
+| `|idealEntry - currentPrice| / idealEntry > 0.15%` | **Limit** (GTC) | `idealEntry` |
+
+**Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
+
+#### 6.17.2 Smart Cancellation — Limit Order Lifecycle
+
+**Expiration**: `LIMIT_EXPIRATION_CANDLES=6` (default 6 × 15m = 1.5 hours).
+
+**ReconciliationLoop** (`src/bootstrap/reconciliation.ts`): Every 10 min, calls `getOpenOrders(symbol)` → for each active Limit order:
+- If `orderAge > LIMIT_EXPIRATION_CANDLES × LTF_TIMEFRAME` → **cancel** on exchange (`cancelOrder`).
+- Log: `Cancelled expired LIMIT order ${orderId} (age: X min, limit: 6 candles)`.
+
+**Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
+
+#### 6.17.3 Backtester Simulation (`src/backtest/executionSimulator.ts`)
+
+New state machine for Limit orders:
+
+```
+SCANNING → [Limit placed] → PENDING (limitPrice, placedAt, candlesWaited=0)
+                                    │
+                        ┌───────────┴───────────┐
+                        ▼                       ▼
+              Candle wick touches          candlesWaited > 6
+              limitPrice?                     (expiration)
+                        │                       │
+                        ▼                       ▼
+              PENDING → IN_TRADE          PENDING → CANCELLED
+              (filled at limitPrice)       (no PnL, zone stays mitigated)
+```
+
+**Key points**:
+- Zone added to `mitigatedZones` **immediately on Limit placement** (not on fill) — prevents re-entry before fill.
+- Fill detection: current candle `low ≤ limitPrice` (Long) / `high ≥ limitPrice` (Short).
+- Filled at exact `limitPrice` (not candle close) — realistic simulation.
+- Expired Limit orders leave `mitigatedZones` intact (zone already "burned").
+
+#### 6.17.4 Execution Engine (`src/execution/executionEngine.ts`)
+
+```typescript
+async execute(plan: PositionPlan): Promise<ExecutionResult> {
+  if (plan.orderType === 'Limit' && plan.limitPrice) {
+    return this.submitter.placeLimitOrderWithTpsl({
+      symbol: plan.symbol,
+      side: plan.side,
+      qty: plan.qty,
+      price: plan.limitPrice,        // idealEntry
+      stopLoss: plan.stopLoss,
+      takeProfit: plan.takeProfit,
+      orderLinkId,
+      timeInForce: 'GTC',
+    });
+  }
+  // Market fallback
+  return this.submitter.placeMarketOrderWithTpsl({...});
+}
+```
+
+**BybitClient** (`src/api/bybitClient.ts`): New method `placeLimitOrderWithTpsl()` with `orderType: 'Limit'`, `timeInForce: 'GTC'`, and TP/SL attached.
+
+---
+
 ## 7. THE 11 SCENARIOS — `src/engine/scenarios/`
 
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
@@ -810,6 +897,14 @@ ACTIVE_SCENARIOS=1,2,3,4,5,6,7,8,9,10,11
 # Cooldown after SL hit (in LTF candles, default 16 = 4h for 15m timeframe)
 COOLDOWN_CANDLES=16
 
+# SMC Parameters
+SMC_SL_ATR_OFFSET=0.5              # ATR multiplier for SL offset (default 0.5)
+SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR (default 1.5)
+
+# Hybrid Smart Entry
+SMART_ENTRY_THRESHOLD_PCT=0.15     # Market vs Limit threshold in % (default 0.15 = 0.15%)
+LIMIT_EXPIRATION_CANDLES=6         # Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)
+
 # Funding Monitor (delta-neutral arbitrage)
 ENABLE_FUNDING_MONITOR=false
 FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
@@ -855,6 +950,9 @@ docker compose up -d
 15. **Backtester mitigated zones burned on ENTRY** — zone added to `mitigatedZones` immediately in `openTrade()`, not on close.
 16. **Same-candle SL/TP resolution** — SL checked first; if both hit → `BOTH` = LOSS at SL price (conservative).
 17. **DB `reason` field persisted on close** — `closeTrade()` accepts `reason` parameter ('TP'|'SL'|'RECONCILIATION'), all callers updated.
+18. **Hybrid Smart Entry** — `idealEntry` always from scenario geometry (zone equilibrium), never `candle.close`. Market vs Limit decision uses `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%) against `|idealEntry - currentPrice| / idealEntry`.
+19. **Limit Order Cancellation** — ReconciliationLoop cancels Limit orders older than `LIMIT_EXPIRATION_CANDLES × LTF_TIMEFRAME` minutes. Zone burned immediately on Limit placement (not on fill).
+20. **Backtester Limit Simulation** — State machine: SCANNING → PENDING (limitPrice, placedAt, candlesWaited) → IN_TRADE (on wick touch) OR CANCELLED (after LIMIT_EXPIRATION_CANDLES). Filled at exact `limitPrice`, not candle close.
 
 ---
 

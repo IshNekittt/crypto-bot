@@ -1,5 +1,6 @@
 import { BaseScenario } from "../baseScenario";
 import { Decimal } from "decimal.js";
+import { BotConfig } from "../../config/env";
 
 export class Scenario11_MitigationBlock extends BaseScenario {
   private static rejectionStats = {
@@ -14,6 +15,10 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     premiumDiscount: 0,
     totalEvals: 0,
   };
+
+  constructor(config: BotConfig) {
+    super(11, 'Mitigation Block', config);
+  }
 
   static getRejectionStats() {
     return { ...this.rejectionStats };
@@ -32,10 +37,6 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       premiumDiscount: 0,
       totalEvals: 0,
     };
-  }
-
-  constructor() {
-    super(11, "Mitigation Block");
   }
 
   private validateSmsPattern(

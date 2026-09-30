@@ -1,5 +1,6 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 import { SwingPoint } from '../../smc/patternRecognizer';
 
 export class Scenario10_BreakerBlock extends BaseScenario {
@@ -16,6 +17,10 @@ export class Scenario10_BreakerBlock extends BaseScenario {
     obNotFresh: 0,
     totalEvals: 0
   };
+
+  constructor(config: BotConfig) {
+    super(10, 'Breaker Block Entry', config);
+  }
 
   static getRejectionStats() {
     return { ...this.rejectionStats };
@@ -35,10 +40,6 @@ export class Scenario10_BreakerBlock extends BaseScenario {
       obNotFresh: 0,
       totalEvals: 0
     };
-  }
-
-  constructor() {
-    super(10, 'Breaker Block Entry');
   }
 
   /**

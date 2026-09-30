@@ -1,5 +1,6 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario5_HTFLiquiditySweep extends BaseScenario {
   private static rejectionStats = {
@@ -12,8 +13,8 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     totalEvals: 0
   };
 
-  constructor() {
-    super(5, 'HTF Liquidity Sweep');
+  constructor(config: BotConfig) {
+    super(5, 'HTF Liquidity Sweep', config);
   }
 
   static getRejectionStats() {

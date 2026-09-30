@@ -8,14 +8,16 @@ describe('PendingTradeManager', () => {
   let sendMessageMock: jest.Mock;
 
   beforeEach(() => {
-    sendMessageMock = jest.fn().mockResolvedValue(true);
+    sendMessageMock = jest.fn().mockResolvedValue({ message_id: 12345 });
+    const editMessageTextMock = jest.fn().mockResolvedValue(true);
     
     mockNotifier = {
       enabled: true,
-      bot: { telegram: { sendMessage: sendMessageMock } },
+      bot: { telegram: { sendMessage: sendMessageMock, editMessageText: editMessageTextMock } },
       chatId: '123456',
       sendMessage: jest.fn().mockResolvedValue(true),
-      sendMessageWithKeyboard: jest.fn().mockResolvedValue(undefined),
+      sendMessageWithKeyboard: jest.fn().mockResolvedValue(12345),
+      editMessageWithTimeout: jest.fn().mockResolvedValue(undefined),
       notifySetupFound: jest.fn().mockResolvedValue(true),
       notifyOrderOpened: jest.fn().mockResolvedValue(true),
       notifyTradeClosed: jest.fn().mockResolvedValue(true),

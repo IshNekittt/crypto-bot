@@ -1,5 +1,6 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario9_TurtleSoup extends BaseScenario {
   private static rejectionStats = {
@@ -12,6 +13,10 @@ export class Scenario9_TurtleSoup extends BaseScenario {
     noRejectionWick: 0,
     totalEvals: 0
   };
+
+  constructor(config: BotConfig) {
+    super(9, 'Turtle Soup', config);
+  }
 
   static getRejectionStats() {
     return { ...this.rejectionStats };
@@ -28,10 +33,6 @@ export class Scenario9_TurtleSoup extends BaseScenario {
       noRejectionWick: 0,
       totalEvals: 0
     };
-  }
-
-  constructor() {
-    super(9, 'Turtle Soup (Range SFP)');
   }
 
   /**

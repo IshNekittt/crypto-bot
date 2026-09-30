@@ -1,5 +1,6 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario8_RangeDeviationReclaim extends BaseScenario {
   private static rejectionStats = {
@@ -13,6 +14,10 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     rr: 0,
     totalEvals: 0
   };
+
+  constructor(config: BotConfig) {
+    super(8, 'Range Deviation & Reclaim', config);
+  }
 
   static getRejectionStats() {
     return { ...this.rejectionStats };
@@ -30,10 +35,6 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
       rr: 0,
       totalEvals: 0
     };
-  }
-
-  constructor() {
-    super(8, 'Range Deviation & Reclaim');
   }
 
   override evaluate(patternData: any): boolean {

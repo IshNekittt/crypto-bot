@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { Decimal } from 'decimal.js';
 
 export interface RiskConfig {
   readonly baseRiskPercent: string;
@@ -33,6 +34,10 @@ export interface BotConfig {
   readonly symbolScenarios: Map<string, number[]>;
   readonly backtestCsvPath: string | null;
   readonly cooldownCandles: number;
+  readonly smcSlAtrOffset: string;
+  readonly smcDisplacementMultiplier: string;
+  readonly limitExpirationCandles: number;
+  readonly smartEntryThresholdPct: string;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -97,6 +102,15 @@ function parseDecimalOrDefault(value: string | null, defaultValue: string, label
     throw new Error(`${label} must be a valid number, got: "${raw}"`);
   }
   return raw;
+}
+
+function parsePositiveNumberOrDefault(value: string | null, defaultValue: string, label: string): number {
+  const raw = value ?? defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive number, got: "${raw}"`);
+  }
+  return parsed;
 }
 
 function parseSymbolScenarios(env: NodeJS.ProcessEnv, symbols: string[]): Map<string, number[]> {
@@ -181,6 +195,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     throw new Error(`COOLDOWN_CANDLES must be an integer, got: ${cooldownCandles}`);
   }
 
+  const smcSlAtrOffset = parseDecimalOrDefault(
+    optionalEnv(env, 'SMC_SL_ATR_OFFSET'),
+    '0.5',
+    'SMC_SL_ATR_OFFSET'
+  );
+
+  const smcDisplacementMultiplier = parseDecimalOrDefault(
+    optionalEnv(env, 'SMC_DISPLACEMENT_MULTIPLIER'),
+    '1.5',
+    'SMC_DISPLACEMENT_MULTIPLIER'
+  );
+
+  const limitExpirationCandles = parsePositiveNumberOrDefault(
+    optionalEnv(env, 'LIMIT_EXPIRATION_CANDLES'),
+    '6',
+    'LIMIT_EXPIRATION_CANDLES'
+  );
+  if (!Number.isInteger(limitExpirationCandles)) {
+    throw new Error(`LIMIT_EXPIRATION_CANDLES must be an integer, got: ${limitExpirationCandles}`);
+  }
+
+  const smartEntryThresholdPctRaw = parseDecimalOrDefault(
+    optionalEnv(env, 'SMART_ENTRY_THRESHOLD_PCT'),
+    '0.15', // 0.15%
+    'SMART_ENTRY_THRESHOLD_PCT'
+  );
+  const smartEntryThresholdPct = new Decimal(smartEntryThresholdPctRaw).div(100).toFixed(10);
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, 'BYBIT_API_KEY'),
@@ -209,5 +251,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     fundingRestoreThreshold,
     symbolScenarios,
     backtestCsvPath,
+    smcSlAtrOffset,
+    smcDisplacementMultiplier,
+    limitExpirationCandles,
+    smartEntryThresholdPct,
   };
 }

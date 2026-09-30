@@ -65,6 +65,33 @@ export interface OpenTrade {
   structureType?: 'SMS' | 'CHoCH' | 'BOS';
   structureTimestamp?: number;
   structurePrice?: Decimal;
+  // Limit order fields
+  orderType?: 'Market' | 'Limit';
+  limitPrice?: Decimal;
+  limitOrderPlacedAt?: number;
+  limitOrderCandlesWaited?: number;
+}
+
+export interface PendingLimitOrder {
+  entryPrice: Decimal;
+  slPrice: Decimal;
+  tpPrice: Decimal;
+  qty: Decimal;
+  side: 'Buy' | 'Sell';
+  scenarioId: number;
+  scenarioName: string;
+  limitPrice: Decimal;
+  placedAt: number;
+  candlesWaited: number;
+  zoneType?: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION';
+  zoneTop?: Decimal;
+  zoneBottom?: Decimal;
+  zoneTimeframe?: string;
+  zoneDirection?: string;
+  zoneTimestamp?: number;
+  structureType?: 'SMS' | 'CHoCH' | 'BOS';
+  structureTimestamp?: number;
+  structurePrice?: Decimal;
 }
 
 export interface MitigatedStructure {
@@ -88,6 +115,8 @@ export interface BacktestState {
   mitigatedZones: MitigatedZone[];
   // Structures (SMS/CHoCH/BOS) that have been traded and should not be re-used
   mitigatedStructures: MitigatedStructure[];
+  // Pending limit order waiting for fill
+  pendingLimitOrder: PendingLimitOrder | null;
 }
 
 export interface MitigatedZone {
@@ -147,6 +176,7 @@ export function getInitialState(): BacktestState {
     cooldownUntil: 0,
     mitigatedZones: [],
     mitigatedStructures: [] as MitigatedStructure[],
+    pendingLimitOrder: null,
   };
 }
 
@@ -188,7 +218,9 @@ export function openTrade(
     type: 'SMS' | 'CHoCH' | 'BOS';
     timestamp: number;
     price: Decimal;
-  }
+  },
+  orderType: 'Market' | 'Limit' = 'Market',
+  limitPrice?: Decimal
 ): { state: BacktestState; tradeOpened: boolean } {
   let slPriceAdjusted = slPrice;
   const slDistance = entryPrice.minus(slPrice).abs();
@@ -232,8 +264,8 @@ export function openTrade(
     return { state, tradeOpened: false };
   }
 
-  // Check if already in a trade
-  if (state.openTrade) {
+  // Check if already in a trade or have a pending limit order
+  if (state.openTrade || state.pendingLimitOrder) {
     return { state, tradeOpened: false };
   }
 
@@ -260,6 +292,49 @@ export function openTrade(
     return { state, tradeOpened: false };
   }
 
+  // Handle Limit orders: create pending order instead of immediate fill
+  if (orderType === 'Limit' && limitPrice) {
+    const pendingOrder: PendingLimitOrder = {
+      entryPrice,
+      slPrice: slPriceAdjusted,
+      tpPrice,
+      qty,
+      side,
+      scenarioId,
+      scenarioName,
+      limitPrice,
+      placedAt: candle.timestamp,
+      candlesWaited: 0,
+      zoneType: zoneDetails?.type,
+      zoneTop: zoneDetails?.top,
+      zoneBottom: zoneDetails?.bottom,
+      zoneTimeframe: zoneDetails?.timeframe,
+      zoneDirection: zoneDetails?.direction,
+      zoneTimestamp: zoneDetails?.timestamp,
+      structureType: structureDetails?.type,
+      structureTimestamp: structureDetails?.timestamp,
+      structurePrice: structureDetails?.price,
+    };
+
+    const newState: BacktestState = {
+      ...state,
+      pendingLimitOrder: pendingOrder,
+      // Add zone to mitigatedZones to prevent re-entry on same zone
+      mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
+        type: zoneDetails.type as 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION',
+        top: zoneDetails.top.toString(),
+        bottom: zoneDetails.bottom.toString(),
+        timeframe: zoneDetails.timeframe,
+        direction: zoneDetails.direction,
+        timestamp: zoneDetails.timestamp,
+      }] : state.mitigatedZones,
+    };
+
+    logger.debug(`Backtest LIMIT ORDER PLACED: ${scenarioName} ${side} limitPrice=${limitPrice.toFixed(4)} SL=${slPriceAdjusted.toFixed(4)} TP=${tpPrice.toFixed(4)} qty=${qty.toFixed(6)}`);
+    return { state: newState, tradeOpened: false }; // Not opened yet, waiting for fill
+  }
+
+  // Market order: immediate fill (existing logic)
   const entryFee = entryPrice.mul(qty).mul(TAKER_FEE_RATE);
 
   const openTrade: OpenTrade = {
@@ -281,6 +356,7 @@ export function openTrade(
     structureType: structureDetails?.type,
     structureTimestamp: structureDetails?.timestamp,
     structurePrice: structureDetails?.price,
+    orderType: 'Market',
   };
 
   const newBalance = state.balance.minus(entryFee); // Deduct entry fee immediately
@@ -316,11 +392,119 @@ export function openTrade(
   return { state: newState, tradeOpened: true };
 }
 
+export function checkPendingLimitOrder(
+  state: BacktestState,
+  candle: Candle,
+  config: { limitExpirationCandles: number; ltfTimeframe: string }
+): { state: BacktestState; limitOrderFilled: boolean; limitOrderExpired: boolean } {
+  if (!state.pendingLimitOrder) {
+    return { state, limitOrderFilled: false, limitOrderExpired: false };
+  }
+
+  const pending = state.pendingLimitOrder;
+  const isLong = pending.side === 'Buy';
+  const high = new Decimal(candle.high);
+  const low = new Decimal(candle.low);
+
+  // Check if limit price is hit (wick pierces the limit price)
+  const limitHit = isLong ? low.lte(pending.limitPrice) : high.gte(pending.limitPrice);
+
+  // Increment candles waited
+  const newCandlesWaited = pending.candlesWaited + 1;
+
+  // Check expiration
+  const expired = newCandlesWaited > config.limitExpirationCandles;
+
+  if (limitHit) {
+    // Limit order filled - convert to open trade
+    const entryFee = pending.limitPrice.mul(pending.qty).mul(TAKER_FEE_RATE);
+
+    const openTrade: OpenTrade = {
+      entryTime: candle.timestamp,
+      entryPrice: pending.limitPrice, // Filled at limit price
+      slPrice: pending.slPrice,
+      tpPrice: pending.tpPrice,
+      qty: pending.qty,
+      side: pending.side,
+      scenarioId: pending.scenarioId,
+      scenarioName: pending.scenarioName,
+      entryFee,
+      zoneType: pending.zoneType,
+      zoneTop: pending.zoneTop,
+      zoneBottom: pending.zoneBottom,
+      zoneTimeframe: pending.zoneTimeframe,
+      zoneDirection: pending.zoneDirection,
+      zoneTimestamp: pending.zoneTimestamp,
+      structureType: pending.structureType,
+      structureTimestamp: pending.structureTimestamp,
+      structurePrice: pending.structurePrice,
+      orderType: 'Limit',
+      limitPrice: pending.limitPrice,
+      limitOrderPlacedAt: pending.placedAt,
+      limitOrderCandlesWaited: pending.candlesWaited,
+    };
+
+    const newBalance = state.balance.minus(entryFee);
+    const newPeak = newBalance.gt(state.peakBalance) ? newBalance : state.peakBalance;
+    const drawdown = newPeak.minus(newBalance).div(newPeak).mul(100);
+
+    const newState: BacktestState = {
+      ...state,
+      balance: newBalance,
+      equity: newBalance,
+      peakBalance: newPeak,
+      maxDrawdown: drawdown.gt(state.maxDrawdown) ? drawdown : state.maxDrawdown,
+      openTrade,
+      pendingLimitOrder: null,
+      mitigatedZones: state.mitigatedZones, // Already added when limit order was placed
+    };
+
+    logger.debug(`Backtest LIMIT ORDER FILLED: ${pending.scenarioName} ${pending.side} limitPrice=${pending.limitPrice.toFixed(4)} filled@=${new Decimal(candle.low).toFixed(4)}/${new Decimal(candle.high).toFixed(4)} candlesWaited=${pending.candlesWaited}`);
+    return { state: newState, limitOrderFilled: true, limitOrderExpired: false };
+  }
+
+  if (expired) {
+    // Limit order expired - cancel it
+    logger.debug(`Backtest LIMIT ORDER EXPIRED: ${pending.scenarioName} ${pending.side} limitPrice=${pending.limitPrice.toFixed(4)} after ${pending.candlesWaited} candles`);
+    const newState: BacktestState = {
+      ...state,
+      pendingLimitOrder: null,
+      mitigatedZones: state.mitigatedZones, // Zone already burned, keep it
+    };
+    return { state: newState, limitOrderFilled: false, limitOrderExpired: true };
+  }
+
+  // Still waiting - update candles waited
+  const newState: BacktestState = {
+    ...state,
+    pendingLimitOrder: {
+      ...pending,
+      candlesWaited: newCandlesWaited,
+    },
+  };
+  return { state: newState, limitOrderFilled: false, limitOrderExpired: false };
+}
+
 export function checkAndCloseTrade(
   state: BacktestState,
   candle: Candle,
-  config: { cooldownCandles: number; ltfTimeframe: string }
+  config: { cooldownCandles: number; ltfTimeframe: string; limitExpirationCandles: number }
 ): { state: BacktestState; tradeResult: TradeResult | null; mitigatedZone?: { type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION'; top: string; bottom: string; timeframe: string; direction: string; timestamp: number } } {
+  // First check pending limit orders
+  if (state.pendingLimitOrder) {
+    const limitCheck = checkPendingLimitOrder(state, candle, {
+      limitExpirationCandles: config.limitExpirationCandles,
+      ltfTimeframe: config.ltfTimeframe,
+    });
+    // If limit order was filled, we now have an open trade - continue to check for close on same candle
+    // If limit order expired, just return the updated state
+    if (limitCheck.limitOrderExpired || !limitCheck.limitOrderFilled) {
+      return { state: limitCheck.state, tradeResult: null };
+    }
+    // Limit order was filled - continue with the new state to check for SL/TP on same candle
+    state = limitCheck.state;
+  }
+  
   if (!state.openTrade) {
     return { state, tradeResult: null };
   }

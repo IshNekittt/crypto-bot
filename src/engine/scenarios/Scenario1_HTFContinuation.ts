@@ -1,9 +1,10 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario1_HTFContinuation extends BaseScenario {
-  constructor() {
-    super(1, 'HTF Continuation');
+  constructor(config: BotConfig) {
+    super(1, 'HTF Continuation', config);
   }
 
   override evaluate(patternData: any): boolean {

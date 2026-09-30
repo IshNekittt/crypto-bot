@@ -1,8 +1,47 @@
 import { Scenario9_TurtleSoup } from '../../src/engine/scenarios/Scenario9_TurtleSoup';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../src/config/env';
+
+const mockConfig: BotConfig = {
+  apiKey: '',
+  apiSecret: '',
+  testnet: false,
+  demoTrading: true,
+  symbols: [],
+  riskPercent: '2',
+  reducedRiskPercent: '1',
+  leverage: '10',
+  dataDir: 'data',
+  historyCandles: 200,
+  ltfTimeframe: '15',
+  htfTimeframe: '240',
+  macroCandles: 1000,
+  telegramBotToken: null,
+  telegramChatId: null,
+  databaseUrl: null,
+  autoTrading: false,
+  tradeApprovalTimeoutMinutes: 5,
+  enableLiveTestOrders: false,
+  activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+  enableFundingMonitor: false,
+  fundingMonitorSymbols: [],
+  fundingAlertThreshold: '0.0',
+  fundingRestoreThreshold: '0.0001',
+  symbolScenarios: new Map(),
+  backtestCsvPath: null,
+  cooldownCandles: 16,
+  smcSlAtrOffset: '0.5',
+  smcDisplacementMultiplier: '1.5',
+  limitExpirationCandles: 6,
+  smartEntryThresholdPct: '0.0015',
+};
 
 describe('Scenario9: Turtle Soup (Range SFP)', () => {
   let scenario: Scenario9_TurtleSoup;
+
+  beforeEach(() => {
+    scenario = new Scenario9_TurtleSoup(mockConfig);
+  });
 
   /**
    * Creates IDEAL synthetic pattern data for Turtle Soup (Bearish at EQH):
@@ -121,7 +160,7 @@ describe('Scenario9: Turtle Soup (Range SFP)', () => {
   };
 
   beforeEach(() => {
-    scenario = new Scenario9_TurtleSoup();
+    scenario = new Scenario9_TurtleSoup(mockConfig);
   });
 
   describe('SYNTHETIC TEST - Ideal Bearish Turtle Soup at EQH', () => {
@@ -280,7 +319,7 @@ it('should reject when SFP candle closes wrong direction', () => {
         atr15m: new Decimal('0.1'),
       };
       
-      const scenario1 = new Scenario9_TurtleSoup();
+      const scenario1 = new Scenario9_TurtleSoup(mockConfig);
       Scenario9_TurtleSoup.resetStats();
       scenario1.evaluate(data1);
       const stats1 = Scenario9_TurtleSoup.getRejectionStats();
@@ -296,7 +335,7 @@ it('should reject when SFP candle closes wrong direction', () => {
         atr15m: new Decimal('0.1'),
       };
       
-      const scenario2 = new Scenario9_TurtleSoup();
+      const scenario2 = new Scenario9_TurtleSoup(mockConfig);
       Scenario9_TurtleSoup.resetStats();
       scenario2.evaluate(data2);
       const stats2 = Scenario9_TurtleSoup.getRejectionStats();

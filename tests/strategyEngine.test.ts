@@ -55,7 +55,14 @@ describe('StrategyEngine - News Embargo Integration', () => {
 
     // Mock BybitClient
     mockClient = {
-      config: { historyCandles: 200 },
+      config: { 
+        historyCandles: 200,
+        ltfTimeframe: '15',
+        htfTimeframe: '240',
+        smartEntryThresholdPct: '0.0015',
+        limitExpirationCandles: 6,
+        cooldownCandles: 16,
+      },
       getKlines: jest.fn().mockResolvedValue([]),
       getInstrumentInfo: jest.fn().mockResolvedValue(mockInstrument),
       getOpenPositions: jest.fn().mockResolvedValue([]),
@@ -63,6 +70,8 @@ describe('StrategyEngine - News Embargo Integration', () => {
       syncServerTime: jest.fn().mockResolvedValue({ offsetMs: 0, roundTripMs: 100 }),
       getUsdtBalance: jest.fn().mockResolvedValue(new Decimal('10000')),
       placeMarketOrderWithTpsl: jest.fn().mockResolvedValue('order123'),
+      placeLimitOrderWithTpsl: jest.fn().mockResolvedValue('order123'),
+      getOpenOrders: jest.fn().mockResolvedValue([]),
     } as any;
 
     // Mock Database
@@ -171,7 +180,16 @@ describe('StrategyEngine - News Embargo Integration', () => {
       autoTrading: false,
       pendingTradeManager: mockPendingTradeManager,
       newsService: mockNewsService,
-      config: { ltfTimeframe: '15', htfTimeframe: '240', historyCandles: 200, activeScenarios: [1,2,3,4,5,6,7,8,9,10,11], symbolScenarios: new Map() } as any,
+      config: { 
+        ltfTimeframe: '15', 
+        htfTimeframe: '240', 
+        historyCandles: 200, 
+        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11], 
+        symbolScenarios: new Map(),
+        smartEntryThresholdPct: '0.0015',
+        limitExpirationCandles: 6,
+        cooldownCandles: 16,
+      } as any,
       activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
     });
 

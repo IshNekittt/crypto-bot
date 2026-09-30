@@ -16,6 +16,8 @@ export interface PendingTrade {
   resolve: (approved: boolean) => void;
   timeoutHandle: NodeJS.Timeout;
   createdAt: number;
+  messageId?: number; // Telegram message ID for timeout editing
+  originalText?: string; // Original message text for timeout editing
   isTest?: boolean;           // Flag for dry-run test trades
   isLiveDemoTest?: boolean;   // Flag for live demo test trades (real order on Demo)
 }
@@ -53,33 +55,21 @@ export class PendingTradeManager {
   ): Promise<boolean> {
     const tradeId = this.generateTradeId(symbol);
 
-    return new Promise<boolean>((resolve) => {
+    return new Promise<boolean>(async (resolve) => {
       const timeoutHandle = setTimeout(async () => {
         if (this.pendingTrades.has(tradeId)) {
+          const pending = this.pendingTrades.get(tradeId);
           this.pendingTrades.delete(tradeId);
-          await this.notifier.sendMessage(
-            `⏰ <b>Таймаут подтверждения</b>\nСделка ${tradeId} (${symbol}) автоматически отклонена по истечении ${this.approvalTimeoutMs / 60000} мин.`
-          );
+          if (pending?.messageId && pending.originalText) {
+            await this.notifier.editMessageWithTimeout(pending.messageId, pending.originalText);
+          } else {
+            await this.notifier.sendMessage(
+              `⏰ <b>Таймаут подтверждения</b>\nСделка ${tradeId} (${symbol}) автоматически отклонена по истечении ${this.approvalTimeoutMs / 60000} мин.`
+            );
+          }
           resolve(false);
         }
       }, this.approvalTimeoutMs);
-
-      const pending: PendingTrade = {
-        id: tradeId,
-        symbol,
-        entry,
-        sl,
-        tp,
-        scenarioId,
-        reason,
-        side,
-        qty,
-        resolve,
-        timeoutHandle,
-        createdAt: Date.now(),
-      };
-
-      this.pendingTrades.set(tradeId, pending);
 
       const text = [
         '🔔 <b>Требуется подтверждение сделки</b>',
@@ -102,23 +92,48 @@ export class PendingTradeManager {
         Markup.button.callback('❌ Отменить', `reject_${tradeId}`),
       ]);
 
-      this.sendMessageWithKeyboard(text, keyboard)
-        .then(() => logger.info(`Pending trade queued: ${tradeId}`))
-        .catch((err) => {
-          logger.error(`Failed to send approval message: ${err instanceof Error ? err.message : String(err)}`);
-          clearTimeout(timeoutHandle);
-          this.pendingTrades.delete(tradeId);
-          resolve(false);
-        });
+      const pending: PendingTrade = {
+        id: tradeId,
+        symbol,
+        entry,
+        sl,
+        tp,
+        scenarioId,
+        reason,
+        side,
+        qty,
+        resolve,
+        timeoutHandle,
+        createdAt: Date.now(),
+        messageId: undefined,
+        originalText: text,
+      };
+
+      this.pendingTrades.set(tradeId, pending);
+
+      let messageId: number | null = null;
+      try {
+        messageId = await this.sendMessageWithKeyboard(text, keyboard);
+      } catch (err) {
+        logger.error(`Failed to send approval message: ${err instanceof Error ? err.message : String(err)}`);
+        clearTimeout(timeoutHandle);
+        this.pendingTrades.delete(tradeId);
+        resolve(false);
+        return;
+      }
+      
+      // Update the pending trade with the messageId
+      pending.messageId = messageId ?? undefined;
     });
   }
 
-  private async sendMessageWithKeyboard(text: string, keyboard: ReturnType<typeof Markup.inlineKeyboard>): Promise<void> {
-    if (!this.notifier.enabled) return;
-    await this.notifier.bot.telegram.sendMessage(this.notifier.chatId, text, {
+  private async sendMessageWithKeyboard(text: string, keyboard: ReturnType<typeof Markup.inlineKeyboard>): Promise<number | null> {
+    if (!this.notifier.enabled) return null;
+    const msg = await this.notifier.bot.telegram.sendMessage(this.notifier.chatId, text, {
       parse_mode: 'HTML',
       ...keyboard,
     });
+    return msg.message_id;
   }
 
   handleApproval(tradeId: string, approved: boolean): boolean {

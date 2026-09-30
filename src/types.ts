@@ -7,6 +7,8 @@ export type SwingType = 'HIGH' | 'LOW';
 export type Timeframe = '1' | '3' | '5' | '15' | '30' | '60' | '120' | '240' | '360' | '720' | 'D' | 'W' | 'M';
 export type TradeSide = 'Buy' | 'Sell';
 export type TradeStatus = 'OPEN' | 'CLOSED';
+export type OrderType = 'Market' | 'Limit';
+export type TimeInForce = 'IOC' | 'GTC' | 'FOK';
 
 export { BotConfig };
 
@@ -95,6 +97,20 @@ export interface TradeRecord {
   readonly orderId: string | null;
 }
 
+export interface OpenOrder {
+  readonly orderId: string;
+  readonly orderLinkId: string;
+  readonly symbol: string;
+  readonly side: TradeSide;
+  readonly orderType: OrderType;
+  readonly price: string | null; // null for market orders
+  readonly qty: string;
+  readonly stopLoss: string | null;
+  readonly takeProfit: string | null;
+  readonly createdAt: number;
+  readonly status: 'New' | 'PartiallyFilled' | 'Filled' | 'Cancelled' | 'Rejected';
+}
+
 export interface NewTradeInput {
   readonly symbol: string;
   readonly side: TradeSide;
@@ -114,6 +130,19 @@ export interface MarketOrderRequest {
   readonly takeProfit: string;
   readonly orderLinkId: string;
 }
+
+export interface LimitOrderRequest {
+  readonly symbol: string;
+  readonly side: TradeSide;
+  readonly qty: string;
+  readonly price: string;
+  readonly stopLoss: string;
+  readonly takeProfit: string;
+  readonly orderLinkId: string;
+  readonly timeInForce: TimeInForce;
+}
+
+export type OrderRequest = MarketOrderRequest | LimitOrderRequest;
 
 export interface ScenarioLevels {
   readonly entry: Decimal;

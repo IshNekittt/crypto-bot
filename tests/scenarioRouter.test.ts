@@ -1,5 +1,40 @@
 import { ScenarioRouter } from '../src/engine/scenarioRouter';
 import { IScenario } from '../src/types';
+import { BotConfig } from '../src/config/env';
+
+const mockConfig: BotConfig = {
+  apiKey: '',
+  apiSecret: '',
+  testnet: false,
+  demoTrading: true,
+  symbols: [],
+  riskPercent: '2',
+  reducedRiskPercent: '1',
+  leverage: '10',
+  dataDir: 'data',
+  historyCandles: 200,
+  ltfTimeframe: '15',
+  htfTimeframe: '240',
+  macroCandles: 1000,
+  telegramBotToken: null,
+  telegramChatId: null,
+  databaseUrl: null,
+  autoTrading: false,
+  tradeApprovalTimeoutMinutes: 5,
+  enableLiveTestOrders: false,
+  activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+  enableFundingMonitor: false,
+  fundingMonitorSymbols: [],
+  fundingAlertThreshold: '0.0',
+  fundingRestoreThreshold: '0.0001',
+  symbolScenarios: new Map(),
+  backtestCsvPath: null,
+  cooldownCandles: 16,
+  smcSlAtrOffset: '0.5',
+  smcDisplacementMultiplier: '1.5',
+  limitExpirationCandles: 6,
+  smartEntryThresholdPct: '0.0015',
+};
 
 const mockNotifier = {
   enabled: true,
@@ -34,6 +69,7 @@ describe('ScenarioRouter', () => {
       patternRecognizer: mockPatternRecognizer,
       notifier: mockNotifier,
       activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+      config: mockConfig,
     });
     jest.clearAllMocks();
   });
@@ -50,11 +86,11 @@ describe('ScenarioRouter', () => {
       expect(scenarios.map((s: IScenario) => s.name)).toEqual([
         'HTF Liquidity Sweep',
         'AMD (Accumulation-Manipulation-Distribution)',
-        'Turtle Soup (Range SFP)',
+        'Turtle Soup',
         'Breaker Block Entry',
         'Mitigation Block',
         'HTF Continuation',
-        'Inducement (IDM)',
+        'IDM',
         'Failure Swing (SMS)',
         'Range Deviation & Reclaim',
         'FVG Fill',
@@ -87,6 +123,7 @@ describe('ScenarioRouter', () => {
         },
         notifier: mockNotifier,
         activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        config: mockConfig,
       });
 
       (testRouter as any).scenarios = mockScenarios;
@@ -121,6 +158,7 @@ describe('ScenarioRouter', () => {
         },
         notifier: mockNotifier,
         activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        config: mockConfig,
       });
 
       (testRouter as any).scenarios = mockScenarios;
@@ -144,6 +182,7 @@ describe('ScenarioRouter', () => {
         patternRecognizer: { buildPatternData: jest.fn().mockResolvedValue({}) },
         notifier: mockNotifier,
         activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        config: mockConfig,
       });
 
       (testRouter as any).scenarios = mockScenarios;
@@ -163,6 +202,7 @@ describe('ScenarioRouter', () => {
         },
         notifier: mockNotifier,
         activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        config: mockConfig,
       });
 
       const result = await testRouter.evaluate([], [], Date.now());

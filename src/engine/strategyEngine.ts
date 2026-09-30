@@ -88,6 +88,7 @@ export class StrategyEngine {
       patternRecognizer: deps.patternRecognizer,
       notifier: deps.notifier,
       activeScenarios: deps.activeScenarios,
+      config: deps.config,
     });
   }
 
@@ -452,10 +453,25 @@ export class StrategyEngine {
     const result = await this.scenarioRouter.evaluate(candlesLtf, candlesHtf, candleTimestamp, this.mitigatedZones);
 
     if (result.triggered && result.levels) {
+      // Smart Pullback Entry: Determine order type based on price deviation from ideal entry
+      const idealEntry = new Decimal(result.levels.entry);
+      const currentPrice = new Decimal(lastCandle.close);
+      const smartThreshold = new Decimal(this.deps.config.smartEntryThresholdPct); // e.g., 0.0015 = 0.15%
+      
+      const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
+      const useMarketOrder = priceDiffPct.lte(smartThreshold);
+      
+      const orderType = useMarketOrder ? 'Market' : 'Limit';
+      const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
+      
+      logger.info(
+        `[${this.symbol}] Smart Entry: idealEntry=${idealEntry.toFixed(4)} currentPrice=${currentPrice.toFixed(4)} diff=${priceDiffPct.mul(100).toFixed(4)}% threshold=${smartThreshold.mul(100).toFixed(2)}% -> ${orderType}${orderType === 'Limit' ? ` @ ${limitPrice}` : ''}`
+      );
+
       const riskResult = await this.deps.riskManager.calculatePosition({
         symbol: this.symbol,
         side: 'Buy',
-        entryPrice: new Decimal(result.levels.entry),
+        entryPrice: idealEntry,
         stopLossRaw: new Decimal(result.levels.stopLoss),
         takeProfitRaw: new Decimal(result.levels.takeProfit),
         instrument: this.deps.instrument,
@@ -467,6 +483,8 @@ export class StrategyEngine {
           direction: result.zoneDetails.direction,
           timestamp: result.zoneDetails.timestamp,
         } : null,
+        orderType,
+        limitPrice: limitPrice ?? undefined,
       });
 
       if (!riskResult.ok) {

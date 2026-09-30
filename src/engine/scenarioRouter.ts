@@ -2,6 +2,7 @@ import { IScenario, StructureDetails } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { ZoneDetails } from '../types';
+import { BotConfig } from '../config/env';
 import { Scenario1_HTFContinuation } from './scenarios/Scenario1_HTFContinuation';
 import { Scenario2_FVGFill } from './scenarios/Scenario2_FVGFill';
 import { Scenario3_IDM } from './scenarios/Scenario3_IDM';
@@ -19,6 +20,7 @@ export interface ScenarioRouterDeps {
   readonly patternRecognizer: any;
   readonly notifier: any;
   readonly activeScenarios: number[];
+  readonly config: BotConfig;
 }
 
 export interface MitigatedZone {
@@ -49,33 +51,29 @@ export interface RouterResult {
 export class ScenarioRouter {
   private readonly symbol: string;
   private readonly patternRecognizer: any;
-  private readonly _notifier: any;
-
-  get notifier(): any {
-    return this._notifier;
-  }
+  private readonly config: BotConfig;
   private readonly scenarios: IScenario[];
 
   constructor(deps: ScenarioRouterDeps) {
     this.symbol = deps.symbol;
     this.patternRecognizer = deps.patternRecognizer;
-    this._notifier = deps.notifier;
+    this.config = deps.config;
 
     const allScenarios: IScenario[] = [
       // Priority 1: Complex, high-precision scenarios (checked first)
-      new Scenario5_HTFLiquiditySweep(),    // 5: HTF Liquidity Sweep
-      new Scenario7_AMD(),                   // 7: AMD
-      new Scenario9_TurtleSoup(),            // 9: Turtle Soup
-      new Scenario10_BreakerBlock(),         // 10: Breaker Block
-      new Scenario11_MitigationBlock(),      // 11: Mitigation Block
+      new Scenario5_HTFLiquiditySweep(this.config),    // 5: HTF Liquidity Sweep
+      new Scenario7_AMD(this.config),                   // 7: AMD
+      new Scenario9_TurtleSoup(this.config),            // 9: Turtle Soup
+      new Scenario10_BreakerBlock(this.config),         // 10: Breaker Block
+      new Scenario11_MitigationBlock(this.config),      // 11: Mitigation Block
       // Priority 2: Trend continuation scenarios
-      new Scenario1_HTFContinuation(),       // 1: HTF Continuation
-      new Scenario3_IDM(),                   // 3: IDM
-      new Scenario6_SMS(),                   // 6: Failure Swing (SMS)
-      new Scenario8_RangeDeviationReclaim(), // 8: Range Deviation & Reclaim
+      new Scenario1_HTFContinuation(this.config),       // 1: HTF Continuation
+      new Scenario3_IDM(this.config),                   // 3: IDM
+      new Scenario6_SMS(this.config),                   // 6: Failure Swing (SMS)
+      new Scenario8_RangeDeviationReclaim(this.config), // 8: Range Deviation & Reclaim
       // Priority 3: Simple, greedy scenarios (checked last)
-      new Scenario2_FVGFill(),               // 2: FVG Fill
-      new Scenario4_MitigationChain(),       // 4: Mitigation Chain
+      new Scenario2_FVGFill(this.config),               // 2: FVG Fill
+      new Scenario4_MitigationChain(this.config),       // 4: Mitigation Chain
     ];
 
     if (deps.activeScenarios && deps.activeScenarios.length > 0) {

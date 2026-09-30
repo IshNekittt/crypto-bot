@@ -1,5 +1,6 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../../config/env';
 
 export class Scenario7_AMD extends BaseScenario {
   private static rejectionStats = {
@@ -12,6 +13,10 @@ export class Scenario7_AMD extends BaseScenario {
     noFvg: 0,
     totalEvals: 0
   };
+
+  constructor(config: BotConfig) {
+    super(7, 'AMD (Accumulation-Manipulation-Distribution)', config);
+  }
 
   static getRejectionStats() {
     return { ...this.rejectionStats };
@@ -28,10 +33,6 @@ export class Scenario7_AMD extends BaseScenario {
       noFvg: 0,
       totalEvals: 0
     };
-  }
-
-  constructor() {
-    super(7, 'AMD (Accumulation-Manipulation-Distribution)');
   }
 
   override evaluate(patternData: any): boolean {

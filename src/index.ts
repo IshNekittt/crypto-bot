@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
 import { DateTime } from 'luxon';
+import { Decimal } from 'decimal.js';
 
 import { BybitClient } from './api/bybitClient';
 import { BybitWebsocket } from './api/wsClient';
@@ -214,8 +215,10 @@ async function main(): Promise<void> {
 
   const engines: StrategyEngine[] = [];
 
-  // Create shared PatternRecognizer instance
-  const patternRecognizer = new PatternRecognizer(client);
+  // Create shared PatternRecognizer instance with SMC config
+  const patternRecognizer = new PatternRecognizer(client, {
+    displacementMultiplier: new Decimal(config.smcDisplacementMultiplier),
+  });
 
   // Initialize macro context for all symbols at startup (bootstrap phase)
   logger.info('Initializing macro context for all symbols...');
@@ -308,7 +311,7 @@ async function main(): Promise<void> {
   await ws.subscribeKlines(config.symbols, ['15', '240']);
   await ws.subscribePrivate();
 
-  const reconciliation = new ReconciliationLoop(client, db, engines);
+  const reconciliation = new ReconciliationLoop(client, db, engines, config);
   reconciliation.start();
 
   backupService.start();

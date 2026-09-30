@@ -1,5 +1,5 @@
 import { Decimal } from "decimal.js";
-import { InstrumentInfo, TradeRecord, TradeSide } from "../types";
+import { InstrumentInfo, TradeRecord, TradeSide, OrderType } from "../types";
 import {
   formatPrice,
   formatQuantity,
@@ -36,6 +36,8 @@ export interface PositionPlanInput {
     direction: string | null;
     timestamp: number | null;
   } | null;
+  readonly orderType?: OrderType;
+  readonly limitPrice?: string;
 }
 
 export interface PositionPlan {
@@ -58,6 +60,8 @@ export interface PositionPlan {
     direction: string | null;
     timestamp: number | null;
   } | null;
+  readonly orderType: OrderType;
+  readonly limitPrice: string | null;
 }
 
 export type PositionPlanResult =
@@ -189,6 +193,8 @@ export class RiskManager {
         balanceUsdt,
         scenarioId: null,
         zoneDetails: input.zoneDetails,
+        orderType: input.orderType ?? 'Market',
+        limitPrice: input.limitPrice ?? null,
       },
     };
   }

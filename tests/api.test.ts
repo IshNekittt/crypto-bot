@@ -43,6 +43,10 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     symbolScenarios: new Map(),
     backtestCsvPath: null,
     cooldownCandles: 16,
+    smcSlAtrOffset: '0.5',
+    smcDisplacementMultiplier: '1.5',
+    limitExpirationCandles: 6,
+    smartEntryThresholdPct: '0.0015',
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }
