@@ -1,6 +1,7 @@
 import { Decimal } from 'decimal.js';
 import { Candle, SniperZone } from '../types';
 import { logger } from '../utils/logger';
+import { evaluateTradeManagement, TradeContext } from '../risk/tradeManager';
 
 export const TAKER_FEE_RATE = new Decimal('0.00055');
 export const INITIAL_BALANCE = new Decimal('1000');
@@ -70,6 +71,13 @@ export interface OpenTrade {
   limitPrice?: Decimal;
   limitOrderPlacedAt?: number;
   limitOrderCandlesWaited?: number;
+  // Trade Management (Adaptive Fractioning)
+  managementState?: {
+    milestone1Triggered: boolean;
+    milestone2Triggered: boolean;
+    initialTotalR: string;
+    initialQty: string;
+  };
 }
 
 export interface PendingLimitOrder {
@@ -341,6 +349,14 @@ export function openTrade(
   // Market order: immediate fill (existing logic)
   const entryFee = entryPrice.mul(qty).mul(TAKER_FEE_RATE);
 
+  // Initialize trade management state
+  const managementState = {
+    milestone1Triggered: false,
+    milestone2Triggered: false,
+    initialTotalR: '0',
+    initialQty: qty.toString(),
+  };
+
   const openTrade: OpenTrade = {
     entryTime: candle.timestamp,
     entryPrice,
@@ -361,6 +377,7 @@ export function openTrade(
     structureTimestamp: structureDetails?.timestamp,
     structurePrice: structureDetails?.price,
     orderType: 'Market',
+    managementState,
   };
 
   const newBalance = state.balance.minus(entryFee); // Deduct entry fee immediately
@@ -552,6 +569,100 @@ const trade = state.openTrade;
 
   const hitSL = isLong ? low.lte(effectiveSlPrice) : high.gte(effectiveSlPrice);
   const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
+
+  // === TRADE MANAGEMENT (Adaptive Fractioning) ===
+  // Check for partial close / SL trailing signals
+  const managementState = trade.managementState || {
+    milestone1Triggered: false,
+    milestone2Triggered: false,
+    initialTotalR: '0',
+    initialQty: trade.qty.toString(),
+  };
+
+  const managementContext: TradeContext = {
+    entryPrice: trade.entryPrice.toString(),
+    stopLoss: trade.slPrice.toString(),
+    takeProfit: trade.tpPrice.toString(),
+    currentPrice: (isLong ? high : low).toString(),
+    side: trade.side as 'Buy' | 'Sell',
+    initialQty: trade.qty.toString(),
+    managementState,
+  };
+
+  const managementSignal = evaluateTradeManagement(managementContext);
+
+  // Apply management signal
+  let updatedTrade = trade;
+  let updatedManagementState = managementState;
+
+  if (managementSignal.action !== 'none') {
+    logger.debug(`Backtest Trade Management: ${managementSignal.action} - ${managementSignal.reason}`);
+    
+    if (managementSignal.action === 'move_sl_to_entry' || managementSignal.action === 'trail_sl_to_profit') {
+      if (managementSignal.newStopLoss) {
+        updatedTrade = {
+          ...updatedTrade,
+          slPrice: new Decimal(managementSignal.newStopLoss),
+        };
+        updatedManagementState = managementSignal.updatedState;
+      }
+    } else if (managementSignal.action === 'close_partial_25' || managementSignal.action === 'close_partial_50') {
+      if (managementSignal.closeQty) {
+        // Simulate partial close: calculate PnL for closed portion
+        const closeQty = new Decimal(managementSignal.closeQty);
+        const closePrice = isLong ? high : low;
+        const exitFee = closePrice.mul(closeQty).mul(TAKER_FEE_RATE);
+        
+        const priceDiff = isLong 
+          ? closePrice.minus(trade.entryPrice) 
+          : trade.entryPrice.minus(closePrice);
+        const grossPnl = priceDiff.mul(closeQty);
+        const netPnl = grossPnl.minus(exitFee);
+        
+        // Update balance with partial PnL
+        const partialBalance = state.balance.plus(netPnl);
+        const partialPeak = partialBalance.gt(state.peakBalance) ? partialBalance : state.peakBalance;
+        const partialDrawdown = partialPeak.minus(partialBalance).div(partialPeak).mul(100);
+        
+        // Reduce qty
+        const remainingQty = trade.qty.minus(closeQty);
+        
+        updatedTrade = {
+          ...updatedTrade,
+          qty: remainingQty,
+          slPrice: managementSignal.newStopLoss ? new Decimal(managementSignal.newStopLoss) : updatedTrade.slPrice,
+        };
+        
+        updatedManagementState = managementSignal.updatedState;
+        
+        // Update state balance and add partial close to trades
+        const partialState: BacktestState = {
+          ...state,
+          balance: partialBalance,
+          equity: partialBalance,
+          peakBalance: partialPeak,
+          maxDrawdown: partialDrawdown.gt(state.maxDrawdown) ? partialDrawdown : state.maxDrawdown,
+          openTrade: updatedTrade,
+        };
+        
+        // Apply management state update
+        partialState.openTrade = {
+          ...partialState.openTrade!,
+          managementState: updatedManagementState,
+        };
+        
+        return { state: partialState, tradeResult: null, mitigatedZone: undefined };
+      }
+    }
+
+    // Update management state in trade if it changed
+    if (JSON.stringify(updatedManagementState) !== JSON.stringify(managementState)) {
+      updatedTrade = {
+        ...updatedTrade,
+        managementState: updatedManagementState,
+      };
+    }
+  }
 
   // If breakeven was triggered but no SL/TP hit, update the trade's SL in state
   if (breakevenTriggered && !hitSL && !hitTP) {

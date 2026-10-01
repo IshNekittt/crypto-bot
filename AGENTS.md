@@ -1,4 +1,4 @@
-# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-09-26)
+# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-10-01)
 
 > **Single source of truth for any AI agent working on this codebase.**
 > Every architectural decision, invariant, convention, and lesson learned in blood is documented here.
@@ -116,7 +116,8 @@ src/
 ├── feed/
 │   └── candleFeed.ts      # 15m/4H buffers, live price from forming candle
 ├── risk/
-│   └── riskManager.ts     # Position sizing, Drawdown Guard, minOrderQty
+│   ├── riskManager.ts     # Position sizing, Drawdown Guard, minOrderQty
+│   └── tradeManager.ts    # Adaptive Fractioning logic (partial close, SL trailing)
 ├── services/
 │   ├── backupService.ts   # 24h auto-backup + /backup cmd (Blob+fetch)
 │   ├── newsService.ts     # News Embargo filter (FXMacroData API)
@@ -301,7 +302,75 @@ All three execution pipeline fixes applied in single pass:
 - Once moved, SL stays at entry for remainder of trade
 - If price retraces to entry → closes at ~0 PnL (minus fees)
 
-## 6. SMC MATHEMATICS — `src/smc/patternRecognizer.ts`
+## 6. ADAPTIVE FRACTIONING — Trade Management (`src/risk/tradeManager.ts`)
+
+**Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
+
+**Solution**: **Adaptive Fractioning** — Dynamic position management that adapts to the trade's initial R:R ratio.
+
+### 6.1 Core Concept: Two Management Modes
+
+| Trade Type | Condition | Management Strategy |
+|------------|-----------|---------------------|
+| **Classic** | TotalR < 4 (e.g., 1:3 R:R) | Single milestone: Move SL to entry at 66% progress |
+| **Sniper** | TotalR ≥ 4 (e.g., 1:5+ R:R) | Two milestones: 33% (close 25%, SL→entry) → 66% (close 25%, trail SL) |
+
+### 6.2 Progress Calculation
+
+```
+progress = |currentPrice - entry| / |takeProfit - entry|  // 0.0 to 1.0
+```
+
+### 6.3 Milestone Logic
+
+| Mode | Milestone | Progress | Action |
+|------|-----------|----------|--------|
+| Classic | 1 (only) | ≥ 66% | SL → Entry (breakeven) |
+| Sniper | 1 | ≥ 33% | Close 25% of position, SL → Entry |
+| Sniper | 2 | ≥ 66% | Close another 25%, Trail SL to Entry + 33% of TP distance |
+
+### 6.4 Implementation (`src/risk/tradeManager.ts`)
+
+```typescript
+export function evaluateTradeManagement(context: TradeContext): TradeManagementSignal {
+  // Calculates progress toward TP
+  // Returns signal: { action, reason, newStopLoss?, closeQty?, updatedState }
+}
+```
+
+**State Persistence** (`TradeManagementState`):
+```typescript
+{
+  milestone1Triggered: boolean,   // 33% (Sniper) or 66% (Classic)
+  milestone2Triggered: boolean,   // 66% (Sniper only)
+  initialTotalR: string,          // Initial R:R ratio as string
+  initialQty: string              // Initial position size
+}
+```
+
+**DB Persistence**: `management_state JSONB` column in `trades` table, updated on each milestone.
+
+### 6.5 Live Execution (`StrategyEngine.checkAndManagePosition`)
+
+Called on **every 1m candle** when `state === IN_TRADE`:
+1. Fetch open trade + `management_state` from DB
+2. Call `evaluateTradeManagement()` with current 1m candle price
+3. Execute signal:
+   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.amendOrder()`
+   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order)
+   - Update `management_state` in DB via `updateTradeManagementState()`
+
+### 6.6 Backtest Simulation (`executionSimulator.ts`)
+
+In `checkAndCloseTrade()`:
+1. Evaluate management signal on each candle
+2. For partial closes: Calculate PnL for closed portion, reduce `qty`, update balance
+3. Update `managementState` in `openTrade` state
+4. Track partial close PnL in balance immediately
+
+---
+
+## 7. SMC MATHEMATICS — `src/smc/patternRecognizer.ts`
 
 ### 6.1 Tolerance & Intersections (No Strict Equality)
 
@@ -711,6 +780,43 @@ interface MitigatedStructure {
 
 ---
 
+### 6.19 Backup Service CSV Export — **NEW v2026-10-01**
+
+**Problem**: Database schema evolved with new columns (`order_type`, `limit_price`, `management_state` JSONB) but backup CSV export didn't include them.
+
+**Solution**: Updated `tradesToCsv()` in `src/services/backupService.ts`:
+
+1. **Added columns to CSV header**:
+   ```typescript
+   const headers = [
+     // ... existing columns ...
+     'order_type',
+     'limit_price',
+     'management_state',
+   ];
+   ```
+
+2. **JSONB Serialization for `management_state`**:
+   ```typescript
+   // In row mapping:
+   escape(JSON.stringify(t.management_state || {}))
+   ```
+   - Uses `JSON.stringify()` with `{}` fallback for null
+   - Wrapped in existing `escape()` function (handles CSV escaping: doubles quotes, wraps in quotes if contains commas/quotes/newlines)
+   - Empty object `{}` fallback for null/undefined
+
+4. **Type Safety**: Updated `TradeRecord` interface in `database.ts` to include `management_state: any | null`
+
+**CSV Output Example**:
+```csv
+id,symbol,...,order_type,limit_price,management_state
+"trade_123","BTCUSDT",...,"Limit","50000.00","{\"milestone1Triggered\":true,\"milestone2Triggered\":false,\"initialTotalR\":\"5.2\",\"initialQty\":\"0.1\"}"
+```
+
+**Invariant**: JSONB always serialized as valid JSON string, CSV-safe via existing `escape()` function (doubles quotes, wraps in quotes if contains special chars).
+
+---
+
 ### 6.12 Same-Candle SL/TP Resolution (Lookahead Bias Fix) — **NEW v2026-09-24**
 
 **Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
@@ -920,7 +1026,7 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 
 ---
 
-## 7. THE 11 SCENARIOS — `src/engine/scenarios/`
+## 7. THE 12 SCENARIOS — `src/engine/scenarios/`
 
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -935,12 +1041,13 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 | **9**  | Turtle Soup         | Range High sweep (EQH) → short                             | EQH tolerance + SFP on range boundary                                         |
 | **10** | Breaker Block       | OB broken with displacement → retest                       | Body close beyond OB + FVG nearby                                             |
 | **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`). **FRESHNESS**: Always takes newest SMS (`smsList[smsList.length-1]`), newest CHoCH after SMS (`validChochs[validChochs.length-1]`), newest OB before SMS (`mbObs[mbObs.length-1]`). **RETEST**: Current 15m candle must test MB zone with wicks, close inside zone in trade direction, within 12h of CHoCH. **P/D**: Entry close tested against SMS→CHoCH impulse equilibrium (Long=Discount, Short=Premium). |
+| **12** | Sniper Touch        | 1m CHoCH inside 15m macro zone (PDH/PDL/PWH/PWL)           | Killzone (London/NY) + Sweep validation + 1m CHoCH + 1m OB entry              |
 
 ### 7.1 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
-- Scenarios setting `zoneDetails`: **1, 2, 4, 5, 7, 8, 10, 11**.
+- Scenarios setting `zoneDetails`: **1, 2, 4, 5, 7, 8, 10, 11, 12**.
 
 ### 7.2 Contextual Quality Filters (Confluence)
 

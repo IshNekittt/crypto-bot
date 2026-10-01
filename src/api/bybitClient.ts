@@ -531,6 +531,54 @@ export class BybitClient {
     }, 'getTickers');
   }
 
+  async amendOrder(request: { category: 'linear'; symbol: string; stopLoss?: string; takeProfit?: string }): Promise<void> {
+    if (this.checkCircuitBreaker(request.symbol)) {
+      throw new Error(`Circuit breaker OPEN for ${request.symbol}: order amend blocked for 60s`);
+    }
+
+    return this.executeWithRetry(async () => {
+      const response = await this.rest.amendOrder({
+        category: request.category,
+        symbol: request.symbol,
+        stopLoss: request.stopLoss,
+        takeProfit: request.takeProfit,
+      });
+
+      if (response.retCode !== 0) {
+        this.recordFailure(request.symbol, response.retCode);
+        throw new Error(`[${response.retCode}] ${response.retMsg}`);
+      }
+
+      this.recordSuccess(request.symbol);
+    }, 'amendOrder');
+  }
+
+  async placeReduceOnlyMarketOrder(request: { symbol: string; side: string; qty: string; orderLinkId: string }): Promise<string> {
+    if (this.checkCircuitBreaker(request.symbol)) {
+      throw new Error(`Circuit breaker OPEN for ${request.symbol}: order placement blocked for 60s`);
+    }
+
+    return this.executeWithRetry(async () => {
+      const response = await this.rest.submitOrder({
+        category: 'linear',
+        symbol: request.symbol,
+        side: request.side as 'Buy' | 'Sell',
+        orderType: 'Market',
+        qty: request.qty,
+        reduceOnly: true,
+        orderLinkId: request.orderLinkId,
+      });
+
+      if (response.retCode !== 0 || !response.result.orderId) {
+        this.recordFailure(request.symbol, response.retCode);
+        throw new Error(`[${response.retCode}] ${response.retMsg}`);
+      }
+
+      this.recordSuccess(request.symbol);
+      return response.result.orderId;
+    }, 'placeReduceOnlyMarketOrder');
+  }
+
   async fetchHistoricalCandlesInChunks(
     symbol: string,
     interval: Timeframe,

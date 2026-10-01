@@ -72,6 +72,9 @@ function isLosingTrade(trade: TradeRecord): boolean {
   return trade.pnl !== null && new Decimal(trade.pnl).isNegative();
 }
 
+// Export trade management utilities
+export * from "./tradeManager";
+
 export class RiskManager {
   private readonly balanceSource: BalanceSource;
   private readonly historySource: TradeHistorySource;

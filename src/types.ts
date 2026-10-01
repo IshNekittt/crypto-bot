@@ -187,6 +187,42 @@ export interface StructureDetails {
 
 export type ScenarioConstructor = new (deps: ScenarioDeps) => IScenario;
 
+export interface TradeManagementState {
+  milestone1Triggered: boolean;
+  milestone2Triggered: boolean;
+  initialTotalR: string;
+  initialQty: string;
+}
+
+export interface TradeRecord {
+  readonly id: string;
+  readonly symbol: string;
+  readonly side: TradeSide;
+  readonly entryPrice: string;
+  readonly stopLoss: string;
+  readonly takeProfit: string;
+  readonly qty: string;
+  readonly status: TradeStatus;
+  readonly pnl: string | null;
+  readonly exitPrice: string | null;
+  readonly openedAt: number;
+  readonly closedAt: number | null;
+  readonly orderId: string | null;
+  readonly managementState: TradeManagementState | null;
+}
+
+export interface OpenTrade {
+  readonly entryPrice: string;
+  readonly stopLoss: string;
+  readonly takeProfit: string;
+  readonly qty: string;
+  readonly side: TradeSide;
+  readonly entryTime: number;
+  readonly scenarioId: number;
+  readonly scenarioName: string;
+  readonly managementState: TradeManagementState | null;
+}
+
 export interface ScenarioDeps {
   readonly symbol: string;
   readonly instrument: InstrumentInfo;

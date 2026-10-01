@@ -25,6 +25,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 | **📊 Dynamic Approval**  | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)       |
 | **🛡 Breakeven Protection** | **SL → entry at 2R**: When price moves 2R in favor, SL permanently moves to entry price — protects profit, eliminates risk                              |
 | **👻 Ghost Signal Guard** | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                     |
+| **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
 | **Risk Management**      | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement, **Breakeven (SL→entry at 2R)** |
 | **Infrastructure**       | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                                       |
 | **PnL Accuracy**         | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                                 |
@@ -186,6 +187,65 @@ public calculateLevels(
 - **Offset floor**: `SL` always at least 0.1% from entry (prevents RiskManager division by zero)
 - Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - 16 dedicated tests verify geometry: 4 scenarios × 2 directions × 2 zone orientations
+
+or `None for today` / error state.
+
+---
+
+## ⚙️ Adaptive Fractioning (Dynamic Position Management) — v2026-10-01
+
+**Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
+
+**Solution**: **Adaptive Fractioning** — Dynamic position management that adapts to the trade's initial R:R ratio.
+
+### Two Management Modes
+
+| Trade Type | Condition | Management Strategy |
+|------------|-----------|---------------------|
+| **Classic** | TotalR < 4 (e.g., 1:3 R:R) | Single milestone: Move SL to entry at 66% progress |
+| **Sniper** | TotalR ≥ 4 (e.g., 1:5+ R:R) | Two milestones: 33% (close 25%, SL→entry) → 66% (close 25%, trail SL) |
+
+### Progress Calculation
+
+```
+progress = |currentPrice - entry| / |takeProfit - entry|  // 0.0 to 1.0
+```
+
+### Milestone Logic
+
+| Mode | Milestone | Progress | Action |
+|------|-----------|----------|--------|
+| Classic | 1 (only) | ≥ 66% | SL → Entry (breakeven) |
+| Sniper | 1 | ≥ 33% | Close 25% of position, SL → Entry |
+| Sniper | 2 | ≥ 66% | Close another 25%, Trail SL to Entry + 33% of TP distance |
+
+### State Persistence (`management_state` JSONB in `trades` table)
+
+```json
+{
+  "milestone1Triggered": true,
+  "milestone2Triggered": false,
+  "initialTotalR": "5.2",
+  "initialQty": "0.1"
+}
+```
+
+### Live Execution (`StrategyEngine.checkAndManagePosition`)
+
+Called on **every 1m candle** when `state === IN_TRADE`:
+1. Fetch open trade + `management_state` from DB
+2. Call `evaluateTradeManagement()` with current 1m candle price
+3. Execute signal:
+   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.amendOrder()`
+   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order)
+   - Update `management_state` in DB via `updateTradeManagementState()`
+
+### Backtest Simulation (`executionSimulator.ts`)
+
+In `checkAndCloseTrade()`:
+1. Evaluate management signal on each candle
+2. For partial closes: Calculate PnL for closed portion, reduce `qty`, update balance
+3. Update SL and management state in state
 
 ---
 
@@ -587,6 +647,7 @@ docker compose up -d
 | **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                 |
 | **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                |
 | **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                 |
+| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                        |
 
 ---
 
@@ -761,6 +822,26 @@ docker stats smc-bot                     # Resource usage
 ```
 
 ---
+## 📊 Backup CSV Export (Updated v2026-10-01)
+
+The `/backup` command now exports **22 columns** (previously 19) including new fields:
+
+| Column | Description |
+|--------|-------------|
+| `order_type` | `Market` or `Limit` |
+| `limit_price` | Limit price for Limit orders (null for Market) |
+| `management_state` | JSON string of adaptive fractioning state (e.g., `{"milestone1Triggered":true,"milestone2Triggered":false,"initialTotalR":"5.2","initialQty":"0.1"}`) |
+
+**CSV Export Process**:
+1. Bot queries `SELECT * FROM trades` (all **22 columns** including new fields)
+2. Converts to CSV with headers (now includes `order_type`, `limit_price`, `management_state`)
+3. `management_state` JSONB serialized via `JSON.stringify()` and CSV-escaped
+4. Gzips the CSV in memory
+5. Encrypts with AES-256-CBC (if `BACKUP_PASSWORD` set)
+6. Sends via **native `fetch` + `Blob` + `FormData`** to `api.telegram.org/bot<token>/sendDocument`
+7. **No `fs.writeFileSync`, no local files, no Telegraf `sendDocument` buffer bug**
+
+---
 
 ## 🔐 Backup Decryption
 
@@ -784,7 +865,7 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 | Command            | Description                                                                                                                                                                                          | Auth Required |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `/status`          | **Live X-Ray** per engine: Live Price, Last Candle, 4H Trend, Zones in Memory, Nearest Macro %dist, State. Also shows next high-impact USD news and funding rates.                                   | ✅            |
-| `/backup`          | Full DB dump (all 19 trades columns) → gzip → Telegram via `fetch`+Blob (no disk I/O, no `fs` usage). Encrypted with AES-256-CBC if `BACKUP_PASSWORD` set.                                           | ✅            |
+| `/backup`          | Full DB dump (all **22** trades columns) → gzip → Telegram via `fetch`+Blob (no disk I/O, no `fs` usage). Encrypted with AES-256-CBC if `BACKUP_PASSWORD` set.                                           | ✅            |
 | `/test_signal`     | **Dry-run** — creates a fake setup (BTCUSDT, entry 45000, SL 44000, TP 48000) → Inline Approve/Reject buttons → logs `✅ Test trade approved (DRY RUN)`. No real order placed.                       | ✅            |
 | `/test_live_order` | **E2E Live Demo** — places REAL order on Bybit Demo when approved. Requires `ENABLE_LIVE_TEST_ORDERS=true`. Uses real balance, real position sizing via RiskManager. Full Bybit API response logged. | ✅            |
 | `/test_db`         | Integration test: INSERT/SELECT/DELETE with Decimal zoneDetails. Verifies database connectivity and NUMERIC(24,8) precision.                                                                         | ✅            |
@@ -822,12 +903,17 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 
 ### `/backup` — How It Works
 
-1. Bot queries `SELECT * FROM trades` (all 19 columns)
-2. Converts to CSV with headers
+1. Bot queries `SELECT * FROM trades` (all **22 columns** including new fields)
+2. Converts to CSV with headers (now includes `order_type`, `limit_price`, `management_state`)
 3. Gzips the CSV in memory
 4. Encrypts with AES-256-CBC (if `BACKUP_PASSWORD` set)
 5. Sends via **native `fetch` + `Blob` + `FormData`** to `api.telegram.org/bot<token>/sendDocument`
 6. **No `fs.writeFileSync`, no local files, no Telegraf `sendDocument` buffer bug**
+
+**CSV Columns**: All 22 trade columns including new fields:
+- `order_type` — `Market` or `Limit`
+- `limit_price` — Limit price for Limit orders (null for Market)
+- `management_state` — JSON string of adaptive fractioning state (`{"milestone1Triggered":true,"milestone2Triggered":false,"initialTotalR":"5.2","initialQty":"0.1"}`)
 
 ### `/test_live_order` — End-to-End Verification
 

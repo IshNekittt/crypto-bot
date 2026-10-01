@@ -118,7 +118,25 @@ async function main(): Promise<void> {
     const isLiveDemoTest = pendingTradeApprove?.isLiveDemoTest === true;
     
     if (engine && !isTestTrade && !isLiveDemoTest) {
-      await engine.handleTradeApproval(tradeId, true);
+      try {
+        await engine.handleTradeApproval(tradeId, true);
+      } catch (err) {
+        logger.error(`${tradeId}: handleTradeApproval failed: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.answerCbQuery('❌ Ошибка при сохранении сделки', { show_alert: true });
+        try {
+          await ctx.editMessageReplyMarkup(undefined);
+          let originalText = '';
+          const message = ctx.callbackQuery?.message;
+          if (message && 'text' in message) {
+            originalText = message.text;
+          }
+          await ctx.editMessageText(
+            `${originalText}\n\n<b>[ ❌ SYSTEM ERROR ]</b>`,
+            { parse_mode: 'HTML' }
+          );
+        } catch {}
+        return;
+      }
     } else if (isTestTrade) {
       logger.info(`✅ Test trade approved (DRY RUN): ${tradeId}`);
     } else if (isLiveDemoTest) {
@@ -181,7 +199,25 @@ async function main(): Promise<void> {
     const isLiveDemoTest = pendingTradeReject?.isLiveDemoTest === true;
     
     if (engine && !isTestTrade) {
-      await engine.handleTradeApproval(tradeId, false);
+      try {
+        await engine.handleTradeApproval(tradeId, false);
+      } catch (err) {
+        logger.error(`${tradeId}: handleTradeApproval reject failed: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.answerCbQuery('❌ Ошибка при обработке отказа', { show_alert: true });
+        try {
+          await ctx.editMessageReplyMarkup(undefined);
+          let originalText = '';
+          const message = ctx.callbackQuery?.message;
+          if (message && 'text' in message) {
+            originalText = message.text;
+          }
+          await ctx.editMessageText(
+            `${originalText}\n\n<b>[ ❌ SYSTEM ERROR ]</b>`,
+            { parse_mode: 'HTML' }
+          );
+        } catch {}
+        return;
+      }
     } else if (isTestTrade) {
       logger.info(`❌ Test trade rejected (DRY RUN): ${tradeId}`);
     } else if (isLiveDemoTest) {

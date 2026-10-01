@@ -128,6 +128,9 @@ export class BackupService {
     zone_timeframe: string | null;
     zone_direction: string | null;
     zone_timestamp: number | null;
+    order_type: string | null;
+    limit_price: string | null;
+    management_state: any | null;
   }>): string {
 
     const headers = [
@@ -152,6 +155,9 @@ export class BackupService {
       'zone_timeframe',
       'zone_direction',
       'zone_timestamp',
+      'order_type',
+      'limit_price',
+      'management_state',
     ];
 
     const escape = (val: string | number | null | undefined): string => {
@@ -185,6 +191,9 @@ export class BackupService {
       escape(t.zone_timeframe),
       escape(t.zone_direction),
       escape(t.zone_timestamp),
+      escape(t.order_type),
+      escape(t.limit_price),
+      escape(JSON.stringify(t.management_state || {})),
     ].join(','));
 
     return [headers.join(','), ...rows].join('\n');

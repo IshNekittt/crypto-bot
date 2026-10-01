@@ -71,6 +71,7 @@ export interface TradeRecord {
   readonly zone_timestamp: number | null;
   readonly order_type: string | null;
   readonly limit_price: string | null;
+  readonly management_state: any | null;
 }
 
 export class PostgresDatabase {
@@ -143,12 +144,14 @@ export class PostgresDatabase {
           zone_direction VARCHAR(10),
           zone_timestamp BIGINT,
           order_type VARCHAR(10),
-          limit_price NUMERIC(24, 8)
+          limit_price NUMERIC(24, 8),
+          management_state JSONB DEFAULT '{}'::jsonb
         );
 
         -- Add missing columns if they don't exist (for existing databases)
         ALTER TABLE trades ADD COLUMN IF NOT EXISTS order_type VARCHAR(10);
         ALTER TABLE trades ADD COLUMN IF NOT EXISTS limit_price NUMERIC(24, 8);
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS management_state JSONB DEFAULT '{}'::jsonb;
 
         CREATE TABLE IF NOT EXISTS symbol_state (
           symbol VARCHAR(20) PRIMARY KEY,
@@ -196,7 +199,8 @@ export class PostgresDatabase {
   }
 
   // Trade methods
-  async openTrade(input: {
+async openTrade(input: {
+    id: string;
     symbol: string;
     scenario_id: number | null;
     entry_price: string;
@@ -214,14 +218,16 @@ export class PostgresDatabase {
     zone_timestamp?: number | null;
     order_type?: string | null;
     limit_price?: string | null;
+    management_state?: any | null;
   }): Promise<string> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `INSERT INTO trades (symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price)
-         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price, management_state)
+         VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          RETURNING id`,
         [
+          input.id,
           input.symbol,
           input.scenario_id,
           input.entry_price,
@@ -239,6 +245,7 @@ export class PostgresDatabase {
           input.zone_timestamp ?? null,
           input.order_type ?? null,
           input.limit_price ?? null,
+          input.management_state ? JSON.stringify(input.management_state) : '{}',
         ],
       );
       return result.rows[0].id;
@@ -253,6 +260,19 @@ export class PostgresDatabase {
       const result = await client.query(
         `UPDATE trades SET status = 'CLOSED', pnl = $1, exit_price = $2, closed_at = $3, reason = $4 WHERE id = $5 AND status = 'OPEN'`,
         [pnl, exitPrice, closedAt, reason, tradeId],
+      );
+      return result.rowCount !== null && result.rowCount > 0;
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateTradeManagementState(tradeId: string, managementState: any): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `UPDATE trades SET management_state = $1 WHERE id = $2 AND status = 'OPEN'`,
+        [JSON.stringify(managementState), tradeId],
       );
       return result.rowCount !== null && result.rowCount > 0;
     } finally {
@@ -284,11 +304,12 @@ export class PostgresDatabase {
       direction: string | null;
       timestamp: number | null;
     } | null;
+    managementState: any | null;
   } | null> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
+        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, management_state
          FROM trades WHERE symbol = $1 AND status = 'OPEN' ORDER BY id DESC LIMIT 1`,
         [symbol],
       );
@@ -318,6 +339,7 @@ export class PostgresDatabase {
           direction: row.zone_direction,
           timestamp: row.zone_timestamp,
         } : null,
+        managementState: row.management_state || null,
       };
     } finally {
       client.release();
@@ -348,11 +370,12 @@ export class PostgresDatabase {
       direction: string | null;
       timestamp: number | null;
     } | null;
+    managementState: any | null;
   }[]> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, side::text as side, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status::text as status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
+        `SELECT id, symbol, side::text as side, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status::text as status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, management_state
          FROM trades WHERE status = 'CLOSED' ORDER BY closed_at DESC, id DESC LIMIT $1`,
         [limit],
       );
@@ -380,6 +403,7 @@ export class PostgresDatabase {
           direction: row.zone_direction,
           timestamp: row.zone_timestamp,
         } : null,
+        managementState: row.management_state || null,
       }));
     } finally {
       client.release();
@@ -410,11 +434,12 @@ export class PostgresDatabase {
       direction: string | null;
       timestamp: number | null;
     } | null;
+    managementState: any | null;
   }[]> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
+        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, management_state
          FROM trades WHERE status = 'OPEN' ORDER BY id DESC`,
       );
       return result.rows.map(row => ({
@@ -441,6 +466,7 @@ export class PostgresDatabase {
           direction: row.zone_direction,
           timestamp: row.zone_timestamp,
         } : null,
+        managementState: row.management_state || null,
       }));
     } finally {
       client.release();
@@ -506,7 +532,7 @@ export class PostgresDatabase {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, pnl, exit_price, status, reason, opened_at, closed_at, order_id, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp
+        `SELECT id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, pnl, exit_price, status, reason, opened_at, closed_at, order_id, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, management_state
          FROM trades ORDER BY id ASC`,
       );
       return result.rows as TradeRecord[];

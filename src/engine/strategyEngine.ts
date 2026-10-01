@@ -11,6 +11,7 @@ import { NewsService } from '../services/newsService';
 import { InstrumentInfo, StrategyState, Timeframe, BotConfig } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
+import { evaluateTradeManagement } from '../risk/tradeManager';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
 
@@ -217,6 +218,10 @@ export class StrategyEngine {
     // Handle 1m candles for Sniper Mode - just accumulate, don't process
     if (update.interval === '1') {
       this.feed1m.applyKline(update);
+      // Check trade management on every 1m candle if we have an open position
+      if (this.state === StrategyState.IN_TRADE) {
+        await this.checkAndManagePosition(update.candle.close);
+      }
       return;
     }
 
@@ -237,6 +242,84 @@ export class StrategyEngine {
       );
     } finally {
       this.processing = false;
+    }
+  }
+
+  /**
+   * Check and manage open position using adaptive fractioning logic
+   * Called on every 1m candle when in IN_TRADE state
+   */
+  private async checkAndManagePosition(currentPrice: string): Promise<void> {
+    if (this.state !== StrategyState.IN_TRADE) return;
+
+    try {
+      const trade = await this.deps.db.getOpenTrade(this.symbol);
+      if (!trade) return;
+
+      const managementState = trade.managementState || {
+        milestone1Triggered: false,
+        milestone2Triggered: false,
+        initialTotalR: '0',
+        initialQty: trade.qty,
+      };
+
+      const signal = evaluateTradeManagement({
+        entryPrice: trade.entryPrice,
+        stopLoss: trade.stopLoss,
+        takeProfit: trade.takeProfit,
+        currentPrice,
+        side: trade.side as 'Buy' | 'Sell',
+        initialQty: trade.qty,
+        managementState,
+      });
+
+      if (signal.action === 'none') return;
+
+      logger.info(`[${this.symbol}] Trade management signal: ${signal.action} - ${signal.reason}`);
+
+      if (signal.action === 'move_sl_to_entry' || signal.action === 'trail_sl_to_profit') {
+        if (signal.newStopLoss) {
+          // Amend stop loss on exchange
+          await this.deps.client.amendOrder({
+            category: 'linear',
+            symbol: this.symbol,
+            stopLoss: signal.newStopLoss,
+          });
+          
+          // Update management state in DB
+          await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
+          logger.info(`[${this.symbol}] Stop loss updated to ${signal.newStopLoss}`);
+        }
+      } else if (signal.action === 'close_partial_25' || signal.action === 'close_partial_50') {
+        if (signal.closeQty) {
+          // Place reduce-only market order to close partial position
+          const closeSide = trade.side === 'Buy' ? 'Sell' : 'Buy';
+          
+          // Place reduce-only market order to close partial position
+          await this.deps.executionEngine.executePartialClose({
+            symbol: this.symbol,
+            side: closeSide as 'Buy' | 'Sell',
+            qty: signal.closeQty,
+            orderLinkId: `partial_${Date.now()}`,
+          });
+
+          // Update management state in DB
+          await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
+          logger.info(`[${this.symbol}] Partial close executed: ${signal.closeQty} ${trade.side === 'Buy' ? 'Sell' : 'Buy'}`);
+          
+          // If we also need to move SL
+          if (signal.newStopLoss) {
+            await this.deps.client.amendOrder({
+              category: 'linear',
+              symbol: this.symbol,
+              stopLoss: signal.newStopLoss,
+            });
+            await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
+          }
+        }
+      }
+    } catch (error) {
+      logger.error(`[${this.symbol}] Trade management error: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -299,6 +382,7 @@ export class StrategyEngine {
       side: updatedPlan.side,
       order_type: updatedPlan.orderType,
       limit_price: updatedPlan.limitPrice,
+      id: result.orderId || tradeId,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);
@@ -566,6 +650,7 @@ export class StrategyEngine {
     }
 
     await this.deps.db.openTrade({
+      id: result.orderId,
       symbol: this.symbol,
       scenario_id: this.plan.scenarioId ?? null,
       entry_price: this.plan.entryPrice,

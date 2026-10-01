@@ -26,6 +26,13 @@ export interface OrderSubmitter {
     orderLinkId: string;
     timeInForce: TimeInForce;
   }): Promise<string>;
+
+  placeReduceOnlyMarketOrder(request: {
+    symbol: string;
+    side: string;
+    qty: string;
+    orderLinkId: string;
+  }): Promise<string>;
 }
 
 export type ExecutionResult =
@@ -172,6 +179,50 @@ export class ExecutionEngine {
 
       await this.notifier.notifyCriticalError(`${params.symbol}: ордер отклонён — ${message}`);
       return { ok: false, reason: message, retCode, retMsg };
+    }
+  }
+
+  /**
+   * Execute a reduce-only market order for partial position close
+   */
+  async executePartialClose(params: {
+    symbol: string;
+    side: 'Buy' | 'Sell';
+    qty: string;
+    orderLinkId: string;
+  }): Promise<ExecutionResult> {
+    try {
+      const orderLinkId = params.orderLinkId;
+      const orderId = await this.submitter.placeReduceOnlyMarketOrder({
+        symbol: params.symbol,
+        side: params.side,
+        qty: params.qty,
+        orderLinkId,
+      });
+      logger.info(
+        `PARTIAL CLOSE Order placed: ${params.symbol} ${params.side} qty=${params.qty} reduceOnly id=${orderId}`,
+      );
+      return { ok: true, orderId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Partial close order failed for ${params.symbol}: ${message}`);
+
+      if (isCircuitBreakerError(error)) {
+        await this.notifier.notifyCriticalError(
+          `${params.symbol}: circuit breaker — partial close blocked for 60s (${message})`,
+        );
+        return { ok: false, reason: `${params.symbol}: circuit breaker — ${message}` };
+      }
+
+      if (isThrottlingOrMarginError(error)) {
+        await this.notifier.notifyCriticalError(
+          `${params.symbol}: rate limit / insufficient balance — ${message}`,
+        );
+        return { ok: false, reason: `${params.symbol}: rate limit — ${message}` };
+      }
+
+      await this.notifier.notifyCriticalError(`${params.symbol}: partial close rejected — ${message}`);
+      return { ok: false, reason: message };
     }
   }
 }
