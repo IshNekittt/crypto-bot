@@ -308,7 +308,11 @@ async function main(): Promise<void> {
   });
   ws.onExecution((payload) => logger.info(`Private WS execution event: ${JSON.stringify(payload)?.slice(0, 300)}`));
 
-  await ws.subscribeKlines(config.symbols, ['15', '240']);
+  // Subscribe to klines: 1m for Sniper Mode, 15m and 240m for regular scenarios
+  const klineIntervals = config.enableSniperMode 
+    ? ['1', '15', '240'] as const 
+    : ['15', '240'] as const;
+  await ws.subscribeKlines(config.symbols, klineIntervals);
   await ws.subscribePrivate();
 
   const reconciliation = new ReconciliationLoop(client, db, engines, config);

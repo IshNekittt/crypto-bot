@@ -81,9 +81,9 @@ function parseSymbols(raw: string): string[] {
 
 function parseActiveScenarios(raw: string | null): number[] {
   if (!raw || !raw.trim()) return [];
-  const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n) && n >= 1 && n <= 11);
+  const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n) && n >= 1 && n <= 12);
   if (ids.length === 0) {
-    throw new Error('ACTIVE_SCENARIOS must contain valid scenario IDs (1-11), e.g. ACTIVE_SCENARIOS=3,4,5,7,8,9');
+    throw new Error('ACTIVE_SCENARIOS must contain valid scenario IDs (1-12), e.g. ACTIVE_SCENARIOS=3,4,5,7,8,9,12');
   }
   return [...new Set(ids)].sort((a, b) => a - b);
 }
@@ -123,7 +123,7 @@ function parseSymbolScenarios(env: NodeJS.ProcessEnv, symbols: string[]): Map<st
     const key = `SCENARIOS_${symbol}`;
     const raw = env[key];
     if (raw && raw.trim()) {
-      const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n) && n >= 1 && n <= 11);
+      const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n) && n >= 1 && n <= 12);
       if (ids.length > 0) {
         map.set(symbol, [...new Set(ids)].sort((a, b) => a - b));
       }

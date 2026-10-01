@@ -67,6 +67,7 @@ export class StrategyEngine {
   private readonly deps: StrategyEngineDeps;
   private readonly feedLtf: CandleFeed;
   private readonly feedHtf: CandleFeed;
+  private readonly feed1m: CandleFeed; // 1m candles for Sniper Mode
   private readonly scenarioRouter: ScenarioRouter;
   private state: StrategyState = StrategyState.SCANNING;
   private plan: PositionPlan | null = null;
@@ -85,6 +86,8 @@ export class StrategyEngine {
     const historyCandles = deps.client.config?.historyCandles ?? 200;
     this.feedLtf = new CandleFeed(deps.symbol, deps.config.ltfTimeframe as Timeframe, historyCandles);
     this.feedHtf = new CandleFeed(deps.symbol, deps.config.htfTimeframe as Timeframe, historyCandles);
+    // 1m candle feed for Sniper Mode (capacity: 300 candles = 5 hours)
+    this.feed1m = new CandleFeed(deps.symbol, '1' as Timeframe, 300);
 
     this.scenarioRouter = new ScenarioRouter({
       symbol: deps.symbol,
@@ -210,6 +213,13 @@ export class StrategyEngine {
   async handleKline(update: KlineUpdate): Promise<void> {
     if (!update.confirmed) return;
     const htfInterval = this.deps.config.htfTimeframe;
+    
+    // Handle 1m candles for Sniper Mode - just accumulate, don't process
+    if (update.interval === '1') {
+      this.feed1m.applyKline(update);
+      return;
+    }
+
     const feed = update.interval === htfInterval ? this.feedHtf : this.feedLtf;
     const previousTimestamp = feed.getLastClosed()?.timestamp;
     feed.applyKline(update);
@@ -461,7 +471,10 @@ export class StrategyEngine {
       return;
     }
 
-    const result = await this.scenarioRouter.evaluate(candlesLtf, candlesHtf, candleTimestamp, this.mitigatedZones);
+    // Pass 1m candles to router if Sniper Mode is enabled
+    const candles1m = this.deps.config.enableSniperMode ? [...this.feed1m.getCandles()] : [];
+
+    const result = await this.scenarioRouter.evaluate(candlesLtf, candlesHtf, candleTimestamp, this.mitigatedZones, [], candles1m);
 
     if (result.triggered && result.levels) {
       // Smart Pullback Entry: Determine order type based on price deviation from ideal entry

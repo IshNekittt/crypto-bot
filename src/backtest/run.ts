@@ -150,12 +150,8 @@ async function runBacktestForSymbol(
 
   logger.level = "warn";
 
-  // --- СНАЙПЕРСКИЕ ПЕРЕМЕННЫЕ (Локальный State Machine) ---
   const useSniperMode =
     config.enableSniperMode === true && candles1m.length > 0;
-  let sniperModeActive = false;
-  let activeSniperZone: any = null; // Хранит результат от ScenarioRouter
-  let sniperEntryTime = 0;
 
   let index15m = 0;
   const mainCandles = useSniperMode ? candles1m : candlesLtf;
@@ -179,7 +175,6 @@ async function runBacktestForSymbol(
     let lastClosed15m: Candle | null = null;
 
     if (useSniperMode) {
-      // Идем по 15m массиву, пока свечи закрываются до текущего 1m времени
       while (
         index15m + 1 < candlesLtf.length &&
         candlesLtf[index15m + 1].timestamp <= candleTime
@@ -283,7 +278,7 @@ async function runBacktestForSymbol(
       }
     }
 
-    // === ЖЕСТКАЯ ПРОВЕРКА ОТКРЫТОЙ СДЕЛКИ (Идем по currentCandle - 1m или 15m) ===
+    // === ЖЕСТКАЯ ПРОВЕРКА ОТКРЫТОЙ СДЕЛКИ ===
     if (state.openTrade || state.pendingLimitOrder) {
       if (
         (state.openTrade && state.openTrade.entryTime !== candleTime) ||
@@ -316,8 +311,12 @@ async function runBacktestForSymbol(
       if (state.openTrade || state.pendingLimitOrder) continue;
     }
 
-    // === СИГНАЛЬНЫЙ ДВИЖОК ===
-    if (isNew15mClose && lastClosed15m) {
+    // === СИГНАЛЬНЫЙ ДВИЖОК (Единый вызов Router) ===
+    // В Sniper Mode: вызываем на каждой 1m свече, передаем sliced1m
+    // В обычном режиме: только на закрытии 15m свечи
+    const shouldEvaluateRouter = useSniperMode ? true : isNew15mClose;
+
+    if (shouldEvaluateRouter && lastClosed15m) {
       const validHtfTimestamps = htfTimestamps.filter(
         (ts) => ts <= lastClosed15m!.timestamp,
       );
@@ -325,71 +324,67 @@ async function runBacktestForSymbol(
         .map((ts) => htfMap.get(ts)!)
         .filter(Boolean);
 
-      if (currentHtfCandles.length < 50) continue;
+      if (currentHtfCandles.length >= 50) {
+        const shouldRebuildCache =
+          cachedPatternData === null ||
+          mitigatedZones.length !== lastCachedMitigatedZonesLength ||
+          mitigatedStructures.length !== lastCachedMitigatedStructuresLength ||
+          index15m - lastCachedCandleIndex >= CACHE_REBUILD_INTERVAL;
 
-      const shouldRebuildCache =
-        cachedPatternData === null ||
-        mitigatedZones.length !== lastCachedMitigatedZonesLength ||
-        mitigatedStructures.length !== lastCachedMitigatedStructuresLength ||
-        index15m - lastCachedCandleIndex >= CACHE_REBUILD_INTERVAL;
+        if (shouldRebuildCache) {
+          const ltfStart = Math.max(0, index15m - 200 + 1);
+          const currentLtfCandles = candlesLtf.slice(ltfStart, index15m + 1);
 
-      if (shouldRebuildCache) {
-        const ltfStart = Math.max(0, index15m - 200 + 1);
-        const currentLtfCandles = candlesLtf.slice(ltfStart, index15m + 1);
+          const htfEndIdx = currentHtfCandles.length - 1;
+          const htfStartIdx = Math.max(0, htfEndIdx - 50 + 1);
+          const currentHtfWindow = currentHtfCandles.slice(
+            htfStartIdx,
+            htfEndIdx + 1,
+          );
 
-        const htfEndIdx = currentHtfCandles.length - 1;
-        const htfStartIdx = Math.max(0, htfEndIdx - 50 + 1);
-        const currentHtfWindow = currentHtfCandles.slice(
-          htfStartIdx,
-          htfEndIdx + 1,
-        );
-
-        cachedRouterResult = await router.evaluate(
-          currentLtfCandles,
-          currentHtfWindow,
-          lastClosed15m.timestamp,
-          mitigatedZones,
-          state.mitigatedStructures,
-        );
-        lastCachedCandleIndex = index15m;
-        lastCachedMitigatedZonesLength = mitigatedZones.length;
-        lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
-      }
-
-      const routerResult = cachedRouterResult;
-
-      try {
-        if (
-          routerResult.triggered &&
-          routerResult.levels &&
-          routerResult.zoneDetails
-        ) {
+          // Подготовка 1m свечей для Снайперских сценариев
+          let candles1mForRouter: Candle[] = [];
           if (useSniperMode) {
-            // Уходим в засаду! (Перезаписываем, если уже в засаде — обновляем на более свежий сетап)
-            const wasAlreadyInSniper = sniperModeActive;
-            sniperModeActive = true;
-            activeSniperZone = routerResult;
-            sniperEntryTime = candleTime;
-            if (wasAlreadyInSniper) {
-              logger.warn(
-                `[${symbol}] 🔄 Updated SNIPER_MODE target: new 15m zone [${routerResult.zoneDetails.top} - ${routerResult.zoneDetails.bottom}]`,
-              );
-            } else {
-              logger.warn(
-                `[${symbol}] 🎯 Entered SNIPER_MODE inside 15m zone [${routerResult.zoneDetails.top} - ${routerResult.zoneDetails.bottom}]`,
-              );
-            }
-          } else {
-            // Классический вход (V4)
+            // Берем последние 200 1m свечей до текущего времени
+            const endIdx = candles1m.findIndex(c => c.timestamp > candleTime);
+            const sliceEnd = endIdx > 0 ? endIdx : candles1m.length;
+            const sliceStart = Math.max(0, sliceEnd - 200);
+            candles1mForRouter = candles1m.slice(sliceStart, sliceEnd);
+          }
+
+          cachedRouterResult = await router.evaluate(
+            currentLtfCandles,
+            currentHtfWindow,
+            lastClosed15m.timestamp,
+            mitigatedZones,
+            state.mitigatedStructures,
+            candles1mForRouter,
+          );
+          lastCachedCandleIndex = index15m;
+          lastCachedMitigatedZonesLength = mitigatedZones.length;
+          lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
+        }
+
+        const routerResult = cachedRouterResult;
+
+        try {
+          if (
+            routerResult.triggered &&
+            routerResult.levels &&
+            routerResult.zoneDetails
+          ) {
             const levels = routerResult.levels;
             const entryDecimal = new Decimal(levels.entry);
             const slDecimal = new Decimal(levels.stopLoss);
             const tpDecimal = new Decimal(levels.takeProfit);
             const side = entryDecimal.gt(slDecimal) ? "Buy" : "Sell";
 
+            // В Sniper Mode текущая свеча - это 1m, иначе 15m
+            const entryCandle = useSniperMode ? currentCandle : lastClosed15m;
+
             const { state: newState, tradeOpened } = openTrade(
               state,
-              currentCandle, // 15m candle
+              entryCandle,
               entryDecimal,
               slDecimal,
               tpDecimal,
@@ -406,128 +401,9 @@ async function runBacktestForSymbol(
 
             if (tradeOpened) Object.assign(state, newState);
           }
+        } catch (err) {
+          logger.error(`[${symbol}] Backtest ERROR at index ${i} | ${err}`);
         }
-      } catch (err) {
-        logger.error(`[${symbol}] Backtest ERROR at index ${i} | ${err}`);
-      }
-    }
-    // === СНАЙПЕРСКОЕ ИСПОЛНЕНИЕ (1m) ===
-    else if (sniperModeActive && useSniperMode) {
-      const closePrice = new Decimal(currentCandle.close);
-      const zone = activeSniperZone.zoneDetails;
-      const isLong =
-        activeSniperZone.levels.entry < activeSniperZone.levels.takeProfit;
-
-      // 1. Проверка отмены (расширяем зону на 20%, чтобы не выбивало минутными SFP-шпильками)
-      const zoneHeight = new Decimal(zone.top).minus(zone.bottom).abs();
-      const tolerance = zoneHeight.mul(0.2);
-
-      const canceled = isLong
-        ? closePrice.lt(new Decimal(zone.bottom).minus(tolerance))
-        : closePrice.gt(new Decimal(zone.top).plus(tolerance));
-
-      if (canceled) {
-        sniperModeActive = false;
-        activeSniperZone = null;
-        continue;
-      }
-
-      // Ambush Timeout: если в засаде просидим > 4 часов (240 минутных свечей) — отменяем
-      const ambushTimeoutMs = 240 * 60 * 1000; // 4 часа
-      if (candleTime - sniperEntryTime > ambushTimeoutMs) {
-        logger.warn(
-          `[${symbol}] ⏰ SNIPER_MODE timeout (4h) — aborting ambush`,
-        );
-        sniperModeActive = false;
-        activeSniperZone = null;
-        continue;
-      }
-
-      // 2. Поиск CHoCH на 1 минутке
-      const sliced1m = candles1m.slice(Math.max(0, i - 150), i + 1);
-
-      // Запрашиваем ATR и ищем сломы
-      const atr1m = (recognizer as any).calculateATR
-        ? (recognizer as any).calculateATR(sliced1m, 14)
-        : new Decimal(currentCandle.close).mul(0.001);
-      const sniperDispMult = new Decimal(config.sniperDisplacementMultiplier || 0.5);
-      const structures = recognizer.detectStructureBreaks(sliced1m, atr1m, sniperDispMult);
-
-      // Ищем CHoCH: он должен произойти не раньше, чем за 45 минут до текущего момента
-      // Это решает Парадокс Времени (забираем CHoCH, который сформировался внутри 15m свечи)
-      const timeThreshold = candleTime - 45 * 60 * 1000;
-
-      const freshChochs = structures.filter((s: any) => {
-        if (s.type !== "CHOCH") return false;
-        if (s.timestamp < timeThreshold) return false;
-        // Гибкая проверка направления, если оно есть
-        if (s.direction && s.direction !== (isLong ? "BULLISH" : "BEARISH"))
-          return false;
-        return true;
-      });
-
-      if (freshChochs.length > 0) {
-        const choch = freshChochs[freshChochs.length - 1];
-        const idealEntry = new Decimal(choch.price);
-
-        // Считаем ювелирный стоп по 1m свечам (за последние 30 минут)
-        const recent1mCandles = sliced1m.slice(-30);
-        let localExtreme: Decimal;
-        if (isLong) {
-          let minLow = new Decimal(recent1mCandles[0].low);
-          for (const c of recent1mCandles) {
-            const low = new Decimal(c.low);
-            if (low.lt(minLow)) minLow = low;
-          }
-          localExtreme = minLow;
-        } else {
-          let maxHigh = new Decimal(recent1mCandles[0].high);
-          for (const c of recent1mCandles) {
-            const high = new Decimal(c.high);
-            if (high.gt(maxHigh)) maxHigh = high;
-          }
-          localExtreme = maxHigh;
-        }
-
-        // Страховка: если CHoCH кривой и стоп получается хуже входа — отменяем
-        if (isLong && idealEntry.lte(localExtreme)) continue;
-        if (!isLong && idealEntry.gte(localExtreme)) continue;
-
-        const offset = localExtreme.mul(0.0005); // Микро-отступ 0.05%
-        const slDecimal = isLong
-          ? localExtreme.minus(offset)
-          : localExtreme.plus(offset);
-
-        // R:R 1:3
-        const tpDecimal = isLong
-          ? idealEntry.plus(idealEntry.minus(slDecimal).mul(3))
-          : idealEntry.minus(slDecimal.minus(idealEntry).mul(3));
-
-        logger.warn(
-          `[${symbol}] 🔫 SNIPER SHOT FIRED! 1m CHoCH at ${new Date(choch.timestamp).toISOString()}! Entry: ${idealEntry.toFixed(4)}`,
-        );
-
-        const { state: newState, tradeOpened } = openTrade(
-          state,
-          currentCandle, // 1m candle
-          idealEntry,
-          slDecimal,
-          tpDecimal,
-          isLong ? "Buy" : "Sell",
-          activeSniperZone.scenario!.id,
-          activeSniperZone.scenario!.name + " (1m Snipe)",
-          instrument,
-          zone,
-          { type: "CHoCH", timestamp: choch.timestamp, price: choch.price },
-          undefined,
-          undefined,
-          symbol,
-        );
-
-        if (tradeOpened) Object.assign(state, newState);
-
-        sniperModeActive = false;
-        activeSniperZone = null;
       }
     }
   }

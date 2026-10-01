@@ -14,6 +14,7 @@ import { Scenario8_RangeDeviationReclaim } from './scenarios/Scenario8_RangeDevi
 import { Scenario9_TurtleSoup } from './scenarios/Scenario9_TurtleSoup';
 import { Scenario10_BreakerBlock } from './scenarios/Scenario10_BreakerBlock';
 import { Scenario11_MitigationBlock } from './scenarios/Scenario11_MitigationBlock';
+import { Scenario12_SniperTouch } from './scenarios/Scenario12_SniperTouch';
 
 export interface ScenarioRouterDeps {
   readonly symbol: string;
@@ -66,6 +67,7 @@ export class ScenarioRouter {
       new Scenario9_TurtleSoup(this.config),            // 9: Turtle Soup
       new Scenario10_BreakerBlock(this.config),         // 10: Breaker Block
       new Scenario11_MitigationBlock(this.config),      // 11: Mitigation Block
+      new Scenario12_SniperTouch(this.config),          // 12: Sniper Touch (1m Macro)
       // Priority 2: Trend continuation scenarios
       new Scenario1_HTFContinuation(this.config),       // 1: HTF Continuation
       new Scenario3_IDM(this.config),                   // 3: IDM
@@ -110,12 +112,13 @@ export class ScenarioRouter {
     });
   }
 
-  async evaluate(
-    candles15m: any[], 
-    candles4h: any[], 
+async evaluate(
+    candles15m: any[],
+    candles4h: any[],
     currentCandleTimestamp: number,
     mitigatedZones: MitigatedZone[] = [],
-    mitigatedStructures: MitigatedStructure[] = []
+    mitigatedStructures: MitigatedStructure[] = [],
+    candles1m: any[] = [] // 1m candles for Sniper Mode (Scenario 12)
   ): Promise<RouterResult> {
     if (!this.scenarios.length) {
       return { triggered: false, scenario: null, levels: null, reason: 'No scenarios configured', zoneDetails: null, structureDetails: null };
@@ -128,6 +131,9 @@ export class ScenarioRouter {
         candles4h,
         currentCandleTimestamp
       );
+
+      // Attach 1m candles for Sniper Mode scenarios
+      patternData.candles1m = candles1m;
 
       // Filter out mitigated zones from pattern data
       patternData.zones = this.filterMitigatedZones(patternData.zones, mitigatedZones);

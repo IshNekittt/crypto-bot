@@ -416,7 +416,7 @@ export class BybitClient {
   async getOpenOrders(symbol: string): Promise<readonly OpenOrder[]> {
     return this.executeWithRetry(async () => {
       const rest = this.rest as any;
-      const response = await rest.getOpenOrders({ category: 'linear', symbol });
+      const response = await rest.getActiveOrders({ category: 'linear', symbol });
       if (response.retCode !== 0) {
         throw new Error(`Open orders fetch failed for ${symbol}: [${response.retCode}] ${response.retMsg}`);
       }
