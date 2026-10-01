@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { ZoneDetails } from '../types';
 import { BotConfig } from '../config/env';
+import { PatternData } from '../smc/patternRecognizer';
 import { Scenario1_HTFContinuation } from './scenarios/Scenario1_HTFContinuation';
 import { Scenario2_FVGFill } from './scenarios/Scenario2_FVGFill';
 import { Scenario3_IDM } from './scenarios/Scenario3_IDM';
@@ -118,31 +119,40 @@ async evaluate(
     currentCandleTimestamp: number,
     mitigatedZones: MitigatedZone[] = [],
     mitigatedStructures: MitigatedStructure[] = [],
-    candles1m: any[] = [] // 1m candles for Sniper Mode (Scenario 12)
+    candles1m: any[] = [], // 1m candles for Sniper Mode (Scenario 12)
+    patternData?: PatternData // Pre-computed PatternData for performance
   ): Promise<RouterResult> {
     if (!this.scenarios.length) {
       return { triggered: false, scenario: null, levels: null, reason: 'No scenarios configured', zoneDetails: null, structureDetails: null };
     }
 
     try {
-      const patternData = await this.patternRecognizer.buildPatternData(
-        this.symbol,
-        candles15m,
-        candles4h,
-        currentCandleTimestamp
-      );
-
-      // Attach 1m candles for Sniper Mode scenarios
-      patternData.candles1m = candles1m;
+      // Use pre-computed PatternData or build it (for backward compatibility / live mode)
+      let pd: PatternData;
+      if (patternData) {
+        pd = patternData;
+        // Attach 1m candles for Sniper Mode scenarios
+        pd.candles1m = candles1m;
+      } else {
+        pd = await this.patternRecognizer.buildPatternData(
+          this.symbol,
+          candles15m,
+          candles4h,
+          currentCandleTimestamp
+        );
+        pd.candles1m = candles1m;
+      // Attach mitigatedStructures for scenarios that detect their own structures (e.g., Scenario 12)
+      (pd as any).mitigatedStructures = mitigatedStructures;
+    }
 
       // Filter out mitigated zones from pattern data
-      patternData.zones = this.filterMitigatedZones(patternData.zones, mitigatedZones);
+      pd.zones = this.filterMitigatedZones(pd.zones, mitigatedZones);
       // Filter out mitigated structures from pattern data
-      patternData.structures = this.filterMitigatedStructures(patternData.structures, mitigatedStructures);
+      pd.structures = this.filterMitigatedStructures(pd.structures, mitigatedStructures);
 
       for (const scenario of this.scenarios) {
         try {
-          const matches = scenario.evaluate(patternData);
+          const matches = scenario.evaluate(pd);
           
           if (matches) {
             const levels = scenario.getLevels();

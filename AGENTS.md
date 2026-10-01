@@ -36,6 +36,54 @@
 
 **Invariant**: Only scenarios 1, 5, 6, 10 (HTF Continuation, HTF Sweep, SMS, Breaker) can trigger Sniper Mode — they produce high-probability zones with clear direction.
 
+### 1.2 Dual-Mode Architecture (V4 Classic & V5 Sniper)
+
+The codebase now supports **two distinct operational modes** running from the same codebase, controlled by `ENABLE_SNIPER_MODE`:
+
+| Aspect | **V4 Classic (ENABLE_SNIPER_MODE=false)** | **V5 Sniper (ENABLE_SNIPER_MODE=true)** |
+|--------|-------------------------------------------|-----------------------------------------|
+| **Timeframes** | 15m LTF / 4H HTF | 1m Sniper / 15m Radar / 4H Macro |
+| **Entry Logic** | Close of 15m signal candle | 1m CHoCH inside 15m macro zone |
+| **Scenarios** | 1-11 (all classic SMC) | **12 only** (Sniper Touch) |
+| **State Machine** | SCANNING → ENTRY_STAGED → IN_TRADE | SCANNING → SNIPER_MODE → ENTRY_STAGED |
+| **WS Subscription** | 15m, 240m | 1m, 15m, 240m |
+| **Killzone** | London/NY only | London/NY only (enforced in Scenario 12) |
+| **Cooldown** | After SL only (loss) | After SL only (loss) |
+
+**Critical Invariant**: V4 and V5 **MUST NOT** run on the same process/instance. The `IN_TRADE` state machine is per-symbol and mutually exclusive. Running both modes simultaneously would cause state conflicts, double position risk, and `IN_TRADE` blocking.
+
+### 1.3 Deployment Strategy (Sub-accounts)
+
+To run V4 Classic and V5 Sniper simultaneously, **complete infrastructure separation** is required:
+
+| Component | V4 Instance (Classic) | V5 Instance (Sniper) |
+|-----------|----------------------|----------------------|
+| **Process** | Separate Node.js process | Separate Node.js process |
+| **Database** | Separate Supabase project/schema | Separate Supabase project/schema |
+| **Telegram Bot** | Separate bot token & chat | Separate bot token & chat |
+| **Bybit Account** | Sub-account A (isolated margin) | Sub-account B (isolated margin) |
+| **WebSocket** | Subscribes 15m, 240m | Subscribes 1m, 15m, 240m |
+| **State Machine** | Independent `IN_TRADE` | Independent `IN_TRADE` |
+
+**Why Required**: The `IN_TRADE` state machine is per-symbol and mutually exclusive per process. Running both modes on the same instance would cause:
+- `IN_TRADE` blocking across modes (V4 holds position → V5 blocked, or vice versa)
+- Double position risk on same symbol
+- State corruption from shared `StrategyEngine` instances
+- DB conflicts from concurrent `trades` table writes
+
+**Deployment Pattern**: Use two Render/Oracle Cloud services pointing to the same Docker image but with different `.env` files:
+```bash
+# V4 Service
+ENABLE_SNIPER_MODE=false
+ACTIVE_SCENARIOS=1,5,6,10
+DATABASE_URL=postgresql://v4-db...
+
+# V5 Service  
+ENABLE_SNIPER_MODE=true
+ACTIVE_SCENARIOS=12
+DATABASE_URL=postgresql://v5-db...
+```
+
 ---
 
 ## 2. PROJECT STRUCTURE
@@ -190,6 +238,22 @@ this.bot.use(async (ctx, next) => {
 - **Slippage Guard still runs**: If live price ≥ TP → reject; if > 0.2% toward TP → reject.
 
 **Invariant**: Decision is **purely at approval moment** — no pre-commitment to order type at signal time.
+
+### 4.5 Breakeven Protection — **NEW v2026-09-30**
+
+**Logic** (`src/backtest/executionSimulator.ts:532-560`, `src/engine/strategyEngine.ts`):
+- Trigger: Price moves in favor by `BREAKEVEN_RR_TRIGGER` × risk distance (e.g., 2R)
+- Action: Stop Loss permanently moved to entry price
+- Backtester: Implemented in `checkAndCloseTrade()` — updates `openTrade.slPrice` in state when breakeven hit and trade continues
+- Live: To be implemented in `StrategyEngine` position management
+
+**Config**: `BREAKEVEN_RR_TRIGGER=2` (in `.env`, integer R-multiples)
+
+**Behavior**: 
+- Long: SL → entry when `high ≥ entry + (entry - SL) × trigger`
+- Short: SL → entry when `low ≤ entry - (SL - entry) × trigger`
+- Once moved, SL stays at entry for remainder of trade
+- If price retraces to entry → closes at ~0 PnL (minus fees)
 
 ---
 
@@ -596,6 +660,54 @@ interface MitigatedStructure {
 7. **Run.ts** passes `state.mitigatedStructures` to `router.evaluate()` and `structureDetails` to `openTrade()`.
 
 **Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
+
+### 6.18 Ghost Signals Protection (V5 Sniper) — **NEW v2026-10-01**
+
+**Problem**: Scenario 12 (Sniper Touch) could generate duplicate entries on the same 1m CHoCH structure. After a trade closed at TP (within 2 minutes), the same CHoCH structure (still within the 30-minute freshness window) would be re-detected, causing re-entries at the same price — "ghost signals".
+
+**Solution**: **mitigatedStructures** tracking for V5 CHoCH structures — structures that have been traded and should never be re-used.
+
+**Implementation**:
+
+1. **Router attaches mitigatedStructures** to `patternData` before scenario evaluation (`scenarioRouter.ts:149`):
+   ```typescript
+   (pd as any).mitigatedStructures = mitigatedStructures;
+   ```
+
+2. **Scenario 12 filters structures** against mitigated list before selecting CHoCH (`Scenario12_SniperTouch.ts:106-115`):
+   ```typescript
+   const mitigatedStructures = (patternData as any).mitigatedStructures || [];
+   const isMitigated = (s: Structure) => 
+     mitigatedStructures.some((ms: any) => 
+       ms.type === s.type && 
+       ms.timestamp === s.timestamp && 
+       ms.direction === s.direction
+     );
+
+   const recentStructures = structures.filter(s => 
+     s.type === 'CHOCH' && 
+     s.direction === direction &&
+     s.timestamp >= (candles1m[candles1m.length - 30]?.timestamp ?? 0) &&
+     !isMitigated(s)
+   );
+   ```
+
+3. **Scenario 12 returns `structureDetails` with direction** on trigger (`Scenario12_SniperTouch.ts:214-219`):
+   ```typescript
+   this.setStructureDetails({
+     type: 'CHoCH',
+     timestamp: choch.timestamp,
+     price: choch.price,
+     direction: choch.direction,
+   });
+   ```
+
+4. **Engine auto-mitigates on trade close** (`executionSimulator.ts:626-631`, `strategyEngine.ts:363-365`):
+   - Trade closes → `structureDetails` passed to DB
+   - Reconciliation/WS close → `addMitigatedZone` + structure added to `mitigatedStructures`
+   - Next 1m candle → same CHoCH filtered out, no ghost entry
+
+**Result**: Scenario 12 on SOLUSDT — the rapid-fire 2-minute re-entries after TP are eliminated. The CHoCH is marked as "used" immediately after first trade closes.
 
 ---
 

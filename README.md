@@ -18,17 +18,20 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ## 🎯 Features at a Glance
 
-| Category             | Capability                                                                                                                                                  |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **11 SMC Scenarios** | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block             |
-| **V5 Sniper Mode**   | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                      |
-| **Risk Management**  | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement, **Breakeven (SL→entry at 2R)** |
-| **Infrastructure**   | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                                       |
-| **PnL Accuracy**     | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                                 |
-| **SL Precision**     | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                                  |
-| **News Filter**      | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via ForexFactory calendar, auto-refreshed daily at 00:00 UTC          |
-| **Telegram UI**      | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                                     |
-| **Security**         | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                                         |
+| Category                 | Capability                                                                                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **11 SMC Scenarios**     | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block             |
+| **🎯 V5 Sniper Mode**    | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                      |
+| **📊 Dynamic Approval**  | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)       |
+| **🛡 Breakeven Protection** | **SL → entry at 2R**: When price moves 2R in favor, SL permanently moves to entry price — protects profit, eliminates risk                              |
+| **👻 Ghost Signal Guard** | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                     |
+| **Risk Management**      | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement, **Breakeven (SL→entry at 2R)** |
+| **Infrastructure**       | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                                       |
+| **PnL Accuracy**         | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                                 |
+| **SL Precision**         | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                                  |
+| **News Filter**          | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via ForexFactory calendar, auto-refreshed daily at 00:00 UTC          |
+| **Telegram UI**          | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                                     |
+| **Security**             | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                                         |
 
 ---
 
@@ -583,6 +586,7 @@ docker compose up -d
 | **BREAKEVEN_RR_TRIGGER**           |          |            `2`            | R-multiple to trigger breakeven (move SL to entry). `2` = 2R                                                          |
 | **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                 |
 | **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                |
+| **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                 |
 
 ---
 
@@ -610,6 +614,82 @@ SCENARIOS_SOLUSDT=5,6,7,10
 - If not set, the symbol falls back to `ACTIVE_SCENARIOS`
 - The `ScenarioRouter` for each symbol is instantiated with its specific active scenarios
 - Allows fine-tuning strategies per asset's market character
+
+---
+
+## ⚙️ Ready-to-Use Configuration Presets
+
+### 🛡️ V4 Classic SMC (Heavy Tank) — 15m/4H Execution
+
+**Philosophy**: High win-rate, fewer trades, institutional SMC on 15m closes. Best for stable trending markets.
+
+```bash
+# Core
+ENABLE_SNIPER_MODE=false
+BREAKEVEN_RR_TRIGGER=2
+SMART_ENTRY_THRESHOLD_PCT=0.15
+LIMIT_EXPIRATION_CANDLES=6
+SMC_SL_ATR_OFFSET=0.5
+SMC_DISPLACEMENT_MULTIPLIER=1.5
+
+# Optimized scenarios per coin (trend-following focus):
+SCENARIOS_SOLUSDT=1,5,6,10
+SCENARIOS_BTCUSDT=1,5,6,10
+SCENARIOS_ETHUSDT=1,5,6,7,10
+```
+
+| Aspect | Setting | Rationale |
+|--------|---------|-----------|
+| **Timeframes** | 15m / 4H | Classic SMC timeframe |
+| **Scenarios** | 1, 5, 6, 7, 10 | Trend continuation + HTF sweep + SMS + Breaker |
+| **Entry** | 15m close | Classic SMC execution |
+| **Win Rate** | ~70-80% | Fewer, higher-quality setups |
+
+---
+
+### 🎯 V5 Sniper Touch (1m Execution) — Jewel Precision
+
+**Philosophy**: Surgical entries inside macro zones. Lower win-rate but superior R:R. Best for ranging/choppy markets.
+
+```bash
+# Core
+ENABLE_SNIPER_MODE=true
+BACKTEST_DAYS=60
+BREAKEVEN_RR_TRIGGER=2
+SMART_ENTRY_THRESHOLD_PCT=0.15
+LIMIT_EXPIRATION_CANDLES=6
+SMC_SL_ATR_OFFSET=0.5
+SNIPER_DISPLACEMENT_MULTIPLIER=1.5  # Strict 1m filter
+
+# Sniper uses ONLY scenario 12:
+ACTIVE_SCENARIOS=12
+SCENARIOS_SOLUSDT=12
+SCENARIOS_BTCUSDT=12
+SCENARIOS_ETHUSDT=12
+```
+
+| Aspect | Setting | Rationale |
+|--------|---------|-----------|
+| **Timeframes** | 1m (entry) / 15m (radar) / 4H (macro) | Two-loop architecture |
+| **Scenario** | 12 only (Sniper Touch) | Specialized 1m macro touch |
+| **Entry** | 1m CHoCH inside macro zone | Jewel precision |
+| **Filters** | Killzone + Sweep + CHoCH + OB | Institutional grade |
+
+---
+
+### ⚠️ Critical: Running Both Simultaneously
+
+**V4 and V5 CANNOT run on the same process** — they share the `IN_TRADE` state machine. To run both:
+
+| Component | V4 Instance | V5 Instance |
+|-----------|-------------|-------------|
+| Process | Separate Node.js | Separate Node.js |
+| Database | Separate Supabase | Separate Supabase |
+| Telegram | Separate bot token | Separate bot token |
+| Bybit | Sub-account A | Sub-account B |
+| WS | 15m, 240m | 1m, 15m, 240m |
+
+Deploy as two separate Render services with different `.env` files pointing to the same Docker image.
 
 ---
 

@@ -182,6 +182,7 @@ export interface StructureDetails {
   type: 'SMS' | 'CHoCH' | 'BOS';
   timestamp: number;
   price: Decimal;
+  direction?: 'BULLISH' | 'BEARISH';
 }
 
 export type ScenarioConstructor = new (deps: ScenarioDeps) => IScenario;

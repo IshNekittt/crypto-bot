@@ -11,8 +11,8 @@ export class Scenario12_SniperTouch extends BaseScenario {
   // Override evaluate to accept 1m candles
   override evaluate(patternData: PatternData & { candles1m?: any[] }): boolean {
     const candles1m = patternData.candles1m;
-    if (!candles1m || candles1m.length < 20) {
-      this.logRejection('Insufficient 1m candles');
+    if (!candles1m || candles1m.length < 50) {
+      this.logRejection('Insufficient 1m candles (need 50+)');
       return false;
     }
 
@@ -22,9 +22,16 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
+    // === FILTER 1: KILLZONE CHECK ===
+    // Sniper only trades during London or NY killzones
+    const currentKillzone = patternData.currentKillzone;
+    if (currentKillzone !== 'LONDON' && currentKillzone !== 'NY') {
+      this.logRejection(`Outside killzone: ${currentKillzone}`);
+      return false;
+    }
+
     // Get current price from latest 1m candle
     const lastCandle1m = candles1m[candles1m.length - 1];
-    const currentPrice = new Decimal(lastCandle1m.close);
 
     // Get macro levels from patternData
     const macro = patternData.macroContext as MacroContext & { dailyLevels: any; weeklyLevels: any };
@@ -40,30 +47,52 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Check if price is within 0.2% of any macro level
-    const proximityPct = new Decimal('0.002'); // 0.2%
-    let nearestLevel: { price: Decimal; name: string } | null = null;
-    let minDistance = new Decimal('Infinity');
-
+    // === FILTER 2: SWEEP VALIDATION (SFP - Swing Failure Pattern) ===
+    // Check recent 1m candles (last 30-50 min) for sweep of macro level
+    // Sweep = wick pierces level, body closes back inside
+    const lookbackCandles = candles1m.slice(-50); // Last 50 minutes
+    const isResistance = (levelName: string) => levelName === 'PDH' || levelName === 'PWH';
+    
+    // Find which macro level was swept
+    let sweptLevel: { price: Decimal; name: string; direction: 'BULLISH' | 'BEARISH' } | null = null;
+    
     for (const level of macroLevels) {
-      const distance = currentPrice.minus(level.price).abs().div(currentPrice);
-      if (distance.lte(proximityPct) && distance.lt(minDistance)) {
-        minDistance = distance;
-        nearestLevel = level;
+      const resistance = isResistance(level.name);
+      const levelPrice = level.price;
+      
+      if (resistance) {
+        // Resistance sweep: wick > level, close < level (bearish sweep for short setup)
+        const swept = lookbackCandles.some(c => {
+          const high = new Decimal(c.high);
+          const close = new Decimal(c.close);
+          return high.gt(levelPrice) && close.lt(levelPrice);
+        });
+        if (swept) {
+          sweptLevel = { price: levelPrice, name: level.name, direction: 'BEARISH' };
+          break;
+        }
+      } else {
+        // Support sweep: wick < level, close > level (bullish sweep for long setup)
+        const swept = lookbackCandles.some(c => {
+          const low = new Decimal(c.low);
+          const close = new Decimal(c.close);
+          return low.lt(levelPrice) && close.gt(levelPrice);
+        });
+        if (swept) {
+          sweptLevel = { price: levelPrice, name: level.name, direction: 'BULLISH' };
+          break;
+        }
       }
     }
 
-    if (!nearestLevel) {
-      this.logRejection(`Price not near macro level (min dist: ${minDistance.mul(100).toFixed(4)}%)`);
+    if (!sweptLevel) {
+      this.logRejection('No valid sweep of macro level in last 50 min');
       return false;
     }
 
-    // Determine direction based on which level we're near
-    // PDH/PWH = resistance area -> look for bearish CHoCH (short)
-    // PDL/PWL = support area -> look for bullish CHoCH (long)
-    const isResistance = nearestLevel.name === 'PDH' || nearestLevel.name === 'PWH';
-    const direction = isResistance ? 'BEARISH' : 'BULLISH';
+    const direction = sweptLevel.direction;
 
+    // === FILTER 3: VALID CHoCH + ORDER BLOCK ENTRY ===
     // Calculate ATR for 1m candles
     const atr1m = this.calculateATR(candles1m, 14);
     if (atr1m.lte(0)) {
@@ -71,19 +100,29 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Detect structure breaks on 1m candles
-    const structures = this.detectStructureBreaks(candles1m, atr1m);
+    // Detect structure breaks and order blocks on 1m candles
+    const { structures } = this.detectStructureBreaksAndOBs(candles1m, atr1m);
     
-    // Filter for fresh CHoCH in the expected direction
-    // Look at last 30 1m candles (30 minutes)
+    // Filter out already mitigated structures (ghost signal prevention)
+    const mitigatedStructures = (patternData as any).mitigatedStructures || [];
+    const isMitigated = (s: Structure) => 
+      mitigatedStructures.some((ms: any) => 
+        ms.type === s.type && 
+        ms.timestamp === s.timestamp && 
+        ms.direction === s.direction
+      );
+
+    // Filter for fresh CHoCH in the expected direction (after the sweep)
+    // Look at last 30 1m candles, and exclude already mitigated structures
     const recentStructures = structures.filter(s => 
       s.type === 'CHOCH' && 
       s.direction === direction &&
-      s.timestamp >= (candles1m[candles1m.length - 30]?.timestamp ?? 0)
+      s.timestamp >= (candles1m[candles1m.length - 30]?.timestamp ?? 0) &&
+      !isMitigated(s)
     );
 
     if (recentStructures.length === 0) {
-      this.logRejection(`No ${direction} CHoCH found near ${nearestLevel.name}`);
+      this.logRejection(`No ${direction} CHoCH found after sweep of ${sweptLevel.name}`);
       return false;
     }
 
@@ -91,19 +130,45 @@ export class Scenario12_SniperTouch extends BaseScenario {
     const choch = recentStructures[recentStructures.length - 1];
     const chochPrice = choch.price;
 
-    // Calculate entry as midpoint of CHoCH impulse
-    const impulseStart = choch.price; // CHoCH break price
-    const impulseEnd = currentPrice;
-    const idealEntry = impulseStart.plus(impulseEnd).div(2);
-
-    // Calculate SL using local extreme from recent 1m candles
-    const recent1m = candles1m.slice(-15); // Last 15 minutes
-    let localExtreme: Decimal;
-    if (direction === 'BULLISH') {
-      localExtreme = Decimal.min(...recent1m.map(c => new Decimal(c.low)));
-    } else {
-      localExtreme = Decimal.max(...recent1m.map(c => new Decimal(c.high)));
+    // Find the Order Block that triggered this CHoCH
+    // OB is the last opposite-direction candle before the CHoCH break
+    const chochIndex = candles1m.findIndex(c => c.timestamp === choch.timestamp);
+    let entryOB: { top: Decimal; bottom: Decimal } | null = null;
+    
+    if (chochIndex > 0) {
+      // Look backwards for the OB candle (opposite color to CHoCH direction)
+      for (let i = chochIndex - 1; i >= Math.max(0, chochIndex - 5); i--) {
+        const c = candles1m[i];
+        const isBullishCandle = new Decimal(c.close).gt(c.open);
+        const isOB = direction === 'BULLISH' ? !isBullishCandle : isBullishCandle;
+        
+        if (isOB) {
+          entryOB = {
+            top: new Decimal(c.high),
+            bottom: new Decimal(c.low),
+          };
+          break;
+        }
+      }
     }
+
+    // Fallback: if no OB found, use recent local extreme
+    if (!entryOB) {
+      const recent1m = candles1m.slice(-15);
+      if (direction === 'BULLISH') {
+        const low = Decimal.min(...recent1m.map(c => new Decimal(c.low)));
+        entryOB = { top: low.plus(low.mul('0.001')), bottom: low };
+      } else {
+        const high = Decimal.max(...recent1m.map(c => new Decimal(c.high)));
+        entryOB = { top: high, bottom: high.minus(high.mul('0.001')) };
+      }
+    }
+
+    // idealEntry = 0.5 of the Order Block (midpoint)
+    const idealEntry = entryOB.top.plus(entryOB.bottom).div(2);
+
+    // SL at OB extreme
+    const localExtreme = direction === 'BULLISH' ? entryOB.bottom : entryOB.top;
 
     // Safety check: entry must be on correct side of SL
     if (direction === 'BULLISH' && idealEntry.lte(localExtreme)) {
@@ -135,12 +200,12 @@ export class Scenario12_SniperTouch extends BaseScenario {
       takeProfit: tp,
     });
 
-    this.setReason(`Sniper: ${direction} CHoCH at ${chochPrice.toFixed(4)} near ${nearestLevel.name} (${minDistance.mul(100).toFixed(4)}%)`);
+    this.setReason(`Sniper: ${direction} CHoCH at ${chochPrice.toFixed(4)} after ${sweptLevel.name} sweep, entry from 1m OB midpoint`);
 
     this.setZoneDetails({
       type: 'MITIGATION',
-      top: nearestLevel.price,
-      bottom: nearestLevel.price,
+      top: sweptLevel.price,
+      bottom: sweptLevel.price,
       timeframe: 'D',
       direction,
       timestamp: lastCandle1m.timestamp,
@@ -150,6 +215,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
       type: 'CHoCH',
       timestamp: choch.timestamp,
       price: choch.price,
+      direction: choch.direction,
     });
 
     return true;
@@ -171,9 +237,10 @@ export class Scenario12_SniperTouch extends BaseScenario {
     return trSum.dividedBy(period);
   }
 
-  // Helper: Detect structure breaks (CHoCH/BOS) on 1m candles
-  private detectStructureBreaks(candles: any[], atr: Decimal): Structure[] {
+  // Helper: Detect structure breaks (CHoCH/BOS) AND Order Blocks on 1m candles
+  private detectStructureBreaksAndOBs(candles: any[], atr: Decimal): { structures: Structure[]; orderBlocks: { top: Decimal; bottom: Decimal; timestamp: number; direction: 'BULLISH' | 'BEARISH' }[] } {
     const structures: Structure[] = [];
+    const orderBlocks: { top: Decimal; bottom: Decimal; timestamp: number; direction: 'BULLISH' | 'BEARISH' }[] = [];
     const swingLookback = 3;
     const displacementMult = this.config.sniperDisplacementMultiplier 
       ? new Decimal(this.config.sniperDisplacementMultiplier)
@@ -193,7 +260,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
       if (isLow) swings.push({ type: 'LOW', price: low, index: i, timestamp: candles[i].timestamp });
     }
 
-    // Detect breaks
+    // Detect breaks and OBs
     for (let i = 0; i < candles.length; i++) {
       const close = new Decimal(candles[i].close);
       const body = close.minus(candles[i].open).abs();
@@ -216,9 +283,22 @@ export class Scenario12_SniperTouch extends BaseScenario {
             isValidated: true,
             impulseFactor: body.div(atr),
           });
+
+          // Create Order Block from the candle BEFORE the break (opposite direction)
+          if (i > 0) {
+            const obCandle = candles[i - 1];
+            const obTop = new Decimal(obCandle.high);
+            const obBottom = new Decimal(obCandle.low);
+            orderBlocks.push({
+              top: obTop,
+              bottom: obBottom,
+              timestamp: obCandle.timestamp,
+              direction: dir,
+            });
+          }
         }
       }
     }
-    return structures;
+    return { structures, orderBlocks };
   }
 }

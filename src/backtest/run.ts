@@ -136,12 +136,13 @@ async function runBacktestForSymbol(
     config: config as any,
   });
 
+  // --- Кэширование PatternData (только 15m контекст) ---
   let cachedPatternData: any = null;
   let cachedRouterResult: any = null;
-  let lastCachedCandleIndex = -1;
   let lastCachedMitigatedZonesLength = 0;
   let lastCachedMitigatedStructuresLength = 0;
-  const CACHE_REBUILD_INTERVAL = 10;
+  let currentHtfCandles: Candle[] = [];
+  let currentLtfCandles: Candle[] = [];
 
   let currentDayUtc = -1;
   let currentWeekUtc = -1;
@@ -312,60 +313,75 @@ async function runBacktestForSymbol(
     }
 
     // === СИГНАЛЬНЫЙ ДВИЖОК (Единый вызов Router) ===
-    // В Sniper Mode: вызываем на каждой 1m свече, передаем sliced1m
+    // В Sniper Mode: вызываем на каждой 1m свече, передаем свежие 1m свечи
     // В обычном режиме: только на закрытии 15m свечи
     const shouldEvaluateRouter = useSniperMode ? true : isNew15mClose;
 
-    if (shouldEvaluateRouter && lastClosed15m) {
+    // Пересчитываем 15m/4H окна и PatternData ТОЛЬКО при новой 15m свече
+    if (isNew15mClose && lastClosed15m) {
       const validHtfTimestamps = htfTimestamps.filter(
         (ts) => ts <= lastClosed15m!.timestamp,
       );
-      const currentHtfCandles = validHtfTimestamps
+      currentHtfCandles = validHtfTimestamps
         .map((ts) => htfMap.get(ts)!)
         .filter(Boolean);
 
       if (currentHtfCandles.length >= 50) {
+        const ltfStart = Math.max(0, index15m - 200 + 1);
+        currentLtfCandles = candlesLtf.slice(ltfStart, index15m + 1);
+
+        const htfEndIdx = currentHtfCandles.length - 1;
+        const htfStartIdx = Math.max(0, htfEndIdx - 50 + 1);
+        const currentHtfWindow = currentHtfCandles.slice(
+          htfStartIdx,
+          htfEndIdx + 1,
+        );
+
+        // Условие пересчета паттернов: только на новой 15m свече или при изменении митигированных зон/структур
         const shouldRebuildCache =
           cachedPatternData === null ||
           mitigatedZones.length !== lastCachedMitigatedZonesLength ||
           mitigatedStructures.length !== lastCachedMitigatedStructuresLength ||
-          index15m - lastCachedCandleIndex >= CACHE_REBUILD_INTERVAL;
+          isNew15mClose; // Пересчитываем ТОЛЬКО на закрытии 15m или при сделке
 
         if (shouldRebuildCache) {
-          const ltfStart = Math.max(0, index15m - 200 + 1);
-          const currentLtfCandles = candlesLtf.slice(ltfStart, index15m + 1);
-
-          const htfEndIdx = currentHtfCandles.length - 1;
-          const htfStartIdx = Math.max(0, htfEndIdx - 50 + 1);
-          const currentHtfWindow = currentHtfCandles.slice(
-            htfStartIdx,
-            htfEndIdx + 1,
-          );
-
-          // Подготовка 1m свечей для Снайперских сценариев
-          let candles1mForRouter: Candle[] = [];
-          if (useSniperMode) {
-            // Берем последние 200 1m свечей до текущего времени
-            const endIdx = candles1m.findIndex(c => c.timestamp > candleTime);
-            const sliceEnd = endIdx > 0 ? endIdx : candles1m.length;
-            const sliceStart = Math.max(0, sliceEnd - 200);
-            candles1mForRouter = candles1m.slice(sliceStart, sliceEnd);
-          }
-
-          cachedRouterResult = await router.evaluate(
+          cachedPatternData = await recognizer.buildPatternData(
+            symbol,
             currentLtfCandles,
             currentHtfWindow,
             lastClosed15m.timestamp,
-            mitigatedZones,
-            state.mitigatedStructures,
-            candles1mForRouter,
           );
-          lastCachedCandleIndex = index15m;
           lastCachedMitigatedZonesLength = mitigatedZones.length;
           lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
         }
+      }
+    }
 
-        const routerResult = cachedRouterResult;
+    // Вызываем Router на каждой итерации (1m свече в Sniper Mode, или 15m в обычном)
+    if (shouldEvaluateRouter && lastClosed15m && currentHtfCandles.length >= 50) {
+      // Подготовка 1m свечей для Снайперских сценариев
+      let candles1mForRouter: Candle[] = [];
+      if (useSniperMode) {
+        // Берем последние 200 1m свечей до текущего времени
+        const endIdx = candles1m.findIndex(c => c.timestamp > candleTime);
+        const sliceEnd = endIdx > 0 ? endIdx : candles1m.length;
+        const sliceStart = Math.max(0, sliceEnd - 200);
+        candles1mForRouter = candles1m.slice(sliceStart, sliceEnd);
+      }
+
+      cachedRouterResult = await router.evaluate(
+        currentLtfCandles,
+        currentHtfCandles,
+        lastClosed15m.timestamp,
+        mitigatedZones,
+        state.mitigatedStructures,
+        candles1mForRouter,
+        cachedPatternData,
+      );
+      lastCachedMitigatedZonesLength = mitigatedZones.length;
+      lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
+
+      const routerResult = cachedRouterResult;
 
         try {
           if (
@@ -406,7 +422,6 @@ async function runBacktestForSymbol(
         }
       }
     }
-  }
 
   logger.info(
     `[${symbol}] Backtest finished successfully. Processed ${mainCandles.length} candles, generated ${results.length} trades. Max Drawdown: ${state.maxDrawdown.toFixed(2)}%`,

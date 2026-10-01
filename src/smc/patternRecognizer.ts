@@ -102,12 +102,13 @@ export interface PatternData {
   readonly sessionRanges: SessionRange[];
   readonly tradingRange: TradingRange | null;
   readonly liquidityPools: LiquidityPool[];
-  readonly structures: Structure[];
-  readonly zones: Zone[];
+  structures: Structure[];
+  zones: Zone[];
   readonly swingPoints: SwingPoint[];
   readonly atr15m: Decimal;
   readonly atr4h: Decimal;
   readonly patternRecognizer: 'PatternRecognizer';
+  candles1m?: Candle[];
 }
 
 export const DEFAULT_PATTERN_CONFIG: PatternConfig = {
