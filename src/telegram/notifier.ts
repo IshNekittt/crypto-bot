@@ -9,6 +9,7 @@ import { ExecutionEngine } from "../execution/executionEngine";
 import { StrategyEngine } from "../engine/strategyEngine";
 import { NewsService } from "../services/newsService";
 import { FundingMonitorService } from "../services/fundingMonitorService";
+import { DateTime } from "luxon";
 
 export class TelegramNotifier {
   readonly bot: Telegraf;
@@ -194,6 +195,11 @@ export class TelegramNotifier {
     }
 
     this.bot = new Telegraf(botToken);
+
+    // Global error handler - NEVER log ctx.update (prevents PII leaks)
+    this.bot.catch((err, ctx) => {
+      logger.error(`Telegram Error for ${ctx.updateType}: ${err instanceof Error ? err.message : String(err)}`);
+    });
 
     // Global authorization middleware - silently ignore unauthorized users
     this.bot.use(async (ctx: Context, next: () => Promise<void>) => {
@@ -472,7 +478,7 @@ export class TelegramNotifier {
 
   private async sendFileViaFetch(
     buffer: Buffer,
-    filename: string,
+    _filename: string,
     chatId: string,
   ): Promise<void> {
     logger.debug(`Generated backup buffer size: ${buffer.length} bytes`);
@@ -480,21 +486,20 @@ export class TelegramNotifier {
     if (!botToken) {
       throw new Error("TELEGRAM_BOT_TOKEN not configured");
     }
-    const uint8Array = new Uint8Array(buffer);
-    const blob = new Blob([uint8Array], { type: "application/gzip" });
-    const fd = new FormData();
-    fd.append("chat_id", chatId);
-    fd.append("document", blob, filename);
-    const res = await fetch(
-      `https://api.telegram.org/bot${botToken}/sendDocument`,
-      {
-        method: "POST",
-        body: fd,
-      },
-    );
-    if (!res.ok) {
-      const errorText = await res.text();
-      throw new Error(`Telegram API error: ${res.status} ${errorText}`);
+    // Convert buffer to CSV text (assuming it's already CSV content, possibly gzipped)
+    const csvContent = buffer.toString('utf-8');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const formData = new FormData();
+    formData.append('chat_id', chatId);
+    const fileName = `trades_backup_${DateTime.utc().toFormat('yyyy-MM-dd_HH-mm-ss')}.csv`;
+    formData.append('document', blob, fileName);
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+      method: 'POST',
+      body: formData
+    });
+    if (!response.ok) {
+      throw new Error(`Telegram API rejected document: ${await response.text()}`);
     }
   }
 

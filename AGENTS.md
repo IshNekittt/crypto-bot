@@ -730,7 +730,7 @@ interface MitigatedStructure {
 
 **Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
 
-### 6.18 Ghost Signals Protection (V5 Sniper) — **NEW v2026-10-01**
+### 6.20 Ghost Signals Protection (V5 Sniper) — **NEW v2026-10-01**
 
 **Problem**: Scenario 12 (Sniper Touch) could generate duplicate entries on the same 1m CHoCH structure. After a trade closed at TP (within 2 minutes), the same CHoCH structure (still within the 30-minute freshness window) would be re-detected, causing re-entries at the same price — "ghost signals".
 
@@ -780,7 +780,7 @@ interface MitigatedStructure {
 
 ---
 
-### 6.19 Backup Service CSV Export — **NEW v2026-10-01**
+### 6.21 Backup Service CSV Export — **NEW v2026-10-01**
 
 **Problem**: Database schema evolved with new columns (`order_type`, `limit_price`, `management_state` JSONB) but backup CSV export didn't include them.
 
@@ -817,7 +817,7 @@ id,symbol,...,order_type,limit_price,management_state
 
 ---
 
-### 6.12 Same-Candle SL/TP Resolution (Lookahead Bias Fix) — **NEW v2026-09-24**
+### 6.22 Same-Candle SL/TP Resolution (Lookahead Bias Fix) — **NEW v2026-09-24**
 
 **Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
 
@@ -843,7 +843,7 @@ if (hitSL && hitTP) closedBy = 'BOTH';
 
 ---
 
-### 6.13 Mitigated Zones Fix (Zone Re-entry Bug) — **NEW v2026-09-24**
+### 6.23 Mitigated Zones Fix (Zone Re-entry Bug) — **NEW v2026-09-24**
 
 **Problem**: `mitigatedZones` was only updated on trade CLOSE. Bot would enter, close, then re-enter same zone because the zone wasn't "burned" until after close.
 
@@ -864,7 +864,7 @@ mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
 
 ---
 
-### 6.14 Cooldown Logic Fix — **NEW v2026-09-24** (Updated v2026-09-27: Dynamic Timeframe Support)
+### 6.24 Cooldown Logic Fix — **NEW v2026-09-24** (Updated v2026-09-27: Dynamic Timeframe Support)
 
 **Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation. Also, the cooldown was hardcoded to 15-minute timeframe (`16 * 15 * 60 * 1000`), breaking when `LTF_TIMEFRAME` changed.
 
@@ -894,7 +894,7 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 
 ---
 
-### 6.15 Backtest Report Enhancements — **NEW v2026-09-24**
+### 6.25 Backtest Report Enhancements — **NEW v2026-09-24**
 
 Added two new sections to backtest report (`reporter.ts`):
 
@@ -919,7 +919,7 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 ---
 
-### 6.16 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
+### 6.26 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
 
 **Problem**: Backtest was producing fake results — Scenario 6 (SMS) opened 20+ winning trades in a row every 15 minutes at the same entry price because:
 1. **Mitigated structures not tracked on WIN**: When a trade closed in profit, its trigger structure (CHoCH/SMS) was not added to `mitigatedStructures`, allowing re-entry on the same structure.
@@ -941,7 +941,7 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 ---
 
-### 6.17 Hybrid Smart Entry Architecture (Market vs Limit) — **NEW v2026-09-29**
+### 6.27 Hybrid Smart Entry Architecture (Market vs Limit) — **NEW v2026-09-29**
 
 **Problem**: Entering Market orders at the close of the 15m signal candle is mathematically unprofitable in SMC. Price has already "run away", SL becomes huge, R:R breaks, and Bybit rejects TP/SL with error [10001] (TP/SL limits).
 
