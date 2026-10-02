@@ -1,4 +1,4 @@
-# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-10-01)
+# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-10-02)
 
 > **Single source of truth for any AI agent working on this codebase.**
 > Every architectural decision, invariant, convention, and lesson learned in blood is documented here.
@@ -372,7 +372,7 @@ In `checkAndCloseTrade()`:
 
 ## 7. SMC MATHEMATICS — `src/smc/patternRecognizer.ts`
 
-### 6.1 Tolerance & Intersections (No Strict Equality)
+### 7.1 Tolerance & Intersections (No Strict Equality)
 
 | Concept                   | Tolerance                                          | Implementation                                  |
 | ------------------------- | -------------------------------------------------- | ----------------------------------------------- |
@@ -382,13 +382,13 @@ In `checkAndCloseTrade()`:
 | **Breaker Block**         | Full body close beyond OB + displacement ≥ 1.5 ATR | `isValidBodyClose` + `isValidDisplacement(1.5)` |
 | **All Price Comparisons** | `Decimal` with tolerance                           | **Never** `.eq()`                               |
 
-### 6.2 Displacement Validation
+### 7.2 Displacement Validation
 
 - **Structure Break (BOS/CHoCH)**: Candle body ≥ **1.5 \* ATR** (`displacementMultiplier`).
 - **SMS (Failure Swing)**: CHoCH candle body ≥ **1.5 \* ATR**.
 - **Breaker Block**: Impulse candle body closes beyond OB + **1.5 \* ATR**.
 
-### 6.3 Killzones (NY Time)
+### 7.3 Killzones (NY Time)
 
 | Session    | Hours (NY)  | Phase        |
 | ---------- | ----------- | ------------ |
@@ -398,7 +398,7 @@ In `checkAndCloseTrade()`:
 
 Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 
-### 6.5 V5 Sniper Mode (1m Execution) — **NEW v2026-09-30**
+### 7.5 V5 Sniper Mode (1m Execution) — **NEW v2026-09-30**
 
 **Architecture**: Two-loop system — Radar (15m/4H) scans for macro POI, Sniper (1m) waits for precise entry inside zone.
 
@@ -419,7 +419,7 @@ Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 
 ---
 
-### 6.6 Macro Context (Bootstrap Only, ~5-10ms)
+### 7.6 Macro Context (Bootstrap Only, ~5-10ms)
 
 - **Loaded ONCE** at startup (single `PatternRecognizer` shared across engines).
 - **1W/1D candles** (1000 each) → **linear O(N) passes only**:
@@ -431,7 +431,7 @@ Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 - **NO** Order Blocks, Breakers, Mitigation on macro timeframes.
 - Daily 00:00 UTC refresh: atomic cache replacement.
 
-### 6.5 Strict Stop-Loss Calculation — `BaseScenario.calculateLevels()` — **SINGLE SOURCE OF TRUTH**
+### 7.7 Strict Stop-Loss Calculation — `BaseScenario.calculateLevels()` — **SINGLE SOURCE OF TRUTH**
 
 **Problem**: Zone objects (OB, FVG, Breaker, MB) can have arbitrary `top`/`bottom` ordering (not guaranteed `top > bottom`). Naive SL formulas like `zone.bottom - offset` fail when zone is inverted.
 
@@ -479,7 +479,7 @@ public calculateLevels(
 - Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - Tests call this method directly — no full pattern recognition needed
 
-### 6.6 Dynamic Backtester Architecture — `src/backtest/run.ts`
+### 7.8 Dynamic Backtester Architecture — `src/backtest/run.ts`
 
 **Problem**: Hardcoded '15m'/'240' timeframes and fixed 17280 candle count (180 days of 15m) prevented testing other timeframes. Cache filenames were hardcoded to '15', causing 5m cache to overwrite 15m cache.
 
@@ -507,7 +507,7 @@ public calculateLevels(
 - ✅ Progress: `candle ${i}/${candlesLtf.length} (${((i / candlesLtf.length) * 100).toFixed(1)}%)`
 - ✅ `runBacktestForSymbol` receives `ltfMinutes` parameter for dynamic calculations
 
-### 6.7 News Filter (News Embargo) — `src/services/newsService.ts`
+### 7.9 News Filter (News Embargo) — `src/services/newsService.ts`
 
 **Problem**: High-impact USD macro news (NFP, CPI, FOMC, etc.) causes extreme volatility and spread widening. Trading during these windows produces random PnL with negative expectancy.
 
@@ -541,7 +541,7 @@ public calculateLevels(
 3. **Telegram /status**:
    - `getNextHighImpactNews()` → shows next USD high-impact event or "None for today"
 
-### 6.8 Funding Monitor (Delta-Neutral Arbitrage) — `src/services/fundingMonitorService.ts`
+### 7.10 Funding Monitor (Delta-Neutral Arbitrage) — `src/services/fundingMonitorService.ts`
 
 **Problem**: Delta-neutral arbitrage positions (long spot + short perp) earn funding when rates are positive but lose money when rates turn negative. Need passive monitoring with alerts.
 
@@ -576,7 +576,7 @@ public calculateLevels(
 
 ---
 
-### 6.9 Dynamic Macro Context in Backtester — **Lookahead Bias Elimination** — `src/backtest/run.ts` — **NEW v2026-09-20**
+### 7.11 Dynamic Macro Context in Backtester — **Lookahead Bias Elimination** — `src/backtest/run.ts` — **NEW v2026-09-20**
 
 **Problem**: `initializeMacroContext()` was called once before backtest loop, loading daily levels (PDH/PDL, PWH/PWL) from the **end of history** (e.g., September 2026). During simulation of March–August 2026, the bot incorrectly used future levels — causing Scenarios 5, 7, 8, 9 to miss valid sweeps.
 
@@ -647,7 +647,7 @@ for (let i = 0; i < candlesLtf.length; i++) {
 
 ---
 
-### 6.10 Timezone Sanity Check (Docker + luxon) — **NEW v2026-09-22**
+### 7.12 Timezone Sanity Check (Docker + luxon) — **NEW v2026-09-22**
 
 **Problem**: luxon's `setZone('America/New_York')` silently falls back to UTC in Docker Alpine containers because the base image lacks the IANA timezone database (`tzdata`). This caused killzone checks to fail at 11:15 UTC (07:15 NY) — the bot saw `hour=11` instead of `hour=7` and rejected valid NY session trades.
 
@@ -676,7 +676,7 @@ logger.info(`[Timezone Sanity Check] Server UTC: ${utcTime} | Wall Street (NY): 
 
 ---
 
-### 6.11 Mitigated Structures (Ghost Signal Elimination) — **NEW v2026-09-24**
+### 7.13 Mitigated Structures (Ghost Signal Elimination) — **NEW v2026-09-24**
 
 **Problem**: Scenario 6 (SMS) was generating duplicate entries on the same CHoCH structure. After a trade closed, the CHoCH structure that triggered the entry was NOT marked as "used". When a new killzone arrived, the bot re-detected the same old CHoCH and entered again — same price, 5 hours apart. This created "ghost signals" — fake setups that appeared valid but were actually re-entries on already-consumed structures.
 
@@ -730,7 +730,7 @@ interface MitigatedStructure {
 
 **Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
 
-### 6.20 Ghost Signals Protection (V5 Sniper) — **NEW v2026-10-01**
+### 7.22 Ghost Signals Protection (V5 Sniper) — **NEW v2026-10-01**
 
 **Problem**: Scenario 12 (Sniper Touch) could generate duplicate entries on the same 1m CHoCH structure. After a trade closed at TP (within 2 minutes), the same CHoCH structure (still within the 30-minute freshness window) would be re-detected, causing re-entries at the same price — "ghost signals".
 
@@ -780,7 +780,7 @@ interface MitigatedStructure {
 
 ---
 
-### 6.21 Backup Service CSV Export — **NEW v2026-10-01**
+### 7.23 Backup Service CSV Export — **NEW v2026-10-01**
 
 **Problem**: Database schema evolved with new columns (`order_type`, `limit_price`, `management_state` JSONB) but backup CSV export didn't include them.
 
@@ -817,7 +817,7 @@ id,symbol,...,order_type,limit_price,management_state
 
 ---
 
-### 6.22 Same-Candle SL/TP Resolution (Lookahead Bias Fix) — **NEW v2026-09-24**
+### 7.24 Same-Candle SL/TP Resolution (Lookahead Bias Fix) — **NEW v2026-09-24**
 
 **Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
 
@@ -843,7 +843,7 @@ if (hitSL && hitTP) closedBy = 'BOTH';
 
 ---
 
-### 6.23 Mitigated Zones Fix (Zone Re-entry Bug) — **NEW v2026-09-24**
+### 7.25 Mitigated Zones Fix (Zone Re-entry Bug) — **NEW v2026-09-24**
 
 **Problem**: `mitigatedZones` was only updated on trade CLOSE. Bot would enter, close, then re-enter same zone because the zone wasn't "burned" until after close.
 
@@ -864,7 +864,7 @@ mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
 
 ---
 
-### 6.24 Cooldown Logic Fix — **NEW v2026-09-24** (Updated v2026-09-27: Dynamic Timeframe Support)
+### 7.26 Cooldown Logic Fix — **NEW v2026-09-24** (Updated v2026-09-27: Dynamic Timeframe Support)
 
 **Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation. Also, the cooldown was hardcoded to 15-minute timeframe (`16 * 15 * 60 * 1000`), breaking when `LTF_TIMEFRAME` changed.
 
@@ -894,7 +894,7 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 
 ---
 
-### 6.25 Backtest Report Enhancements — **NEW v2026-09-24**
+### 7.27 Backtest Report Enhancements — **NEW v2026-09-24**
 
 Added two new sections to backtest report (`reporter.ts`):
 
@@ -919,7 +919,7 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 ---
 
-### 6.26 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
+### 7.28 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
 
 **Problem**: Backtest was producing fake results — Scenario 6 (SMS) opened 20+ winning trades in a row every 15 minutes at the same entry price because:
 1. **Mitigated structures not tracked on WIN**: When a trade closed in profit, its trigger structure (CHoCH/SMS) was not added to `mitigatedStructures`, allowing re-entry on the same structure.
@@ -941,7 +941,7 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 ---
 
-### 6.27 Hybrid Smart Entry Architecture (Market vs Limit) — **NEW v2026-09-29**
+### 7.29 Hybrid Smart Entry Architecture (Market vs Limit) — **NEW v2026-09-29**
 
 **Problem**: Entering Market orders at the close of the 15m signal candle is mathematically unprofitable in SMC. Price has already "run away", SL becomes huge, R:R breaks, and Bybit rejects TP/SL with error [10001] (TP/SL limits).
 
@@ -1023,6 +1023,43 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 ```
 
 **BybitClient** (`src/api/bybitClient.ts`): New method `placeLimitOrderWithTpsl()` with `orderType: 'Limit'`, `timeInForce: 'GTC'`, and TP/SL attached.
+
+---
+
+### 7.30 Scenario 12 SL/TP Calculation Fix — **NEW v2026-10-02**
+
+**Problem**: Scenario 12 (Sniper Touch) was generating mathematically impossible trades (invalid SL level for Buy side: entry=2722.00, sl=2726.16) because it used manual inline SL/TP calculation instead of the centralized `BaseScenario.calculateLevels()`.
+
+**Root Cause**: Violation of **Anti-Pattern 15.2** — inline SL/TP calculation instead of using `BaseScenario.calculateLevels()`.
+
+**Fix**: Removed manual SL/TP calculation in `Scenario12_SniperTouch.ts`. Now uses:
+1. Creates `obZone` from Order Block (top, bottom, direction)
+2. Calls `this.calculateLevels(idealEntry, obZone, direction, atr1m, R:R=3, offsetMultiplier)`
+3. Returns guaranteed correct SL/TP geometry
+
+**Guarantees Restored** (per §6.5):
+| Direction | Guarantee |
+|-----------|-----------|
+| **BULLISH (Long)** | `SL < Entry < TP` — always, even if `zone.top < zone.bottom` |
+| **BEARISH (Short)** | `SL > Entry > TP` — always, even if `zone.top < zone.bottom` |
+| **Offset floor** | SL always at least 0.1% from entry (prevents RiskManager division by zero) |
+
+**Implementation** (`Scenario12_SniperTouch.ts:167-201`):
+```typescript
+const obZone = { top: entryOB.top, bottom: entryOB.bottom, direction };
+const levels = this.calculateLevels(
+  idealEntry, obZone, direction, atr1m, new Decimal(3),
+  this.config.smcSlAtrOffset ? new Decimal(this.config.smcSlAtrOffset) : new Decimal('0.5')
+);
+this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: levels.takeProfit });
+```
+
+**Guarantees Restored** (per §6.5):
+| Direction | Guarantee |
+|-----------|-----------|
+| **BULLISH (Long)** | `SL < Entry < TP` — always, even if `zone.top < zone.bottom` |
+| **BEARISH (Short)** | `SL > Entry > TP` — always, even if `zone.top < zone.bottom` |
+| **Offset floor** | SL always at least 0.1% from entry (prevents RiskManager division by zero) |
 
 ---
 

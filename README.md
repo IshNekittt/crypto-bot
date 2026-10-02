@@ -20,11 +20,73 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 | Category                 | Capability                                                                                                                                                  |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **11 SMC Scenarios**     | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block             |
+| **12 SMC Scenarios**     | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block, **Sniper Touch (1m)** |
 | **🎯 V5 Sniper Mode**    | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                      |
 | **📊 Dynamic Approval**  | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)       |
 | **🛡 Breakeven Protection** | **SL → entry at 2R**: When price moves 2R in favor, SL permanently moves to entry price — protects profit, eliminates risk                              |
 | **👻 Ghost Signal Guard** | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                     |
+| **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
+
+---
+
+## ⚙️ Adaptive Fractioning (Dynamic Position Management) — v2026-10-02
+
+**Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
+
+**Solution**: **Adaptive Fractioning** — Dynamic position management that adapts to the trade's initial R:R ratio.
+
+### Two Management Modes
+
+| Trade Type | Condition | Management Strategy |
+|------------|-----------|---------------------|
+| **Classic** | TotalR < 4 (e.g., 1:3 R:R) | Single milestone: Move SL to entry at 66% progress |
+| **Sniper** | TotalR ≥ 4 (e.g., 1:5+ R:R) | Two milestones: 33% (close 25%, SL→entry) → 66% (close 25%, trail SL) |
+
+### Progress Calculation
+
+```
+progress = |currentPrice - entry| / |takeProfit - entry|  // 0.0 to 1.0
+```
+
+### Milestone Logic
+
+| Mode | Milestone | Progress | Action |
+|------|-----------|----------|--------|
+| Classic | 1 (only) | ≥ 66% | SL → Entry (breakeven) |
+| Sniper | 1 | ≥ 33% | Close 25% of position, SL → Entry |
+| Sniper | 2 | ≥ 66% | Close another 25%, Trail SL to Entry + 33% of TP distance |
+
+### State Persistence (`management_state` JSONB in `trades` table)
+
+```json
+{
+  "milestone1Triggered": true,
+  "milestone2Triggered": false,
+  "initialTotalR": "5.2",
+  "initialQty": "0.1"
+}
+```
+
+### Live Execution (`StrategyEngine.checkAndManagePosition`)
+
+Called on **every 1m candle** when `state === IN_TRADE`:
+1. Fetch open trade + `management_state` from DB
+2. Call `evaluateTradeManagement()` with current 1m candle price
+3. Execute signal:
+   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.amendOrder()`
+   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order)
+   - Update `management_state` in DB via `updateTradeManagementState()`
+
+### Backtest Simulation (`executionSimulator.ts`)
+
+In `checkAndCloseTrade()`:
+1. Evaluate management signal on each candle
+2. For partial closes: Calculate PnL for closed portion, reduce `qty`, update balance
+3. Update SL and management state in state
+
+---
+
+## 📰 News Filter (News Embargo) — v2026-09-12
 | **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
 | **Risk Management**      | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement, **Breakeven (SL→entry at 2R)** |
 | **Infrastructure**       | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                                       |

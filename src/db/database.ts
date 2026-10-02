@@ -479,17 +479,17 @@ async openTrade(input: {
       const testId = 'TEST_DB_1';
       const now = Date.now();
 
-      // INSERT with zoneDetails including decimal values
+      // INSERT with zoneDetails including decimal values and new fields
       await client.query(
-        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price, management_state)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          ON CONFLICT (id) DO NOTHING`,
-        [testId, 'TESTUSDT', 1, '100.12345678', '99.12345678', '103.12345678', '0.12345678', 'OPEN', 'INTEGRATION TEST', now, 'Buy', 'OB', '105.50000000', '104.25000000', '15', 'BULLISH', now],
+        [testId, 'TESTUSDT', 1, '100.12345678', '99.12345678', '103.12345678', '0.12345678', 'OPEN', 'INTEGRATION TEST', now, 'Buy', 'OB', '105.50000000', '104.25000000', '15', 'BULLISH', now, 'Limit', '50000.00000000', '{"milestone1Triggered":false,"milestone2Triggered":false,"initialTotalR":"5.2","initialQty":"0.1"}'],
       );
 
       // SELECT
       const selectResult = await client.query(
-        `SELECT id, symbol, entry_price, sl_price, tp_price, qty, status, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp FROM trades WHERE id = $1`,
+        `SELECT id, symbol, entry_price, sl_price, tp_price, qty, status, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price, management_state FROM trades WHERE id = $1`,
         [testId],
       );
 
@@ -500,6 +500,17 @@ async openTrade(input: {
       const row = selectResult.rows[0];
       if (row.symbol !== 'TESTUSDT' || row.entry_price !== '100.12345678') {
         throw new Error('Data mismatch after INSERT');
+      }
+
+      // Verify new columns
+      if (row.order_type !== 'Limit') {
+        throw new Error('order_type not saved correctly');
+      }
+      if (row.limit_price !== '50000.00000000') {
+        throw new Error('limit_price not saved correctly');
+      }
+      if (!row.management_state || row.management_state.milestone1Triggered !== false) {
+        throw new Error('management_state not saved correctly');
       }
 
       // Verify zoneDetails decimal deserialization and operations

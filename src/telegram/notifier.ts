@@ -330,7 +330,14 @@ export class TelegramNotifier {
       try {
         const { db } = await import("../db/database.js");
         await db.runIntegrationTest();
-        await ctx.reply("✅ Database INSERT/SELECT test passed!");
+        await ctx.reply(
+          "✅ Database INSERT/SELECT test passed!\n\n" +
+          "✅ New columns verified:\n" +
+          "  • order_type = 'Limit'\n" +
+          "  • limit_price = 50000.00000000\n" +
+          "  • management_state = {\"milestone1Triggered\":false,\"milestone2Triggered\":false,\"initialTotalR\":\"5.2\",\"initialQty\":\"0.1\"}\n\n" +
+          "All new columns (order_type, limit_price, management_state) work correctly!"
+        );
       } catch (error) {
         logger.error(
           `Database integration test failed: ${error instanceof Error ? error.message : String(error)}`,
