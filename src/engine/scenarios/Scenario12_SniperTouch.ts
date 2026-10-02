@@ -167,10 +167,15 @@ export class Scenario12_SniperTouch extends BaseScenario {
     // idealEntry = 0.5 of the Order Block (midpoint)
     const idealEntry = entryOB.top.plus(entryOB.bottom).div(2);
 
-    // SL at OB extreme
-    const localExtreme = direction === 'BULLISH' ? entryOB.bottom : entryOB.top;
+    // Create OB zone for calculateLevels
+    const obZone = {
+      top: entryOB.top,
+      bottom: entryOB.bottom,
+      direction: direction,
+    };
 
-    // Safety check: entry must be on correct side of SL
+    // Safety check: entry must be on correct side of zone extreme
+    const localExtreme = direction === 'BULLISH' ? entryOB.bottom : entryOB.top;
     if (direction === 'BULLISH' && idealEntry.lte(localExtreme)) {
       this.logRejection('Invalid SL for long');
       return false;
@@ -180,24 +185,22 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Use sniper displacement multiplier from config (default 0.5)
-    const sniperDispMult = this.config.sniperDisplacementMultiplier 
-      ? new Decimal(this.config.sniperDisplacementMultiplier)
-      : new Decimal('0.5');
-    const offset = Decimal.max(localExtreme.mul(new Decimal('0.0005')), atr1m.mul(sniperDispMult));
-
-    const sl = direction === 'BULLISH'
-      ? localExtreme.minus(offset)
-      : localExtreme.plus(offset);
-    const tp = direction === 'BULLISH'
-      ? idealEntry.plus(idealEntry.minus(sl).mul(3))
-      : idealEntry.minus(sl.minus(idealEntry).mul(3));
+    // Calculate ATR for 1m candles (already done above)
+    // Use standard calculateLevels from BaseScenario
+    const levels = this.calculateLevels(
+      idealEntry,
+      obZone,
+      direction,
+      atr1m,
+      new Decimal(3), // R:R = 3
+      this.config.smcSlAtrOffset ? new Decimal(this.config.smcSlAtrOffset) : new Decimal('0.5')
+    );
 
     // Set levels and details
     this.setLevels({
-      entry: idealEntry,
-      stopLoss: sl,
-      takeProfit: tp,
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
     this.setReason(`Sniper: ${direction} CHoCH at ${chochPrice.toFixed(4)} after ${sweptLevel.name} sweep, entry from 1m OB midpoint`);
