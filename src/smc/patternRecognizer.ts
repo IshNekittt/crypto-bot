@@ -1,7 +1,7 @@
 import { Decimal } from 'decimal.js';
 import { DateTime } from 'luxon';
 import { BybitClient } from '../api/bybitClient';
-import { Candle, Direction, Timeframe } from '../types';
+import { Candle, Direction, Timeframe, MitigatedZone, MitigatedStructure } from '../types';
 import { logger } from '../utils/logger';
 
 export interface SwingPoint {
@@ -109,6 +109,8 @@ export interface PatternData {
   readonly atr4h: Decimal;
   readonly patternRecognizer: 'PatternRecognizer';
   candles1m?: Candle[];
+  mitigatedZones?: MitigatedZone[];
+  mitigatedStructures?: MitigatedStructure[];
 }
 
 export const DEFAULT_PATTERN_CONFIG: PatternConfig = {

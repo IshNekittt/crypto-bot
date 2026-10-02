@@ -8,10 +8,8 @@ services:
     image: postgres:15-alpine
     container_name: db-subaru
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_SUBARU}
-      POSTGRES_DB: smc_subaru
+    env_file:
+      - .env.subaru
     volumes:
       - ./data/db-subaru:/var/lib/postgresql/data
     healthcheck:
@@ -54,10 +52,8 @@ services:
     image: postgres:15-alpine
     container_name: db-emilia
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_EMILIA}
-      POSTGRES_DB: smc_emilia
+    env_file:
+      - .env.emilia
     volumes:
       - ./data/db-emilia:/var/lib/postgresql/data
     healthcheck:

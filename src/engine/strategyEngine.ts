@@ -8,21 +8,12 @@ import { ScenarioRouter } from './scenarioRouter';
 import { TelegramNotifier } from '../telegram/notifier';
 import { PendingTradeManager } from './pendingTradeManager';
 import { NewsService } from '../services/newsService';
-import { InstrumentInfo, StrategyState, Timeframe, BotConfig } from '../types';
+import { InstrumentInfo, StrategyState, Timeframe, BotConfig, MitigatedZone } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { evaluateTradeManagement } from '../risk/tradeManager';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
-
-export interface MitigatedZone {
-  readonly type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION';
-  readonly top: string;
-  readonly bottom: string;
-  readonly timeframe: string;
-  readonly direction: string;
-  readonly timestamp: number;
-}
 
 export interface StrategyEngineDeps {
   readonly symbol: string;

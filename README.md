@@ -746,7 +746,14 @@ SCENARIOS_SOLUSDT=5,6,7,10
 
 **Philosophy**: High win-rate, fewer trades, institutional SMC on 15m closes. Best for stable trending markets.
 
+**File: `.env.subaru`** (for `db-subaru` + `bot-subaru` via docker-compose)
 ```bash
+# Database (read by postgres:15-alpine directly)
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=SubaruSecurePass123
+POSTGRES_DB=smc_subaru
+DATABASE_URL=postgresql://postgres:SubaruSecurePass123@db-subaru:5432/smc_subaru
+
 # Core
 ENABLE_SNIPER_MODE=false
 BREAKEVEN_RR_TRIGGER=2
@@ -774,7 +781,14 @@ SCENARIOS_ETHUSDT=1,5,6,7,10
 
 **Philosophy**: Surgical entries inside macro zones. Lower win-rate but superior R:R. Best for ranging/choppy markets.
 
+**File: `.env.emilia`** (for `db-emilia` + `bot-emilia` via docker-compose)
 ```bash
+# Database (read by postgres:15-alpine directly)
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=EmiliaSecurePass123
+POSTGRES_DB=smc_emilia
+DATABASE_URL=postgresql://postgres:EmiliaSecurePass123@db-emilia:5432/smc_emilia
+
 # Core
 ENABLE_SNIPER_MODE=true
 BACKTEST_DAYS=60

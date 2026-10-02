@@ -107,7 +107,6 @@ export class Scenario12_SniperTouch extends BaseScenario {
     const mitigatedStructures = (patternData as any).mitigatedStructures || [];
     const isMitigated = (s: Structure) => 
       mitigatedStructures.some((ms: any) => 
-        ms.type === s.type && 
         ms.timestamp === s.timestamp && 
         ms.direction === s.direction
       );

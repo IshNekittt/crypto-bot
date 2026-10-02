@@ -185,6 +185,22 @@ export interface StructureDetails {
   direction?: 'BULLISH' | 'BEARISH';
 }
 
+export interface MitigatedZone {
+  type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION';
+  top: string;
+  bottom: string;
+  timeframe: string;
+  direction: string;
+  timestamp: number;
+}
+
+export interface MitigatedStructure {
+  type: 'SMS' | 'CHoCH' | 'BOS';
+  timestamp: number;
+  price: string;
+  direction: 'BULLISH' | 'BEARISH';
+}
+
 export type ScenarioConstructor = new (deps: ScenarioDeps) => IScenario;
 
 export interface TradeManagementState {

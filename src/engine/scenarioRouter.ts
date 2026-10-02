@@ -1,4 +1,4 @@
-import { IScenario, StructureDetails } from '../types';
+import { IScenario, StructureDetails, MitigatedZone, MitigatedStructure } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { ZoneDetails } from '../types';
@@ -23,22 +23,6 @@ export interface ScenarioRouterDeps {
   readonly notifier: any;
   readonly activeScenarios: number[];
   readonly config: BotConfig;
-}
-
-export interface MitigatedZone {
-  type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION';
-  top: string;
-  bottom: string;
-  timeframe: string;
-  direction: string;
-  timestamp: number;
-}
-
-export interface MitigatedStructure {
-  type: 'SMS' | 'CHoCH' | 'BOS';
-  timestamp: number;
-  price: string;
-  direction: 'BULLISH' | 'BEARISH';
 }
 
 export interface RouterResult {
@@ -127,6 +111,14 @@ async evaluate(
     }
 
     try {
+      // Inject fresh mitigated state to prevent stale cache bugs in 1m loop
+      // This must be done BEFORE any patternData processing to ensure fresh state
+      if (patternData) {
+        patternData.mitigatedZones = mitigatedZones;
+        patternData.mitigatedStructures = mitigatedStructures;
+        if (candles1m) patternData.candles1m = candles1m;
+      }
+
       // Use pre-computed PatternData or build it (for backward compatibility / live mode)
       let pd: PatternData;
       if (patternData) {
@@ -141,9 +133,9 @@ async evaluate(
           currentCandleTimestamp
         );
         pd.candles1m = candles1m;
+      }
       // Attach mitigatedStructures for scenarios that detect their own structures (e.g., Scenario 12)
       (pd as any).mitigatedStructures = mitigatedStructures;
-    }
 
       // Filter out mitigated zones from pattern data
       pd.zones = this.filterMitigatedZones(pd.zones, mitigatedZones);

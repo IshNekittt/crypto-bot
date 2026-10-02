@@ -6,7 +6,7 @@ import { loadConfig } from "../config/env";
 import { logger } from "../utils/logger";
 import { Candle, Timeframe } from "../types";
 import { InstrumentInfo } from "./executionSimulator";
-import { MitigatedStructure } from "../engine/scenarioRouter";
+import { MitigatedStructure } from "../types";
 import { Decimal } from "decimal.js";
 import { loadCachedOrFetch, getTimeRangeForSixMonths } from "./historyLoader";
 import {
