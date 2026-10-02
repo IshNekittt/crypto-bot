@@ -1,14 +1,101 @@
+version: '3.8'
+
 services:
-  smc-bot:
-    build: .
-    container_name: smc-bot
+  # ============================================================
+  # DB-SUBARU: PostgreSQL для V4 бота (Subaru)
+  # ============================================================
+  db-subaru:
+    image: postgres:15-alpine
+    container_name: db-subaru
     restart: unless-stopped
-    env_file: .env
-    ports:
-      - "3000:3000"
-    stop_grace_period: 30s
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_SUBARU}
+      POSTGRES_DB: smc_subaru
+    volumes:
+      - ./data/db-subaru:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - smc-network
+    # Без проброса портов наружу! Доступ только внутри сети Docker.
+
+  # ============================================================
+  # BOT-SUBARU: V4 Классический бот (15m/4H, Сценарии 1-11)
+  # ============================================================
+  bot-subaru:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot-subaru
+    restart: unless-stopped
+    env_file:
+      - .env.subaru
+    depends_on:
+      db-subaru:
+        condition: service_healthy
     deploy:
       resources:
         limits:
           cpus: '0.5'
           memory: 512M
+    networks:
+      - smc-network
+    # Порт 3000 не пробрасываем - бот stateless, healthcheck через curl на 127.0.0.1:3000 внутри контейнера
+
+  # ============================================================
+  # DB-EMILIA: PostgreSQL для V5 бота (Emilia)
+  # ============================================================
+  db-emilia:
+    image: postgres:15-alpine
+    container_name: db-emilia
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_EMILIA}
+      POSTGRES_DB: smc_emilia
+    volumes:
+      - ./data/db-emilia:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - smc-network
+
+  # ============================================================
+  # BOT-EMILIA: V5 Снайпер (1m/15m/4H, Сценарий 12)
+  # ============================================================
+  bot-emilia:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bot-emilia
+    restart: unless-stopped
+    env_file:
+      - .env.emilia
+    depends_on:
+      db-emilia:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - smc-network
+
+networks:
+  smc-network:
+    driver: bridge
+
+volumes:
+  # Тома для персистентности данных PostgreSQL
+  # Создаются автоматически при первом запуске
+  # Данные сохраняются в ./data/db-subaru и ./data/db-emilia

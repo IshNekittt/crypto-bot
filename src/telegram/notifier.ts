@@ -9,7 +9,6 @@ import { ExecutionEngine } from "../execution/executionEngine";
 import { StrategyEngine } from "../engine/strategyEngine";
 import { NewsService } from "../services/newsService";
 import { FundingMonitorService } from "../services/fundingMonitorService";
-import { DateTime } from "luxon";
 
 export class TelegramNotifier {
   readonly bot: Telegraf;
@@ -478,7 +477,7 @@ export class TelegramNotifier {
 
   private async sendFileViaFetch(
     buffer: Buffer,
-    _filename: string,
+    filename: string,
     chatId: string,
   ): Promise<void> {
     logger.debug(`Generated backup buffer size: ${buffer.length} bytes`);
@@ -486,13 +485,12 @@ export class TelegramNotifier {
     if (!botToken) {
       throw new Error("TELEGRAM_BOT_TOKEN not configured");
     }
-    // Convert buffer to CSV text (assuming it's already CSV content, possibly gzipped)
-    const csvContent = buffer.toString('utf-8');
-    const blob = new Blob([csvContent], { type: 'text/csv' });
+    // The buffer is already encrypted (gzipped + AES-256-CBC) from BackupService.
+    // Send it as-is as a binary blob with the provided filename.
+    const blob = new Blob([new Uint8Array(buffer)], { type: 'application/octet-stream' });
     const formData = new FormData();
     formData.append('chat_id', chatId);
-    const fileName = `trades_backup_${DateTime.utc().toFormat('yyyy-MM-dd_HH-mm-ss')}.csv`;
-    formData.append('document', blob, fileName);
+    formData.append('document', blob, filename);
 
     const response = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
       method: 'POST',
