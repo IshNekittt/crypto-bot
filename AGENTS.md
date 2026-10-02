@@ -73,15 +73,26 @@ To run V4 Classic and V5 Sniper simultaneously, **complete infrastructure separa
 
 **Deployment Pattern**: Use two Render/Oracle Cloud services pointing to the same Docker image but with different `.env` files:
 ```bash
-# V4 Service
+# V4 Service (.env.subaru)
 ENABLE_SNIPER_MODE=false
-ACTIVE_SCENARIOS=1,5,6,10
-DATABASE_URL=postgresql://v4-db...
+ACTIVE_SCENARIOS=1
+SCENARIOS_LINKUSDT=1,5
+SCENARIOS_BTCUSDT=1,5
+SCENARIOS_SOLUSDT=1,5
+SCENARIOS_AVAXUSDT=1
+SCENARIOS_NEARUSDT=1
+SYMBOLS=LINKUSDT,BTCUSDT,SOLUSDT,AVAXUSDT,NEARUSDT
+ENABLE_FUNDING_MONITOR=true
+DATABASE_URL=postgresql://postgres:SubaruSecurePass123@db-subaru:5432/smc_subaru
 
-# V5 Service  
+# V5 Service (.env.emilia)  
 ENABLE_SNIPER_MODE=true
 ACTIVE_SCENARIOS=12
-DATABASE_URL=postgresql://v5-db...
+SCENARIOS_SOLUSDT=12
+SCENARIOS_AVAXUSDT=12
+SYMBOLS=SOLUSDT,AVAXUSDT
+ENABLE_FUNDING_MONITOR=false
+DATABASE_URL=postgresql://postgres:EmiliaSecurePass123@db-emilia:5432/smc_emilia
 ```
 
 ---

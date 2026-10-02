@@ -90,8 +90,3 @@ services:
 networks:
   smc-network:
     driver: bridge
-
-volumes:
-  # Тома для персистентности данных PostgreSQL
-  # Создаются автоматически при первом запуске
-  # Данные сохраняются в ./data/db-subaru и ./data/db-emilia

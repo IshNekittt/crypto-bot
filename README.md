@@ -709,6 +709,7 @@ docker compose up -d
 | **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                 |
 | **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                |
 | **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                 |
+| **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                           |
 | **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                        |
 
 ---
@@ -762,17 +763,32 @@ LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
 
-# Optimized scenarios per coin (trend-following focus):
-SCENARIOS_SOLUSDT=1,5,6,10
-SCENARIOS_BTCUSDT=1,5,6,10
-SCENARIOS_ETHUSDT=1,5,6,7,10
+# Symbols & Scenarios (per-symbol overrides)
+SYMBOLS=LINKUSDT,BTCUSDT,SOLUSDT,AVAXUSDT,NEARUSDT
+ACTIVE_SCENARIOS=1
+SCENARIOS_LINKUSDT=1,5
+SCENARIOS_BTCUSDT=1,5
+SCENARIOS_SOLUSDT=1,5
+SCENARIOS_AVAXUSDT=1
+SCENARIOS_NEARUSDT=1
+
+# Funding Monitor
+ENABLE_FUNDING_MONITOR=true
+FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,AVAXUSDT,SUIUSDT,NEARUSDT
+FUNDING_ALERT_THRESHOLD=0.0
+FUNDING_RESTORE_THRESHOLD=0.00015
+
+# Logging & Data
+LOG_LEVEL=info
+DATA_DIR=data
 ```
 
 | Aspect | Setting | Rationale |
 |--------|---------|-----------|
 | **Timeframes** | 15m / 4H | Classic SMC timeframe |
-| **Scenarios** | 1, 5, 6, 7, 10 | Trend continuation + HTF sweep + SMS + Breaker |
+| **Scenarios** | 1 (global), 1,5 per major symbols | HTF Continuation + HTF Sweep only |
 | **Entry** | 15m close | Classic SMC execution |
+| **Funding Monitor** | Enabled | Tracks funding for delta-neutral awareness |
 | **Win Rate** | ~70-80% | Fewer, higher-quality setups |
 
 ---
@@ -798,11 +814,18 @@ LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5  # Strict 1m filter
 
-# Sniper uses ONLY scenario 12:
+# Symbols & Scenarios (Sniper uses ONLY scenario 12)
+SYMBOLS=SOLUSDT,AVAXUSDT
 ACTIVE_SCENARIOS=12
 SCENARIOS_SOLUSDT=12
-SCENARIOS_BTCUSDT=12
-SCENARIOS_ETHUSDT=12
+SCENARIOS_AVAXUSDT=12
+
+# Funding Monitor DISABLED for V5
+ENABLE_FUNDING_MONITOR=false
+
+# Logging & Data
+LOG_LEVEL=info
+DATA_DIR=data
 ```
 
 | Aspect | Setting | Rationale |
@@ -810,6 +833,7 @@ SCENARIOS_ETHUSDT=12
 | **Timeframes** | 1m (entry) / 15m (radar) / 4H (macro) | Two-loop architecture |
 | **Scenario** | 12 only (Sniper Touch) | Specialized 1m macro touch |
 | **Entry** | 1m CHoCH inside macro zone | Jewel precision |
+| **Symbols** | SOLUSDT, AVAXUSDT | Focused 2-coin portfolio |
 | **Filters** | Killzone + Sweep + CHoCH + OB | Institutional grade |
 
 ---
