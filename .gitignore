@@ -4,7 +4,6 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 .env
-.env.subaru
-.env.emilia
+.env.*
 .DS_Store
 data/*
