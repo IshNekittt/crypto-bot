@@ -22,6 +22,8 @@ describe('ReconciliationLoop', () => {
       getOpenPositions: jest.fn().mockResolvedValue([]),
       getOpenOrders: jest.fn().mockResolvedValue([]),
       syncServerTime: jest.fn().mockResolvedValue(mockTimeSync),
+      cancelOrder: jest.fn().mockResolvedValue(undefined),
+      setTradingStop: jest.fn().mockResolvedValue(undefined),
     } as jest.Mocked<PositionListSource>;
 
     mockDb = {
@@ -71,7 +73,6 @@ describe('ReconciliationLoop', () => {
       smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
     backtestDays: 60,
-    breakevenRrTrigger: 2,
     };
 
     reconciliation = new ReconciliationLoop(mockSource, mockDb, mockEngines, mockConfig);

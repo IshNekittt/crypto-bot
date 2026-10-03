@@ -36,7 +36,6 @@ const mockConfig: BotConfig = {
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
     backtestDays: 60,
-    breakevenRrTrigger: 2,
 };
 
 describe('Scenario3: Inducement (IDM)', () => {

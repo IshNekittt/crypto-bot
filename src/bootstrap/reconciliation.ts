@@ -160,12 +160,7 @@ export class ReconciliationLoop {
           if (orderAge > limitExpirationMs) {
             // Cancel the expired limit order
             try {
-              const rest = (this.source as any).rest;
-              await rest.cancelOrder({
-                category: 'linear',
-                symbol: order.symbol,
-                orderId: order.orderId,
-              });
+              await this.source.cancelOrder(order.symbol, order.orderId);
               logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${this.config.limitExpirationCandles} candles)`);
             } catch (cancelError) {
               logger.warn(`[${symbol}] Failed to cancel expired limit order ${order.orderId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`);

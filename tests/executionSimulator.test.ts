@@ -67,9 +67,8 @@ describe('ExecutionSimulator - Breakeven Logic', () => {
         cooldownCandles: 16,
         ltfTimeframe: '15',
         limitExpirationCandles: 6,
-        breakevenRrTrigger: 2,
       },
-      'BTCUSDT'
+      mockInstrument
     );
 
     // Trade should still be open (SL moved to breakeven, TP not hit)
@@ -114,9 +113,8 @@ describe('ExecutionSimulator - Breakeven Logic', () => {
         cooldownCandles: 16,
         ltfTimeframe: '15',
         limitExpirationCandles: 6,
-        breakevenRrTrigger: 2,
       },
-      'BTCUSDT'
+      mockInstrument
     );
     state = stateAfterBE;
     expect(state.openTrade?.slPrice.toString()).toBe('50000');
@@ -135,9 +133,8 @@ describe('ExecutionSimulator - Breakeven Logic', () => {
         cooldownCandles: 16,
         ltfTimeframe: '15',
         limitExpirationCandles: 6,
-        breakevenRrTrigger: 2,
       },
-      'BTCUSDT'
+      mockInstrument
     );
 
     // Trade should be closed at SL (which is at entry price)

@@ -262,6 +262,7 @@ export class StrategyEngine {
         side: trade.side as 'Buy' | 'Sell',
         initialQty: trade.qty,
         managementState,
+        instrument: this.deps.instrument,
       });
 
       if (signal.action === 'none') return;
@@ -270,9 +271,8 @@ export class StrategyEngine {
 
       if (signal.action === 'move_sl_to_entry' || signal.action === 'trail_sl_to_profit') {
         if (signal.newStopLoss) {
-          // Amend stop loss on exchange
-          await this.deps.client.amendOrder({
-            category: 'linear',
+          // Use setTradingStop for position SL/TP updates (not amendOrder which is for pending orders)
+          await this.deps.client.setTradingStop({
             symbol: this.symbol,
             stopLoss: signal.newStopLoss,
           });
@@ -300,8 +300,7 @@ export class StrategyEngine {
           
           // If we also need to move SL
           if (signal.newStopLoss) {
-            await this.deps.client.amendOrder({
-              category: 'linear',
+            await this.deps.client.setTradingStop({
               symbol: this.symbol,
               stopLoss: signal.newStopLoss,
             });
@@ -346,6 +345,25 @@ export class StrategyEngine {
       return;
     }
 
+    // === PRE-FLIGHT CHECK: Price must not have crossed our SL during approval wait ===
+    const currentPrice = this.feedLtf.getCurrentLivePrice();
+    if (currentPrice) {
+      const currentPriceDecimal = new Decimal(currentPrice);
+      const slDecimal = new Decimal(this.plan.stopLoss);
+      const isLong = this.plan.side === 'Buy';
+
+      if (isLong && currentPriceDecimal.lte(slDecimal)) {
+        logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
+      if (!isLong && currentPriceDecimal.gte(slDecimal)) {
+        logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
+    }
+
     // Create updated plan with dynamic order type (PositionPlan is readonly)
     const updatedPlan: PositionPlan = {
       ...this.plan,
@@ -362,6 +380,7 @@ export class StrategyEngine {
     }
 
     await this.deps.db.openTrade({
+      id: result.orderId || tradeId,
       symbol: this.symbol,
       scenario_id: updatedPlan.scenarioId ?? null,
       entry_price: updatedPlan.entryPrice,
@@ -371,9 +390,14 @@ export class StrategyEngine {
       reason: `Scenario ${updatedPlan.scenarioId ?? 'N/A'}`,
       opened_at: Date.now(),
       side: updatedPlan.side,
+      zone_type: updatedPlan.zoneDetails?.type ?? null,
+      zone_top: updatedPlan.zoneDetails?.top?.toString() ?? null,
+      zone_bottom: updatedPlan.zoneDetails?.bottom?.toString() ?? null,
+      zone_timeframe: updatedPlan.zoneDetails?.timeframe ?? null,
+      zone_direction: updatedPlan.zoneDetails?.direction ?? null,
+      zone_timestamp: updatedPlan.zoneDetails?.timestamp ?? null,
       order_type: updatedPlan.orderType,
       limit_price: updatedPlan.limitPrice,
-      id: result.orderId || tradeId,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);

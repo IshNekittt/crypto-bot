@@ -47,7 +47,6 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     smcDisplacementMultiplier: '1.5',
     limitExpirationCandles: 6,
     smartEntryThresholdPct: '0.0015',
-    breakevenRrTrigger: 2,
     enableSniperMode: false,
     backtestDays: 60,
   };

@@ -23,7 +23,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 | **12 SMC Scenarios**     | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block, **Sniper Touch (1m)** |
 | **🎯 V5 Sniper Mode**    | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                      |
 | **📊 Dynamic Approval**  | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)       |
-| **🛡 Breakeven Protection** | **SL → entry at 2R**: When price moves 2R in favor, SL permanently moves to entry price — protects profit, eliminates risk                              |
+| **🛡 Pre-flight SL Check** | **Validates SL at approval**: If price crossed SL during wait, setup is auto-cancelled — prevents "SL below base_price" Bybit rejection                    |
 | **👻 Ghost Signal Guard** | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                     |
 | **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
 
@@ -73,8 +73,8 @@ Called on **every 1m candle** when `state === IN_TRADE`:
 1. Fetch open trade + `management_state` from DB
 2. Call `evaluateTradeManagement()` with current 1m candle price
 3. Execute signal:
-   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.amendOrder()`
-   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order)
+   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.setTradingStop()` (position-level SL update)
+   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order, qty rounded to `qtyStep`, min `minOrderQty` enforced)
    - Update `management_state` in DB via `updateTradeManagementState()`
 
 ### Backtest Simulation (`executionSimulator.ts`)
@@ -88,11 +88,11 @@ In `checkAndCloseTrade()`:
 
 ## 📰 News Filter (News Embargo) — v2026-09-12
 | **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
-| **Risk Management**      | 1% drawdown guard after 3 losses, position sizing via Kelly fraction, micro-stop protection (0.1%), minOrderQty enforcement, **Breakeven (SL→entry at 2R)** |
+| **Risk Management**      | 1% drawdown guard after 3 losses, position sizing via fixed risk%, micro-stop protection (0.1%), minOrderQty enforcement, **Adaptive Fractioning (milestone-based SL/trailing)** |
 | **Infrastructure**       | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                                       |
 | **PnL Accuracy**         | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                                 |
 | **SL Precision**         | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                                  |
-| **News Filter**          | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via ForexFactory calendar, auto-refreshed daily at 00:00 UTC          |
+| **News Filter**          | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via FXMacroData API, auto-refreshed daily at 00:00 UTC          |
 | **Telegram UI**          | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                                     |
 | **Security**             | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                                         |
 
@@ -150,6 +150,34 @@ const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 - Log: `Cancelled expired LIMIT order ${orderId} (age: X min, limit: 6 candles)`.
 
 **Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
+
+### Pre-flight SL Check at Approval u2014 v2026-10-03
+
+**Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price).
+
+**Solution**: **Pre-flight SL validation** at approval time u2014 before sending order to ExecutionEngine:
+
+```typescript
+const currentPrice = this.feedLtf.getCurrentLivePrice();
+if (currentPrice) {
+  const currentPriceDecimal = new Decimal(currentPrice);
+  const slDecimal = new Decimal(this.plan.stopLoss);
+  const isLong = this.plan.side === 'Buy';
+
+  if (isLong && currentPriceDecimal.lte(slDecimal)) {
+    logger.warn(`Setup invalidated: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+    this.transition(StrategyState.SCANNING);
+    return;
+  }
+  if (!isLong && currentPriceDecimal.gte(slDecimal)) {
+    logger.warn(`Setup invalidated: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+    this.transition(StrategyState.SCANNING);
+    return;
+  }
+}
+```
+
+If price has crossed the SL during approval wait, the setup is auto-cancelled and state returns to `SCANNING`.
 
 ### Backtester Simulation (`src/backtest/executionSimulator.ts`)
 
@@ -251,63 +279,6 @@ public calculateLevels(
 - 16 dedicated tests verify geometry: 4 scenarios × 2 directions × 2 zone orientations
 
 or `None for today` / error state.
-
----
-
-## ⚙️ Adaptive Fractioning (Dynamic Position Management) — v2026-10-01
-
-**Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
-
-**Solution**: **Adaptive Fractioning** — Dynamic position management that adapts to the trade's initial R:R ratio.
-
-### Two Management Modes
-
-| Trade Type | Condition | Management Strategy |
-|------------|-----------|---------------------|
-| **Classic** | TotalR < 4 (e.g., 1:3 R:R) | Single milestone: Move SL to entry at 66% progress |
-| **Sniper** | TotalR ≥ 4 (e.g., 1:5+ R:R) | Two milestones: 33% (close 25%, SL→entry) → 66% (close 25%, trail SL) |
-
-### Progress Calculation
-
-```
-progress = |currentPrice - entry| / |takeProfit - entry|  // 0.0 to 1.0
-```
-
-### Milestone Logic
-
-| Mode | Milestone | Progress | Action |
-|------|-----------|----------|--------|
-| Classic | 1 (only) | ≥ 66% | SL → Entry (breakeven) |
-| Sniper | 1 | ≥ 33% | Close 25% of position, SL → Entry |
-| Sniper | 2 | ≥ 66% | Close another 25%, Trail SL to Entry + 33% of TP distance |
-
-### State Persistence (`management_state` JSONB in `trades` table)
-
-```json
-{
-  "milestone1Triggered": true,
-  "milestone2Triggered": false,
-  "initialTotalR": "5.2",
-  "initialQty": "0.1"
-}
-```
-
-### Live Execution (`StrategyEngine.checkAndManagePosition`)
-
-Called on **every 1m candle** when `state === IN_TRADE`:
-1. Fetch open trade + `management_state` from DB
-2. Call `evaluateTradeManagement()` with current 1m candle price
-3. Execute signal:
-   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.amendOrder()`
-   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order)
-   - Update `management_state` in DB via `updateTradeManagementState()`
-
-### Backtest Simulation (`executionSimulator.ts`)
-
-In `checkAndCloseTrade()`:
-1. Evaluate management signal on each candle
-2. For partial closes: Calculate PnL for closed portion, reduce `qty`, update balance
-3. Update SL and management state in state
 
 ---
 
@@ -705,7 +676,6 @@ docker compose up -d
 | **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                           |
 | **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                 |
 | **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                        |
-| **BREAKEVEN_RR_TRIGGER**           |          |            `2`            | R-multiple to trigger breakeven (move SL to entry). `2` = 2R                                                          |
 | **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                 |
 | **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                |
 | **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                 |
@@ -757,7 +727,6 @@ DATABASE_URL=postgresql://postgres:SubaruSecurePass123@db-subaru:5432/smc_subaru
 
 # Core
 ENABLE_SNIPER_MODE=false
-BREAKEVEN_RR_TRIGGER=2
 SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5
@@ -808,7 +777,6 @@ DATABASE_URL=postgresql://postgres:EmiliaSecurePass123@db-emilia:5432/smc_emilia
 # Core
 ENABLE_SNIPER_MODE=true
 BACKTEST_DAYS=60
-BREAKEVEN_RR_TRIGGER=2
 SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5

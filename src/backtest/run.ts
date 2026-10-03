@@ -106,7 +106,6 @@ async function runBacktestForSymbol(
   ltfMinutes: number,
   config: ReturnType<typeof loadConfig> & {
     enableSniperMode?: boolean;
-    breakevenRrTrigger?: number;
   },
 ): Promise<{ trades: TradeResult[]; maxDrawdown: Decimal }> {
   const state = getInitialState();
@@ -296,8 +295,8 @@ async function runBacktestForSymbol(
             cooldownCandles: config.cooldownCandles,
             ltfTimeframe: config.ltfTimeframe,
             limitExpirationCandles: config.limitExpirationCandles || 6,
-            breakevenRrTrigger: config.breakevenRrTrigger || 2,
           },
+          instrument,
           symbol,
         );
 

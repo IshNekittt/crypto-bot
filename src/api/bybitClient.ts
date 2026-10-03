@@ -19,6 +19,8 @@ export interface OpenPosition {
 export interface PositionListSource {
   getOpenPositions(symbol: string): Promise<readonly OpenPosition[]>;
   getOpenOrders(symbol: string): Promise<readonly OpenOrder[]>;
+  cancelOrder(symbol: string, orderId: string): Promise<void>;
+  setTradingStop(request: { symbol: string; stopLoss?: string; takeProfit?: string }): Promise<void>;
   syncServerTime(): Promise<TimeSyncResult>;
 }
 
@@ -551,6 +553,50 @@ export class BybitClient {
 
       this.recordSuccess(request.symbol);
     }, 'amendOrder');
+  }
+
+  async setTradingStop(request: { symbol: string; stopLoss?: string; takeProfit?: string }): Promise<void> {
+    if (this.checkCircuitBreaker(request.symbol)) {
+      throw new Error(`Circuit breaker OPEN for ${request.symbol}: setTradingStop blocked for 60s`);
+    }
+
+    return this.executeWithRetry(async () => {
+      const response = await this.rest.setTradingStop({
+        category: 'linear',
+        symbol: request.symbol,
+        stopLoss: request.stopLoss,
+        takeProfit: request.takeProfit,
+        positionIdx: 0,
+      });
+
+      if (response.retCode !== 0) {
+        this.recordFailure(request.symbol, response.retCode);
+        throw new Error(`[${response.retCode}] ${response.retMsg}`);
+      }
+
+      this.recordSuccess(request.symbol);
+    }, 'setTradingStop');
+  }
+
+  async cancelOrder(symbol: string, orderId: string): Promise<void> {
+    if (this.checkCircuitBreaker(symbol)) {
+      throw new Error(`Circuit breaker OPEN for ${symbol}: cancelOrder blocked for 60s`);
+    }
+
+    return this.executeWithRetry(async () => {
+      const response = await this.rest.cancelOrder({
+        category: 'linear',
+        symbol,
+        orderId,
+      });
+
+      if (response.retCode !== 0) {
+        this.recordFailure(symbol, response.retCode);
+        throw new Error(`[${response.retCode}] ${response.retMsg}`);
+      }
+
+      this.recordSuccess(symbol);
+    }, 'cancelOrder');
   }
 
   async placeReduceOnlyMarketOrder(request: { symbol: string; side: string; qty: string; orderLinkId: string }): Promise<string> {

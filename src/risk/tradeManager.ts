@@ -1,5 +1,7 @@
 import { Decimal } from "decimal.js";
 import { TradeManagementState } from "../types";
+import { InstrumentInfo } from "../types";
+import { formatQuantity } from "../utils/precision";
 
 export interface TradeManagementSignal {
   action: 'none' | 'move_sl_to_entry' | 'close_partial_25' | 'close_partial_50' | 'trail_sl_to_profit';
@@ -17,6 +19,7 @@ export interface TradeContext {
   side: 'Buy' | 'Sell';
   initialQty: string;
   managementState: TradeManagementState;
+  instrument: InstrumentInfo;
 }
 
 function getDefaultState(): TradeManagementState {
@@ -121,11 +124,17 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
   // For TotalR >= 4 (Sniper): More aggressive management
   // Milestone 1: 33% progress -> Close 25%, move SL to entry
   if (!state.milestone1Triggered && clampedProgress.gte(0.33)) {
-    const closeQty = initialQty.mul(0.25).toFixed(8);
+    const rawCloseQty = initialQty.mul(0.25);
+    const formattedCloseQty = formatQuantity(rawCloseQty, new Decimal(context.instrument.qtyStep));
+    const minOrderQty = new Decimal(context.instrument.minOrderQty);
+    const finalCloseQty = new Decimal(formattedCloseQty).lt(minOrderQty) 
+      ? minOrderQty.toFixed(8) 
+      : formattedCloseQty;
+    
     return {
       action: 'close_partial_25',
       reason: 'Sniper mode: 33% progress reached, closing 25% and moving SL to entry',
-      closeQty,
+      closeQty: finalCloseQty,
       newStopLoss: context.entryPrice,
       updatedState: {
         ...baseUpdatedState,
@@ -136,7 +145,12 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
 
   // Milestone 2: 66% progress -> Close another 25%, trail SL to entry + 33% of TP distance
   if (state.milestone1Triggered && !state.milestone2Triggered && clampedProgress.gte(0.66)) {
-    const closeQty = initialQty.mul(0.25).toFixed(8);
+    const rawCloseQty = initialQty.mul(0.25);
+    const formattedCloseQty = formatQuantity(rawCloseQty, new Decimal(context.instrument.qtyStep));
+    const minOrderQty = new Decimal(context.instrument.minOrderQty);
+    const finalCloseQty = new Decimal(formattedCloseQty).lt(minOrderQty) 
+      ? minOrderQty.toFixed(8) 
+      : formattedCloseQty;
     
     // Calculate new SL: entry + 33% of TP distance
     const tpDistance = isLong 
@@ -150,7 +164,7 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
     return {
       action: 'close_partial_50',
       reason: 'Sniper mode: 66% progress reached, closing another 25% and trailing SL to profit',
-      closeQty,
+      closeQty: finalCloseQty,
       newStopLoss: newSl.toFixed(8),
       updatedState: {
         ...baseUpdatedState,

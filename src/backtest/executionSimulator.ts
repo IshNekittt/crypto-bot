@@ -513,7 +513,8 @@ export function checkPendingLimitOrder(
 export function checkAndCloseTrade(
   state: BacktestState,
   candle: Candle,
-  config: { cooldownCandles: number; ltfTimeframe: string; limitExpirationCandles: number; breakevenRrTrigger: number },
+  config: { cooldownCandles: number; ltfTimeframe: string; limitExpirationCandles: number },
+  instrument: InstrumentInfo,
   symbol?: string
 ): { state: BacktestState; tradeResult: TradeResult | null; mitigatedZone?: { type: 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION'; top: string; bottom: string; timeframe: string; direction: string; timestamp: number } } {
   // First check pending limit orders
@@ -536,38 +537,17 @@ export function checkAndCloseTrade(
   }
 
 const trade = state.openTrade;
-   
+    
   // Skip closing on the same candle the trade was opened
   if (candle.timestamp <= trade.entryTime) {
     return { state, tradeResult: null };
   }
-  
+
   const isLong = trade.side === 'Buy';
   const high = new Decimal(candle.high);
   const low = new Decimal(candle.low);
 
-  // === BREAKEVEN LOGIC ===
-  // Check if price has moved in favor by breakevenRrTrigger * risk distance
-  // If so, move SL to breakeven (entry price) permanently
-  let effectiveSlPrice = trade.slPrice;
-  let breakevenTriggered = false;
-  if (config.breakevenRrTrigger > 0) {
-    const riskDistance = isLong 
-      ? trade.entryPrice.minus(trade.slPrice).abs()
-      : trade.slPrice.minus(trade.entryPrice).abs();
-    const breakevenTriggerPrice = isLong
-      ? trade.entryPrice.plus(riskDistance.mul(config.breakevenRrTrigger))
-      : trade.entryPrice.minus(riskDistance.mul(config.breakevenRrTrigger));
-    
-    const breakevenHit = isLong ? high.gte(breakevenTriggerPrice) : low.lte(breakevenTriggerPrice);
-    if (breakevenHit) {
-      effectiveSlPrice = trade.entryPrice; // Move SL to breakeven
-      breakevenTriggered = true;
-      logger.debug(`Breakeven triggered: ${trade.scenarioName} ${trade.side} SL moved to entry ${effectiveSlPrice.toFixed(4)}`);
-    }
-  }
-
-  const hitSL = isLong ? low.lte(effectiveSlPrice) : high.gte(effectiveSlPrice);
+  const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
   const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
 
   // === TRADE MANAGEMENT (Adaptive Fractioning) ===
@@ -587,6 +567,7 @@ const trade = state.openTrade;
     side: trade.side as 'Buy' | 'Sell',
     initialQty: trade.qty.toString(),
     managementState,
+    instrument,
   };
 
   const managementSignal = evaluateTradeManagement(managementContext);
@@ -664,21 +645,16 @@ const trade = state.openTrade;
     }
   }
 
-  // If breakeven was triggered but no SL/TP hit, update the trade's SL in state
-  if (breakevenTriggered && !hitSL && !hitTP) {
-    const updatedTrade: OpenTrade = {
-      ...trade,
-      slPrice: trade.entryPrice,
-    };
-    const updatedState: BacktestState = {
-      ...state,
-      openTrade: updatedTrade,
-    };
-    return { state: updatedState, tradeResult: null };
-  }
-
   // No hit - continue holding
   if (!hitSL && !hitTP) {
+    // But if management updated SL, persist the updated trade
+    if (updatedTrade.slPrice !== trade.slPrice) {
+      const updatedState: BacktestState = {
+        ...state,
+        openTrade: updatedTrade,
+      };
+      return { state: updatedState, tradeResult: null };
+    }
     return { state, tradeResult: null };
   }
 
@@ -799,7 +775,6 @@ export function processSniperMode1mCandle(
     ltfTimeframe: string; 
     limitExpirationCandles: number; 
     cooldownCandles: number;
-    breakevenRrTrigger: number;
     smcSlAtrOffset: string;
     smcDisplacementMultiplier: string;
   },

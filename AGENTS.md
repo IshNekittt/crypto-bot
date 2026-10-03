@@ -251,21 +251,15 @@ this.bot.use(async (ctx, next) => {
 
 **Invariant**: Decision is **purely at approval moment** — no pre-commitment to order type at signal time.
 
-### 4.5 Breakeven Protection — **NEW v2026-09-30**
+### 4.5 Breakeven Protection — **LEGACY (Removed v2026-10-03)**
 
-**Logic** (`src/backtest/executionSimulator.ts:532-560`, `src/engine/strategyEngine.ts`):
-- Trigger: Price moves in favor by `BREAKEVEN_RR_TRIGGER` × risk distance (e.g., 2R)
-- Action: Stop Loss permanently moved to entry price
-- Backtester: Implemented in `checkAndCloseTrade()` — updates `openTrade.slPrice` in state when breakeven hit and trade continues
-- Live: To be implemented in `StrategyEngine` position management
+Breakeven logic (SL → entry at fixed R-multiple) has been **replaced by Adaptive Fractioning** (`src/risk/tradeManager.ts`). 
 
-**Config**: `BREAKEVEN_RR_TRIGGER=2` (in `.env`, integer R-multiples)
+The new system uses milestone-based management:
+- **Classic (TotalR < 4)**: Single milestone at 66% progress → `move_sl_to_entry`
+- **Sniper (TotalR ≥ 4)**: Milestone 1 at 33% → `close_partial_25` + `move_sl_to_entry`; Milestone 2 at 66% → `close_partial_50` + `trail_sl_to_profit`
 
-**Behavior**: 
-- Long: SL → entry when `high ≥ entry + (entry - SL) × trigger`
-- Short: SL → entry when `low ≤ entry - (SL - entry) × trigger`
-- Once moved, SL stays at entry for remainder of trade
-- If price retraces to entry → closes at ~0 PnL (minus fees)
+The legacy `BREAKEVEN_RR_TRIGGER` config variable has been **removed** from codebase and `.env` files. It no longer affects Live or Backtest behavior.
 
 ---
 
@@ -281,7 +275,6 @@ this.bot.use(async (ctx, next) => {
 | **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop is too tight     | `LEVERAGE` from config                        |
 | **No Double Rounding** | Entry/SL passed directly to `formatPrice()` — no intermediate `roundDownToStep()`     | Instrument `tickSize`                         |
 | **TP From Scenario** | Takes pre-calculated `takeProfitRaw` from `BaseScenario.calculateLevels()` — no RR recalc | N/A                                           |
-| **Breakeven**        | When price reaches `BREAKEVEN_RR_TRIGGER` × risk distance, SL moves to entry price    | `BREAKEVEN_RR_TRIGGER` (default 2)            |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
 
@@ -297,21 +290,62 @@ All three execution pipeline fixes applied in single pass:
 
 4. **TP From Scenario** (`riskManager.ts:131`): Removed internal `TAKE_PROFIT_RR_RATIO` recalculation. Takes `input.takeProfitRaw` (already calculated by `BaseScenario.calculateLevels()` with correct geometry). RiskManager only formats via `formatPrice()`.
 
-### 5.2 Breakeven Protection (v2026-09-30)
+### 5.2 Bybit API: Position Stop-Loss Management — **v2026-10-03**
 
-**Logic** (`src/backtest/executionSimulator.ts:532-560`, `src/engine/strategyEngine.ts`):
-- Trigger: Price moves in favor by `BREAKEVEN_RR_TRIGGER` × risk distance (e.g., 2R)
-- Action: Stop Loss permanently moved to entry price
-- Backtester: Implemented in `checkAndCloseTrade()` — updates `openTrade.slPrice` in state when breakeven hit and trade continues
-- Live: To be implemented in `StrategyEngine` position management
+**Critical Rule**: To modify Stop-Loss or Take-Profit on an **open position** in Bybit V5, you **MUST** use `setTradingStop` (position-level stop), **NOT** `amendOrder` (which is for pending/conditional orders only).
 
-**Config**: `BREAKEVEN_RR_TRIGGER=2` (in `.env`, integer R-multiples)
+| Method | Purpose | Use Case |
+|--------|---------|----------|
+| `amendOrder` | Modify pending/conditional orders | Limit orders, stop orders, take-profit orders that are NOT yet filled |
+| `setTradingStop` | Modify SL/TP on **open position** | Moving SL to breakeven, trailing SL, partial close SL adjustment |
 
-**Behavior**: 
-- Long: SL → entry when `high ≥ entry + (entry - SL) × trigger`
-- Short: SL → entry when `low ≤ entry - (SL - entry) × trigger`
-- Once moved, SL stays at entry for remainder of trade
-- If price retraces to entry → closes at ~0 PnL (minus fees)
+**Implementation** (`src/api/bybitClient.ts:558-579`):
+```typescript
+async setTradingStop(request: { symbol: string; stopLoss?: string; takeProfit?: string }): Promise<void> {
+  return this.executeWithRetry(async () => {
+    const response = await this.rest.setTradingStop({
+      category: 'linear',
+      symbol: request.symbol,
+      stopLoss: request.stopLoss,
+      takeProfit: request.takeProfit,
+      positionIdx: 0, // One-Way Mode
+    });
+    // ...
+  }, 'setTradingStop');
+}
+```
+
+**Usage in Live** (`src/engine/strategyEngine.ts:271-308`): All SL updates (breakeven, trailing, post-partial-close) now use `client.setTradingStop()`.
+
+**Invariant**: `amendOrder` is **never** called for `IN_TRADE` positions. Only `setTradingStop` with `positionIdx: 0`.
+
+### 5.3 Pre-flight SL Check at Approval — **NEW v2026-10-03**
+
+**Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price).
+
+**Solution**: **Pre-flight SL validation** at approval time — before sending order to ExecutionEngine (in `StrategyEngine.handleTradeApproval`):
+
+```typescript
+const currentPrice = this.feedLtf.getCurrentLivePrice();
+if (currentPrice) {
+  const currentPriceDecimal = new Decimal(currentPrice);
+  const slDecimal = new Decimal(this.plan.stopLoss);
+  const isLong = this.plan.side === 'Buy';
+
+  if (isLong && currentPriceDecimal.lte(slDecimal)) {
+    logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+    this.transition(StrategyState.SCANNING);
+    return;
+  }
+  if (!isLong && currentPriceDecimal.gte(slDecimal)) {
+    logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+    this.transition(StrategyState.SCANNING);
+    return;
+  }
+}
+```
+
+If price has crossed the SL during approval wait, the setup is auto-cancelled and state returns to `SCANNING`.
 
 ## 6. ADAPTIVE FRACTIONING — Trade Management (`src/risk/tradeManager.ts`)
 
@@ -367,8 +401,8 @@ Called on **every 1m candle** when `state === IN_TRADE`:
 1. Fetch open trade + `management_state` from DB
 2. Call `evaluateTradeManagement()` with current 1m candle price
 3. Execute signal:
-   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.amendOrder()`
-   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order)
+   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.setTradingStop()` (position-level SL update via `setTradingStop`)
+   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order, `qty` rounded to `qtyStep` via `formatQuantity`, min `minOrderQty` enforced)
    - Update `management_state` in DB via `updateTradeManagementState()`
 
 ### 6.6 Backtest Simulation (`executionSimulator.ts`)
