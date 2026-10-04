@@ -618,7 +618,8 @@ export class StrategyEngine {
 
       const riskResult = await this.deps.riskManager.calculatePosition({
         symbol: this.symbol,
-        side: 'Buy',
+        // STRICT MATH: side determined by Entry vs SL geometry, not text direction
+        side: idealEntry.gt(new Decimal(result.levels.stopLoss)) ? 'Buy' : 'Sell',
         entryPrice: idealEntry,
         stopLossRaw: new Decimal(result.levels.stopLoss),
         takeProfitRaw: new Decimal(result.levels.takeProfit),
