@@ -195,6 +195,16 @@ export class Scenario12_SniperTouch extends BaseScenario {
       this.config.smcSlAtrOffset ? new Decimal(this.config.smcSlAtrOffset) : new Decimal('0.5')
     );
 
+    // SAFETY NET: Hard mathematical check to prevent invalid SL levels reaching the exchange
+    if (direction === 'BULLISH' && levels.stopLoss.gte(levels.entry)) {
+      this.logRejection(`Math Error: BULLISH SL (${levels.stopLoss}) >= Entry (${levels.entry})`);
+      return false;
+    }
+    if (direction === 'BEARISH' && levels.stopLoss.lte(levels.entry)) {
+      this.logRejection(`Math Error: BEARISH SL (${levels.stopLoss}) <= Entry (${levels.entry})`);
+      return false;
+    }
+
     // Set levels and details
     this.setLevels({
       entry: levels.entry,

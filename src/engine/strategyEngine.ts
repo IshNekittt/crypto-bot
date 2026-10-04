@@ -206,12 +206,17 @@ export class StrategyEngine {
     if (!update.confirmed) return;
     const htfInterval = this.deps.config.htfTimeframe;
     
-    // Handle 1m candles for Sniper Mode - just accumulate, don't process
+    // Handle 1m candles for Sniper Mode
     if (update.interval === '1') {
       this.feed1m.applyKline(update);
       // Check trade management on every 1m candle if we have an open position
       if (this.state === StrategyState.IN_TRADE) {
         await this.checkAndManagePosition(update.candle.close);
+      }
+      
+      // CRITICAL: If Sniper Mode enabled and we're scanning, evaluate on every 1m close
+      if (this.deps.config.enableSniperMode && this.state === StrategyState.SCANNING) {
+        await this.process('1' as Timeframe);
       }
       return;
     }
@@ -536,37 +541,57 @@ export class StrategyEngine {
   private async process(timeframe: Timeframe): Promise<void> {
     // Only evaluate on LTF confirmed candles for scenario matching
     const ltfInterval = this.deps.config.ltfTimeframe;
-    if (timeframe !== ltfInterval) return;
+    const isSniper1m = this.deps.config.enableSniperMode && timeframe === '1';
+    if (timeframe !== ltfInterval && !isSniper1m) return;
 
     if (this.state === StrategyState.IN_TRADE) return;
     if (this.state === StrategyState.ENTRY_STAGED) return;
 
+    // For Sniper Mode 1m execution, use 15m radar candles as LTF reference
     const candlesLtf = this.feedLtf.getCandles() as any[];
     const candlesHtf = this.feedHtf.getCandles() as any[];
 
     if (candlesLtf.length < 20 || candlesHtf.length < 20) return;
 
-    const lastCandle = candlesLtf[candlesLtf.length - 1];
-    const candleTimestamp = lastCandle?.timestamp ?? 0;
+    let lastCandle: any;
+    let candleTimestamp: number;
 
-    // Deduplication: skip if we already processed this candle (within 1 minute window)
-    const timeDiff = Math.abs(candleTimestamp - this.lastProcessedCandleTimestamp);
-    if (timeDiff < 60000 && this.lastProcessedCandleTimestamp > 0) {
-      logger.debug(`[${this.symbol}] Skipping duplicate/near-duplicate candle at ${candleTimestamp} (diff: ${timeDiff}ms)`);
-      return;
+    if (isSniper1m) {
+      // For 1m evaluation, use the latest 1m candle as trigger but 15m radar for levels
+      const candles1m = this.feed1m.getCandles() as any[];
+      lastCandle = candles1m[candles1m.length - 1];
+      candleTimestamp = lastCandle?.timestamp ?? 0;
+      
+      // Deduplication for 1m: skip if already processed
+      const timeDiff = Math.abs(candleTimestamp - this.lastProcessedCandleTimestamp);
+      if (timeDiff < 60000 && this.lastProcessedCandleTimestamp > 0) {
+        logger.debug(`[${this.symbol}] Skipping duplicate 1m candle at ${candleTimestamp} (diff: ${timeDiff}ms)`);
+        return;
+      }
+    } else {
+      // Normal 15m/4H evaluation
+      lastCandle = candlesLtf[candlesLtf.length - 1];
+      candleTimestamp = lastCandle?.timestamp ?? 0;
+
+      // Deduplication: skip if we already processed this candle (within 1 minute window)
+      const timeDiff = Math.abs(candleTimestamp - this.lastProcessedCandleTimestamp);
+      if (timeDiff < 60000 && this.lastProcessedCandleTimestamp > 0) {
+        logger.debug(`[${this.symbol}] Skipping duplicate/near-duplicate candle at ${candleTimestamp} (diff: ${timeDiff}ms)`);
+        return;
+      }
     }
     this.lastProcessedCandleTimestamp = candleTimestamp;
 
     // News Embargo check: skip scan if high-impact USD news is within 30 minutes
     if (this.deps.newsService.isNewsEmbargo(candleTimestamp)) {
-      logger.info(`[${this.symbol}] ${ltfInterval}m candle closed, but HIGH IMPACT NEWS EMBARGO is active. Skipping scan.`);
+      logger.info(`[${this.symbol}] ${isSniper1m ? '1m' : ltfInterval}m candle closed, but HIGH IMPACT NEWS EMBARGO is active. Skipping scan.`);
       return;
     }
 
-    // Cooldown after SL hit (4 hours = 16 * 15min candles)
+    // Cooldown after SL hit
     const now = Date.now();
     if (this.cooldownUntil > 0 && this.cooldownUntil > now) {
-      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for 4H.`);
+      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan.`);
       return;
     }
 
