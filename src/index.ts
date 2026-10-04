@@ -93,7 +93,7 @@ async function main(): Promise<void> {
 
   // Initialize PendingTradeManager for manual approval flow
   const approvalTimeoutMinutes = config.tradeApprovalTimeoutMinutes ?? 5;
-  const pendingTradeManager = new PendingTradeManager(notifier, approvalTimeoutMinutes);
+  const pendingTradeManager = new PendingTradeManager(notifier, approvalTimeoutMinutes, config);
 
   // Inject PendingTradeManager into TelegramNotifier for /test_signal command
   notifier.setPendingTradeManager(pendingTradeManager);

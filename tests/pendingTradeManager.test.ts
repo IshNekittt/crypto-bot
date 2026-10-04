@@ -1,11 +1,48 @@
 import { PendingTradeManager } from '../src/engine/pendingTradeManager';
 import { TelegramNotifier } from '../src/telegram/notifier';
 import { PendingTrade } from '../src/engine/pendingTradeManager';
+import { BotConfig } from '../src/config/env';
 
 describe('PendingTradeManager', () => {
   let manager: PendingTradeManager;
   let mockNotifier: jest.Mocked<TelegramNotifier>;
   let sendMessageMock: jest.Mock;
+  const mockConfig: BotConfig = {
+    apiKey: '',
+    apiSecret: '',
+    testnet: false,
+    demoTrading: true,
+    symbols: ['SOLUSDT'],
+    riskPercent: '2',
+    reducedRiskPercent: '1',
+    leverage: '10',
+    dataDir: 'data',
+    historyCandles: 200,
+    ltfTimeframe: '15',
+    htfTimeframe: '240',
+    macroCandles: 1000,
+    telegramBotToken: null,
+    telegramChatId: null,
+    databaseUrl: null,
+    autoTrading: false,
+    tradeApprovalTimeoutMinutes: 5,
+    enableLiveTestOrders: false,
+    activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+    enableFundingMonitor: false,
+    fundingMonitorSymbols: [],
+    fundingAlertThreshold: '0.0',
+    fundingRestoreThreshold: '0.0001',
+    symbolScenarios: new Map(),
+    backtestCsvPath: null,
+    cooldownCandles: 16,
+    smcSlAtrOffset: '0.5',
+    smcDisplacementMultiplier: '1.5',
+    limitExpirationCandles: 6,
+    smartEntryThresholdPct: '0.0015',
+    enableSniperMode: false,
+    sniperDisplacementMultiplier: undefined,
+    backtestDays: 60,
+  };
 
   beforeEach(() => {
     sendMessageMock = jest.fn().mockResolvedValue({ message_id: 12345 });
@@ -25,7 +62,7 @@ describe('PendingTradeManager', () => {
       notifyInfo: jest.fn().mockResolvedValue(true),
     } as unknown as jest.Mocked<TelegramNotifier>;
 
-    manager = new PendingTradeManager(mockNotifier, 5); // 5 minutes timeout
+    manager = new PendingTradeManager(mockNotifier, 5, mockConfig); // 5 minutes timeout
   });
 
   afterEach(() => {
@@ -284,7 +321,7 @@ describe('PendingTradeManager', () => {
 
     it('should ACCEPT approval when no price provider is set', async () => {
       // Create new manager without price provider
-      const managerNoPrice = new PendingTradeManager(mockNotifier, 5);
+      const managerNoPrice = new PendingTradeManager(mockNotifier, 5, mockConfig);
       
       const promise = managerNoPrice.queueTrade(
         'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
@@ -304,7 +341,7 @@ describe('PendingTradeManager', () => {
 
   describe('Dynamic Approval (Market vs Limit based on price deviation)', () => {
     const createManagerWithPrice = (currentPrice: string) => {
-      const mgr = new PendingTradeManager(mockNotifier, 5);
+      const mgr = new PendingTradeManager(mockNotifier, 5, mockConfig);
       mgr.setPriceProvider(() => currentPrice);
       return mgr;
     };

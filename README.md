@@ -26,6 +26,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 | **🛡 Pre-flight SL Check** | **Validates SL at approval**: If price crossed SL during wait, setup is auto-cancelled — prevents "SL below base_price" Bybit rejection                    |
 | **👻 Ghost Signal Guard** | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                     |
 | **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
+| **🧮 Strict Math Side** | **Side determined by geometry**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — eliminates text-based direction errors and invalid SL levels      |
 
 ---
 
@@ -86,18 +87,6 @@ In `checkAndCloseTrade()`:
 
 ---
 
-## 📰 News Filter (News Embargo) — v2026-09-12
-| **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
-| **Risk Management**      | 1% drawdown guard after 3 losses, position sizing via fixed risk%, micro-stop protection (0.1%), minOrderQty enforcement, **Adaptive Fractioning (milestone-based SL/trailing)** |
-| **Infrastructure**       | WS Watchdog (3 min), Global 429 Circuit Breaker (5 min), Daily Clock Sync, 10-min Reconciliation Loop                                                       |
-| **PnL Accuracy**         | Exchange `closedPnl` (fees + funding) via 2.5s delayed query on every close                                                                                 |
-| **SL Precision**         | Centralized `calculateLevels()` with `Decimal.min/max` — guarantees correct SL side regardless of zone top/bottom ordering                                  |
-| **News Filter**          | **News Embargo** — blocks trades ±30 min around high-impact USD news (NFP, CPI, FOMC) via FXMacroData API, auto-refreshed daily at 00:00 UTC          |
-| **Telegram UI**          | `/status` (live X-Ray), `/backup` (Blob+fetch), `/test_signal` (dry-run), `/test_live_order` (E2E demo)                                                     |
-| **Security**             | Stealth middleware (single `TELEGRAM_CHAT_ID`), no webhook, stateless Render deploy                                                                         |
-
----
-
 ## 📊 Backtest Results (180 days, 3 symbols, all 11 scenarios)
 
 | Symbol      | Final Balance | Net Profit   | Trades | Win Rate   | Max DD |
@@ -133,10 +122,10 @@ const orderType = useMarketOrder ? "Market" : "Limit";
 const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 ```
 
-| Condition | Order Type                | Price                 |
-| --------- | ------------------------- | --------------------- | ---------------- | ------------ |
-| `         | idealEntry - currentPrice | / idealEntry ≤ 0.15%` | **Market** (IOC) | —            |
-| `         | idealEntry - currentPrice | / idealEntry > 0.15%` | **Limit** (GTC)  | `idealEntry` |
+| Condition | Order Type | Price |
+| --------- | ---------- | ----- |
+| `\|idealEntry - currentPrice\| / idealEntry ≤ 0.15%` | **Market** (IOC) | — |
+| `\|idealEntry - currentPrice\| / idealEntry > 0.15%` | **Limit** (GTC) | `idealEntry` |
 
 **Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
 
@@ -151,11 +140,11 @@ const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 
 **Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
 
-### Pre-flight SL Check at Approval u2014 v2026-10-03
+### Pre-flight SL Check at Approval — v2026-10-03
 
 **Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price).
 
-**Solution**: **Pre-flight SL validation** at approval time u2014 before sending order to ExecutionEngine:
+**Solution**: **Pre-flight SL validation** at approval time — before sending order to ExecutionEngine:
 
 ```typescript
 const currentPrice = this.feedLtf.getCurrentLivePrice();
@@ -1176,6 +1165,7 @@ services:
 - **Displacement**: Body ≥ **1.5 × ATR** on BOS/CHoCH/SMS/Breaker candles
 - **Killzones**: London (02-05 NY) / NY (07-10 NY) only for entries
 - **Macro Context**: O(N) only — ATH/ATL, PWH/PWL, PDH/PDL, DO/WO, last 20 daily FVGs
+- **Strict Side Determination**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — math-only, never text direction
 
 ---
 

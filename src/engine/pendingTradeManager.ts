@@ -2,6 +2,7 @@ import { TelegramNotifier } from '../telegram/notifier';
 import { logger } from '../utils/logger';
 import { Markup } from 'telegraf';
 import { Decimal } from 'decimal.js';
+import { BotConfig } from '../config/env';
 
 export interface PendingTrade {
   id: string;
@@ -26,14 +27,16 @@ export interface PendingTrade {
 export class PendingTradeManager {
   private readonly notifier: TelegramNotifier;
   private readonly approvalTimeoutMs: number;
+  private readonly smartEntryThresholdPct: Decimal;
   private readonly pendingTrades: Map<string, PendingTrade> = new Map();
   private tradeIdCounter = 0;
   
   private getCurrentPrice?: (symbol: string) => string | null;
 
-  constructor(notifier: TelegramNotifier, approvalTimeoutMinutes: number) {
+  constructor(notifier: TelegramNotifier, approvalTimeoutMinutes: number, config: BotConfig) {
     this.notifier = notifier;
     this.approvalTimeoutMs = approvalTimeoutMinutes * 60 * 1000;
+    this.smartEntryThresholdPct = new Decimal(config.smartEntryThresholdPct);
   }
 
   setPriceProvider(getCurrentPrice: (symbol: string) => string | null): void {
@@ -151,7 +154,7 @@ export class PendingTradeManager {
         const currentPrice = new Decimal(currentPriceStr);
         const tpPrice = new Decimal(pending.tp);
         const idealEntry = pending.idealEntry ? new Decimal(pending.idealEntry) : new Decimal(pending.entry);
-        const smartThreshold = new Decimal('0.0015'); // 0.15% - should match SMART_ENTRY_THRESHOLD_PCT
+        const smartThreshold = this.smartEntryThresholdPct; // Use config value
         
         const isLong = pending.side === 'Buy';
         
