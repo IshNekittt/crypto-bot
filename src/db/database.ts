@@ -224,7 +224,7 @@ async openTrade(input: {
     try {
       const result = await client.query(
         `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price, management_state)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'OPEN', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'OPEN', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          RETURNING id`,
         [
           input.id,

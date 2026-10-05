@@ -8,7 +8,7 @@ import { ScenarioRouter } from './scenarioRouter';
 import { TelegramNotifier } from '../telegram/notifier';
 import { PendingTradeManager } from './pendingTradeManager';
 import { NewsService } from '../services/newsService';
-import { InstrumentInfo, StrategyState, Timeframe, BotConfig, MitigatedZone } from '../types';
+import { InstrumentInfo, StrategyState, Timeframe, BotConfig, MitigatedZone, MitigatedStructure } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { evaluateTradeManagement } from '../risk/tradeManager';
@@ -66,6 +66,7 @@ export class StrategyEngine {
   private processing = false;
   private lastProcessedCandleTimestamp: number = 0;
   private mitigatedZones: MitigatedZone[] = [];
+  private mitigatedStructures: MitigatedStructure[] = [];
   // Cooldown after SL hit (4 hours = 16 * 15min candles)
   private cooldownUntil: number = 0;
   // Sniper Mode: active zone waiting for 1m entry trigger (reserved for live engine implementation)
@@ -358,12 +359,14 @@ export class StrategyEngine {
       const isLong = this.plan.side === 'Buy';
 
       if (isLong && currentPriceDecimal.lte(slDecimal)) {
-        logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+        logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+        this.burnSetup(this.plan);
         this.transition(StrategyState.SCANNING);
         return;
       }
       if (!isLong && currentPriceDecimal.gte(slDecimal)) {
-        logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+        logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+        this.burnSetup(this.plan);
         this.transition(StrategyState.SCANNING);
         return;
       }
@@ -380,32 +383,39 @@ export class StrategyEngine {
     const result = await this.deps.executionEngine.execute(updatedPlan);
     if (!result.ok) {
       logger.error(`${this.symbol}: order execution failed after approval: ${result.reason}`);
+      await this.burnSetup(this.plan);
       this.transition(StrategyState.SCANNING);
       return;
     }
 
-    await this.deps.db.openTrade({
-      id: result.orderId || tradeId,
-      symbol: this.symbol,
-      scenario_id: updatedPlan.scenarioId ?? null,
-      entry_price: updatedPlan.entryPrice,
-      sl_price: updatedPlan.stopLoss,
-      tp_price: updatedPlan.takeProfit,
-      qty: updatedPlan.qty,
-      reason: `Scenario ${updatedPlan.scenarioId ?? 'N/A'}`,
-      opened_at: Date.now(),
-      side: updatedPlan.side,
-      zone_type: updatedPlan.zoneDetails?.type ?? null,
-      zone_top: updatedPlan.zoneDetails?.top?.toString() ?? null,
-      zone_bottom: updatedPlan.zoneDetails?.bottom?.toString() ?? null,
-      zone_timeframe: updatedPlan.zoneDetails?.timeframe ?? null,
-      zone_direction: updatedPlan.zoneDetails?.direction ?? null,
-      zone_timestamp: updatedPlan.zoneDetails?.timestamp ?? null,
-      order_type: updatedPlan.orderType,
-      limit_price: updatedPlan.limitPrice,
-    });
-    logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
-    this.transition(StrategyState.IN_TRADE);
+    try {
+      await this.deps.db.openTrade({
+        id: result.orderId || tradeId,
+        symbol: this.symbol,
+        scenario_id: updatedPlan.scenarioId ?? null,
+        entry_price: updatedPlan.entryPrice,
+        sl_price: updatedPlan.stopLoss,
+        tp_price: updatedPlan.takeProfit,
+        qty: updatedPlan.qty,
+        reason: `Scenario ${updatedPlan.scenarioId ?? 'N/A'}`,
+        opened_at: Date.now(),
+        side: updatedPlan.side,
+        zone_type: updatedPlan.zoneDetails?.type ?? null,
+        zone_top: updatedPlan.zoneDetails?.top?.toString() ?? null,
+        zone_bottom: updatedPlan.zoneDetails?.bottom?.toString() ?? null,
+        zone_timeframe: updatedPlan.zoneDetails?.timeframe ?? null,
+        zone_direction: updatedPlan.zoneDetails?.direction ?? null,
+        zone_timestamp: updatedPlan.zoneDetails?.timestamp ?? null,
+        order_type: updatedPlan.orderType,
+        limit_price: updatedPlan.limitPrice,
+      });
+      logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
+      this.transition(StrategyState.IN_TRADE);
+    } catch (dbError) {
+      logger.error(`${this.symbol}: DB openTrade failed, burning setup: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
+      await this.burnSetup(this.plan);
+      this.transition(StrategyState.SCANNING);
+    }
   }
 
   private async onExchangePositionClosed(pnl: string | null): Promise<void> {
@@ -494,6 +504,43 @@ export class StrategyEngine {
     }
 
     this.transition(StrategyState.SCANNING);
+  }
+
+  private burnSetup(plan: PositionPlan): void {
+    if (!plan || !plan.zoneDetails) {
+      logger.warn(`[${this.symbol}] burnSetup called with invalid plan, skipping`);
+      return;
+    }
+    const zd = plan.zoneDetails;
+    // Add zone to mitigatedZones to prevent re-entry
+    if (zd.type && zd.top && zd.bottom && zd.timeframe && zd.direction && zd.timestamp != null) {
+      this.addMitigatedZone({
+        type: zd.type,
+        top: zd.top.toString(),
+        bottom: zd.bottom.toString(),
+        timeframe: zd.timeframe,
+        direction: zd.direction,
+        timestamp: zd.timestamp,
+      });
+
+      // Add structure to mitigatedStructures if available
+      if (zd.timestamp > 0 && (zd.direction === 'BULLISH' || zd.direction === 'BEARISH')) {
+        this.mitigatedStructures.push({
+          type: 'CHoCH',
+          timestamp: zd.timestamp,
+          price: plan.entryPrice.toString(),
+          direction: zd.direction,
+        });
+        // Keep only last 100 to prevent memory leak
+        if (this.mitigatedStructures.length > 100) {
+          this.mitigatedStructures = this.mitigatedStructures.slice(-100);
+        }
+      }
+      
+      logger.warn(`[${this.symbol}] Setup burned: zone ${zd.type} mitigated, structure added to mitigatedStructures`);
+    } else {
+      logger.warn(`[${this.symbol}] burnSetup skipped: zoneDetails incomplete`);
+    }
   }
 
   private addMitigatedZone(zoneDetails: any): void {
