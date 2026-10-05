@@ -400,12 +400,13 @@ export function evaluateTradeManagement(context: TradeContext): TradeManagementS
 ### 6.5 Live Execution (`StrategyEngine.checkAndManagePosition`)
 
 Called on **every 1m candle** when `state === IN_TRADE`:
-1. Fetch open trade + `management_state` from DB
-2. Call `evaluateTradeManagement()` with current 1m candle price
-3. Execute signal:
+1. **Verify actual position exists on exchange** — calls `client.getOpenPositions()` to confirm position size > 0; if position is 0 (unfilled limit order), returns early without management
+2. Fetch open trade + `management_state` from DB
+3. Call `evaluateTradeManagement()` with current 1m candle price
+4. Execute signal:
    - `move_sl_to_entry` / `trail_sl_to_profit` → `client.setTradingStop()` (position-level SL update via `setTradingStop`)
    - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order, `qty` rounded to `qtyStep` via `formatQuantity`, min `minOrderQty` enforced)
-   - Update `management_state` in DB via `updateTradeManagementState()`
+   - Update `management_state` in DB via `updateTradeManagementState()` **only after successful API response**
 
 ### 6.6 Backtest Simulation (`executionSimulator.ts`)
 

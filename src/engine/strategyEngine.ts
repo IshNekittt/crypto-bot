@@ -250,6 +250,15 @@ export class StrategyEngine {
     if (this.state !== StrategyState.IN_TRADE) return;
 
     try {
+      // Verify actual position exists on exchange before managing
+      // This prevents managing unfilled limit orders
+      const positions = await this.deps.client.getOpenPositions(this.symbol);
+      const position = positions.find(p => p.symbol === this.symbol);
+      if (!position || position.size.isZero()) {
+        // No actual position on exchange (limit order not filled yet)
+        return;
+      }
+
       const trade = await this.deps.db.getOpenTrade(this.symbol);
       if (!trade) return;
 
