@@ -140,7 +140,7 @@ const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 
 **Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
 
-### Pre-flight SL Check at Approval — v2026-10-03
+### Pre-flight SL Check at Approval — v2026-10-03 (Updated v2026-10-05)
 
 **Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price).
 
@@ -154,19 +154,21 @@ if (currentPrice) {
   const isLong = this.plan.side === 'Buy';
 
   if (isLong && currentPriceDecimal.lte(slDecimal)) {
-    logger.warn(`Setup invalidated: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+    logger.warn(`Setup DEAD: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+    this.burnSetup(this.plan); // Burn zone + structure to prevent spam
     this.transition(StrategyState.SCANNING);
     return;
   }
   if (!isLong && currentPriceDecimal.gte(slDecimal)) {
-    logger.warn(`Setup invalidated: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+    logger.warn(`Setup DEAD: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+    this.burnSetup(this.plan); // Burn zone + structure to prevent spam
     this.transition(StrategyState.SCANNING);
     return;
   }
 }
 ```
 
-If price has crossed the SL during approval wait, the setup is auto-cancelled and state returns to `SCANNING`.
+If price has crossed the SL during approval wait, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next minute.
 
 ### Backtester Simulation (`src/backtest/executionSimulator.ts`)
 

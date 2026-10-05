@@ -319,7 +319,7 @@ async setTradingStop(request: { symbol: string; stopLoss?: string; takeProfit?: 
 
 **Invariant**: `amendOrder` is **never** called for `IN_TRADE` positions. Only `setTradingStop` with `positionIdx: 0`.
 
-### 5.3 Pre-flight SL Check at Approval — **NEW v2026-10-03**
+### 5.3 Pre-flight SL Check at Approval — **NEW v2026-10-03** (Updated v2026-10-05: with burnSetup)
 
 **Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price).
 
@@ -333,19 +333,21 @@ if (currentPrice) {
   const isLong = this.plan.side === 'Buy';
 
   if (isLong && currentPriceDecimal.lte(slDecimal)) {
-    logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+    logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+    this.burnSetup(this.plan); // Burn zone + structure to prevent spam
     this.transition(StrategyState.SCANNING);
     return;
   }
   if (!isLong && currentPriceDecimal.gte(slDecimal)) {
-    logger.warn(`[${this.symbol}] Setup invalidated: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+    logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+    this.burnSetup(this.plan); // Burn zone + structure to prevent spam
     this.transition(StrategyState.SCANNING);
     return;
   }
 }
 ```
 
-If price has crossed the SL during approval wait, the setup is auto-cancelled and state returns to `SCANNING`.
+If price has crossed the SL during approval wait, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next candle.
 
 ## 6. ADAPTIVE FRACTIONING — Trade Management (`src/risk/tradeManager.ts`)
 
@@ -1188,7 +1190,10 @@ CREATE TABLE trades (
   zone_bottom NUMERIC(24, 8),      -- bottom of entry zone
   zone_timeframe VARCHAR(10),      -- 15, 240, D, W
   zone_direction VARCHAR(10),      -- BULLISH, BEARISH
-  zone_timestamp BIGINT            -- zone formation timestamp
+  zone_timestamp BIGINT,           -- zone formation timestamp
+  order_type VARCHAR(10),          -- Market | Limit
+  limit_price NUMERIC(24, 8),      -- limit price for Limit orders
+  management_state JSONB DEFAULT '{}'::jsonb  -- adaptive fractioning state
 );
 
 CREATE TABLE symbol_state (
@@ -1201,22 +1206,22 @@ CREATE TABLE symbol_state (
 **Connection Pool**: `max=5`, `idleTimeout=10s`, `keepAlive=true` (Supabase compatibility).
 **Leak Proof**: Every method uses `const client = await pool.connect(); try {...} finally { client.release() }`.
 
-### 8.1 CRUD Operations Audit — **v2026-09-26**
+### 9.1 CRUD Operations Audit — **v2026-10-05**
 
 | Operation | SQL / Code | Status |
 |-----------|------------|--------|
-| **CREATE TABLE** | All 19 columns present: `scenario_id`, `reason`, `zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp` | ✅ |
-| **INSERT (openTrade)** | 16 fields passed incl. all 6 zoneDetails fields with `?? null` fallback | ✅ |
+| **CREATE TABLE** | All 22 columns present: `scenario_id`, `reason`, `zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp`, `order_type`, `limit_price`, `management_state` | ✅ |
+| **INSERT (openTrade)** | 19 fields passed incl. all zoneDetails fields, `order_type`, `limit_price`, `management_state` with `?? null` fallback | ✅ **FIXED v2026-10-05: column/value count aligned** |
 | **UPDATE (closeTrade)** | `reason` column now updated: `SET ..., reason = $4` | ✅ **FIXED v2026-09-26** |
-| **SELECT (mapRowToTradeRecord)** | `zone_top/bottom` → `new Decimal(row.zone_top)`, `scenario_id` as `number \| null`, `reason` passed through | ✅ |
-| **BACKUP (tradesToCsv)** | All 19 columns exported including zone details | ✅ |
+| **SELECT (mapRowToTradeRecord)** | `zone_top/bottom` → `new Decimal(row.zone_top)`, `scenario_id` as `number \| null`, `reason` passed through, `management_state` parsed | ✅ |
+| **BACKUP (tradesToCsv)** | All 22 columns exported including new fields | ✅ |
 
 **DB Fix Applied**: `closeTrade(tradeId, pnl, exitPrice, closedAt, reason)` — callers in `strategyEngine.ts`:
 - Line 348: `closeReason = PnL < 0 ? 'SL' : 'TP'`
 - Line 572: `'RECONCILIATION'`
 - Line 684: `closeReason = PnL < 0 ? 'SL' : 'TP'`
 
----
+**Fix Applied v2026-10-05**: `openTrade` INSERT column/value count mismatch fixed — column list and VALUES clause now both have 20 items (19 columns + status='OPEN' literal).
 
 ## 10. BACKTEST ENGINE — `src/backtest/`
 
