@@ -107,8 +107,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
     const mitigatedStructures = (patternData as any).mitigatedStructures || [];
     const isMitigated = (s: Structure) => 
       mitigatedStructures.some((ms: any) => 
-        ms.timestamp === s.timestamp && 
-        ms.direction === s.direction
+        ms.timestamp === s.timestamp
       );
 
     // Filter for fresh CHoCH in the expected direction (after the sweep)

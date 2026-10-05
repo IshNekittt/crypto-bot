@@ -792,22 +792,22 @@ interface MitigatedStructure {
    ```
 
 2. **Scenario 12 filters structures** against mitigated list before selecting CHoCH (`Scenario12_SniperTouch.ts:106-115`):
-   ```typescript
-   const mitigatedStructures = (patternData as any).mitigatedStructures || [];
-   const isMitigated = (s: Structure) => 
-     mitigatedStructures.some((ms: any) => 
-       ms.type === s.type && 
-       ms.timestamp === s.timestamp && 
-       ms.direction === s.direction
-     );
+    ```typescript
+    const mitigatedStructures = (patternData as any).mitigatedStructures || [];
+    const isMitigated = (s: Structure) => 
+      mitigatedStructures.some((ms: any) => 
+        ms.timestamp === s.timestamp
+      );
 
-   const recentStructures = structures.filter(s => 
-     s.type === 'CHOCH' && 
-     s.direction === direction &&
-     s.timestamp >= (candles1m[candles1m.length - 30]?.timestamp ?? 0) &&
-     !isMitigated(s)
-   );
-   ```
+    const recentStructures = structures.filter(s => 
+      s.type === 'CHOCH' && 
+      s.direction === direction &&
+      s.timestamp >= (candles1m[candles1m.length - 30]?.timestamp ?? 0) &&
+      !isMitigated(s)
+    );
+    ```
+
+    **Note v2026-10-05**: The direction check was removed from `isMitigated` because when structures are burned via `PendingTradeManager`, the `direction` field may be undefined (lost during `PendingTrade` mapping). Timestamp alone is sufficient since candle timestamps are unique.
 
 3. **Scenario 12 returns `structureDetails` with direction** on trigger (`Scenario12_SniperTouch.ts:214-219`):
    ```typescript

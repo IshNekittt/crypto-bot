@@ -64,6 +64,7 @@ export class StrategyEngine {
   private state: StrategyState = StrategyState.SCANNING;
   private plan: PositionPlan | null = null;
   private processing = false;
+  private isProcessing = false;
   private lastProcessedCandleTimestamp: number = 0;
   private mitigatedZones: MitigatedZone[] = [];
   private mitigatedStructures: MitigatedStructure[] = [];
@@ -342,6 +343,12 @@ export class StrategyEngine {
   }
 
   async handleTradeApproval(tradeId: string, approved: boolean): Promise<void> {
+    // State guard: ignore approvals if not in ENTRY_STAGED
+    if (this.state !== StrategyState.ENTRY_STAGED) {
+      logger.warn(`[${this.symbol}] Ignored approval for ${tradeId}: bot is in ${this.state}`);
+      return;
+    }
+
     const approvalResult = this.deps.pendingTradeManager.handleApproval(tradeId, approved);
     if (!approvalResult.approved) {
       if (approved) {
@@ -595,13 +602,18 @@ export class StrategyEngine {
   }
 
   private async process(timeframe: Timeframe): Promise<void> {
-    // Only evaluate on LTF confirmed candles for scenario matching
-    const ltfInterval = this.deps.config.ltfTimeframe;
-    const isSniper1m = this.deps.config.enableSniperMode && timeframe === '1';
-    if (timeframe !== ltfInterval && !isSniper1m) return;
+    // Concurrency lock: prevent race condition between 1m and 15m candle processing
+    if (this.isProcessing) return;
+    this.isProcessing = true;
 
-    if (this.state === StrategyState.IN_TRADE) return;
-    if (this.state === StrategyState.ENTRY_STAGED) return;
+    try {
+      // Only evaluate on LTF confirmed candles for scenario matching
+      const ltfInterval = this.deps.config.ltfTimeframe;
+      const isSniper1m = this.deps.config.enableSniperMode && timeframe === '1';
+      if (timeframe !== ltfInterval && !isSniper1m) return;
+
+      // Only process in SCANNING state
+      if (this.state !== StrategyState.SCANNING) return;
 
     // For Sniper Mode 1m execution, use 15m radar candles as LTF reference
     const candlesLtf = this.feedLtf.getCandles() as any[];
@@ -734,7 +746,10 @@ export class StrategyEngine {
     if (!result.triggered) {
       logger.info(`[${this.symbol}] Scan complete: no setups triggered.`);
     }
+  } finally {
+    this.isProcessing = false;
   }
+}
 
   private async executeStagedEntry(): Promise<void> {
     if (!this.plan) return;

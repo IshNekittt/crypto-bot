@@ -171,6 +171,81 @@ if (currentPrice) {
 
 If price has crossed the SL during approval wait, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next minute.
 
+### State Guard in `handleTradeApproval` — v2026-10-05
+
+**Problem**: In manual approval mode (`AUTO_TRADING=false`), a user could click "Approve" on a stale Telegram message after the bot has already moved to a different state (e.g., due to reconciliation, WS position update, or another signal). This would cause the bot to execute an order in an invalid state, potentially resetting `ENTRY_STAGED` back to `SCANNING` or creating duplicate orders.
+
+**Solution**: **State guard** at the start of `handleTradeApproval` — only process approval if the engine is in `ENTRY_STAGED`:
+
+```typescript
+async handleTradeApproval(tradeId: string, approved: boolean): Promise<void> {
+  // State guard: ignore approvals if not in ENTRY_STAGED
+  if (this.state !== StrategyState.ENTRY_STAGED) {
+    logger.warn(`[${this.symbol}] Ignored approval for ${tradeId}: bot is in ${this.state}`);
+    return;
+  }
+  // ... rest of approval logic
+}
+```
+
+**Behavior**: If the bot is in any state other than `ENTRY_STAGED` (e.g., `SCANNING`, `IN_TRADE`, `SNIPER_MODE`), the approval is silently ignored with a warning log. This prevents stale Telegram callbacks from corrupting the state machine.
+
+### Concurrency Lock in `process()` — v2026-10-05
+
+**Problem**: When 1m and 15m candles close simultaneously, `process()` can be called concurrently. This creates a race condition where:
+- The state machine can be corrupted (e.g., `ENTRY_STAGED` reset to `SCANNING`)
+- Multiple evaluations can run simultaneously, leading to duplicate signal evaluation
+- The state machine can transition to invalid states
+
+**Solution**: **Concurrency lock** (`isProcessing` flag) in the `process()` method:
+
+```typescript
+private isProcessing: boolean = false;
+
+private async process(timeframe: Timeframe): Promise<void> {
+  // Concurrency lock: prevent race condition between 1m and 15m candle processing
+  if (this.isProcessing) return;
+  this.isProcessing = true;
+
+  try {
+    // Only evaluate on LTF confirmed candles for scenario matching
+    const ltfInterval = this.deps.config.ltfTimeframe;
+    const isSniper1m = this.deps.config.enableSniperMode && timeframe === '1';
+    if (timeframe !== ltfInterval && !isSniper1m) return;
+
+    // Only process in SCANNING state
+    if (this.state !== StrategyState.SCANNING) return;
+
+    // ... rest of process() logic
+  } finally {
+    this.isProcessing = false;
+  }
+}
+```
+
+**Behavior**: 
+- First call to `process()` acquires the lock (`isProcessing = true`)
+- Subsequent concurrent calls immediately return
+- Lock is released in `finally` block, guaranteeing release even on error
+
+This ensures the state machine is never corrupted by concurrent candle processing.
+
+### Strict Mathematical Side Determination — v2026-10-05
+
+**Problem**: Previously, trade side (`Buy`/`Sell`) was derived from text-based direction fields (`zoneDetails.direction`, `sweepDirection`, `BULLISH`/`BEARISH` strings). This led to fatal errors when the text label disagreed with the actual SL/TP geometry (e.g., "BULLISH" label but SL above entry).
+
+**Solution**: Trade side is determined **EXCLUSIVELY by geometry** — `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'`. Math never lies.
+
+```typescript
+const idealEntry = new Decimal(result.levels.entry);
+const slDecimal = new Decimal(result.levels.stopLoss);
+const side = idealEntry.gt(slDecimal) ? 'Buy' : 'Sell';
+```
+
+**Rule**: Never hardcode `side`. Never derive side from text labels. Always compute from Entry vs SL geometry at the point of RiskManager call.
+
+---
+
 ### Backtester Simulation (`src/backtest/executionSimulator.ts`)
 
 New state machine for Limit orders:
@@ -437,6 +512,8 @@ logger.info(
 | **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                        |
 
 **Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
+
+> **Note v2026-10-05**: In Scenario 12 (Sniper Touch), the `isMitigated` check now uses only `timestamp` (not `direction`) because when structures are burned via `PendingTradeManager`, the `direction` field may be undefined. Timestamp alone is sufficient since candle timestamps are unique.
 
 ---
 
