@@ -22,6 +22,7 @@ export interface PendingTrade {
   idealEntry?: string; // Ideal entry price from scenario (for dynamic Market/Limit decision)
   isTest?: boolean;           // Flag for dry-run test trades
   isLiveDemoTest?: boolean;   // Flag for live demo test trades (real order on Demo)
+  structureDetails?: any;     // Structure details for ghost signal mitigation (type, timestamp, price, direction)
 }
 
 export class PendingTradeManager {
@@ -56,7 +57,8 @@ export class PendingTradeManager {
     reason: string,
     side: 'Buy' | 'Sell',
     qty: string,
-    idealEntry?: string
+    idealEntry?: string,
+    structureDetails?: any
   ): Promise<boolean> {
     const tradeId = this.generateTradeId(symbol);
 
@@ -113,6 +115,7 @@ export class PendingTradeManager {
         messageId: undefined,
         originalText: text,
         idealEntry: idealEntry ?? entry,
+        structureDetails: structureDetails,
       };
 
       this.pendingTrades.set(tradeId, pending);
@@ -142,7 +145,7 @@ export class PendingTradeManager {
     return msg.message_id;
   }
 
-  handleApproval(tradeId: string, approved: boolean): { approved: boolean; orderType: 'Market' | 'Limit'; limitPrice?: string } {
+  handleApproval(tradeId: string, approved: boolean): { approved: boolean; orderType: 'Market' | 'Limit'; limitPrice?: string; structureDetails?: any } {
     const pending = this.pendingTrades.get(tradeId);
     if (!pending) {
       return { approved: false, orderType: 'Market' };
@@ -188,7 +191,7 @@ export class PendingTradeManager {
           clearTimeout(pending.timeoutHandle);
           this.pendingTrades.delete(tradeId);
           pending.resolve(true);
-          return { approved: true, orderType: 'Limit', limitPrice: idealEntry.toFixed(8) };
+          return { approved: true, orderType: 'Limit', limitPrice: idealEntry.toFixed(8), structureDetails: pending.structureDetails };
         }
         // Use Market order - fall through to normal approval
       }
@@ -198,7 +201,7 @@ export class PendingTradeManager {
     clearTimeout(pending.timeoutHandle);
     this.pendingTrades.delete(tradeId);
     pending.resolve(approved);
-    return { approved, orderType: 'Market' };
+    return { approved, orderType: 'Market', structureDetails: pending.structureDetails };
   }
 
   /**

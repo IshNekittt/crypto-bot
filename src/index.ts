@@ -295,7 +295,7 @@ async function main(): Promise<void> {
   // Set price provider for slippage guard (PendingTradeManager)
   pendingTradeManager.setPriceProvider((symbol: string) => {
     const engine = engines.find((e) => e.symbol === symbol);
-    return engine?.getLastClosedCandle()?.close.toString() ?? null;
+    return engine?.getLivePrice() ?? null;
   });
 
   // STRICTLY ONE loop for calling engine.initialize()

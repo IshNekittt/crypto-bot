@@ -349,6 +349,115 @@ if (currentPrice) {
 
 If price has crossed the SL during approval wait, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next candle.
 
+### 5.4 State Guard in `handleTradeApproval` — **NEW v2026-10-06**
+
+**Problem**: In manual approval mode (`AUTO_TRADING=false`), a user could click "Approve" on a stale Telegram message after the bot has already moved to a different state (e.g., due to reconciliation, WS position update, or another signal). This would cause the bot to execute an order in an invalid state, potentially resetting `ENTRY_STAGED` back to `SCANNING` or creating duplicate orders.
+
+**Solution**: **State guard** at the start of `handleTradeApproval` — only process approval if the engine is in `ENTRY_STAGED`:
+
+```typescript
+async handleTradeApproval(tradeId: string, approved: boolean): Promise<void> {
+  // State guard: ignore approvals if not in ENTRY_STAGED
+  if (this.state !== StrategyState.ENTRY_STAGED) {
+    logger.warn(`[${this.symbol}] Ignored approval for ${tradeId}: bot is in ${this.state}`);
+    return;
+  }
+  // ... rest of approval logic
+}
+```
+
+**Behavior**: If the bot is in any state other than `ENTRY_STAGED` (e.g., `SCANNING`, `IN_TRADE`, `SNIPER_MODE`), the approval is silently ignored with a warning log. This prevents stale Telegram callbacks from corrupting the state machine.
+
+### 5.5 Concurrency Lock in `process()` — **NEW v2026-10-06**
+
+**Problem**: When 1m and 15m candles close simultaneously, `process()` can be called concurrently. This creates a race condition where:
+- The state machine can be corrupted (e.g., `ENTRY_STAGED` reset to `SCANNING`)
+- Multiple evaluations can run simultaneously, leading to duplicate signal evaluation
+- The state machine can transition to invalid states
+
+**Solution**: **Concurrency lock** (`isProcessing` flag) in the `process()` method:
+
+```typescript
+private isProcessing: boolean = false;
+
+private async process(timeframe: Timeframe): Promise<void> {
+  // Concurrency lock: prevent race condition between 1m and 15m candle processing
+  if (this.isProcessing) return;
+  this.isProcessing = true;
+
+  try {
+    // Only evaluate on LTF confirmed candles for scenario matching
+    const ltfInterval = this.deps.config.ltfTimeframe;
+    const isSniper1m = this.deps.config.enableSniperMode && timeframe === '1';
+    if (timeframe !== ltfInterval && !isSniper1m) return;
+
+    // Only process in SCANNING state
+    if (this.state !== StrategyState.SCANNING) return;
+
+    // ... rest of process() logic
+  } finally {
+    this.isProcessing = false;
+  }
+}
+```
+
+**Behavior**: 
+- First call to `process()` acquires the lock (`isProcessing = true`)
+- Subsequent concurrent calls immediately return
+- Lock is released in `finally` block, guaranteeing release even on error
+
+This ensures the state machine is never corrupted by concurrent candle processing.
+
+### 5.6 Live Price Provider for Pre-flight & Slippage Guard — **NEW v2026-10-06**
+
+**Problem**: `PendingTradeManager` used the last closed 15m candle close price as "live price" for slippage guard and pre-flight checks. In volatile markets, this price can be minutes stale, causing the bot to approve setups that are already invalid.
+
+**Solution**: New `getLivePrice()` method on `StrategyEngine` that returns the live tick price from the LTF candle feed:
+
+```typescript
+getLivePrice(): string | null {
+  return this.feedLtf.getCurrentLivePrice()?.toString() || null;
+}
+```
+
+Updated `src/index.ts` to wire this provider:
+```typescript
+pendingTradeManager.setPriceProvider((symbol: string) => {
+  const engine = engines.find((e) => e.symbol === symbol);
+  return engine?.getLivePrice() ?? null;
+});
+```
+
+**Impact**: Slippage Guard and Pre-flight Check now use real-time tick price instead of stale candle close.
+
+### 5.7 Guaranteed Ghost Signal Burning via `structureDetails` — **NEW v2026-10-06**
+
+**Problem**: Scenario 12 (Sniper) continued detecting the same CHoCH after `burnSetup` because `structureDetails` was lost when passing through `PendingTradeManager`. The `direction` field was lost, causing `isMitigated` to fail.
+
+**Solution**: Full chain of custody for `structureDetails`:
+
+1. **`PendingTrade` interface** (`pendingTradeManager.ts:25`): Added `structureDetails?: any`
+2. **`queueTrade`** (`pendingTradeManager.ts:60`): Accepts and stores `structureDetails` in `pending.structureDetails`
+3. **`handleApproval`** (`pendingTradeManager.ts:148, 194, 207`): Returns `structureDetails` in approval result
+4. **`PositionPlan` interface** (`riskManager.ts:65`): Added `structureDetails?: any`
+5. **`queueForApproval`** (`strategyEngine.ts:827`): Passes `result.structureDetails` to `queueTrade`
+6. **`handleTradeApproval`** (`strategyEngine.ts:400`): Copies `approvalResult.structureDetails` to `updatedPlan`
+7. **`burnSetup`** (`strategyEngine.ts:530-570`): Uses `plan.structureDetails` for guaranteed burning with fallback to `zoneDetails`
+
+**Result**: Ghost signals in Scenario 12 are now permanently burned — the CHoCH timestamp is preserved end-to-end.
+
+### 5.8 Zero-NULL Database Guarantee for Closed Trades — **NEW v2026-10-06**
+
+**Problem**: `closeTrade` was called with NULL `pnl`/`exit_price` when exchange data was unavailable, polluting the database.
+
+**Solution**: Comprehensive fallback logic in three locations:
+
+1. **`onExchangePositionClosed`** (lines 495-510): Calculates fallback PnL from trade data + `getLivePrice()` for exit price
+2. **`reconcile`** (lines 851-875): Calculates PnL from live price instead of passing null
+3. **`reconcileWithTrade`** (lines 990-1010): Fallback PnL calculation + live price for exit price
+
+**Guarantee**: `closeTrade` is never called with NULL `pnl` or `exit_price` — database integrity maintained.
+
 ## 6. ADAPTIVE FRACTIONING — Trade Management (`src/risk/tradeManager.ts`)
 
 **Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.

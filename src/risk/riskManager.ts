@@ -62,6 +62,7 @@ export interface PositionPlan {
   } | null;
   readonly orderType: OrderType;
   readonly limitPrice: string | null;
+  readonly structureDetails?: any;
 }
 
 export type PositionPlanResult =

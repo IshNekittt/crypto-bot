@@ -230,6 +230,58 @@ private async process(timeframe: Timeframe): Promise<void> {
 
 This ensures the state machine is never corrupted by concurrent candle processing.
 
+### Live Price Provider for Pre-flight & Slippage Guard — v2026-10-06
+
+**Problem**: `PendingTradeManager` used the last closed 15m candle close price as "live price" for slippage guard and pre-flight checks. In volatile markets, this price can be minutes stale, causing the bot to approve setups that are already invalid.
+
+**Solution**: New `getLivePrice()` method on `StrategyEngine` that returns the live tick price from the LTF candle feed:
+
+```typescript
+getLivePrice(): string | null {
+  return this.feedLtf.getCurrentLivePrice()?.toString() || null;
+}
+```
+
+Updated `src/index.ts` to wire this provider:
+```typescript
+pendingTradeManager.setPriceProvider((symbol: string) => {
+  const engine = engines.find((e) => e.symbol === symbol);
+  return engine?.getLivePrice() ?? null;
+});
+```
+
+**Impact**: Slippage Guard and Pre-flight Check now use real-time tick price instead of stale candle close.
+
+### Guaranteed Ghost Signal Burning via `structureDetails` — v2026-10-06
+
+**Problem**: Scenario 12 (Sniper) continued detecting the same CHoCH after `burnSetup` because `structureDetails` was lost when passing through `PendingTradeManager`. The `direction` field was lost, causing `isMitigated` to fail.
+
+**Solution**: Full chain of custody for `structureDetails`:
+
+1. **`PendingTrade` interface** (`pendingTradeManager.ts:25`): Added `structureDetails?: any`
+2. **`queueTrade`** (`pendingTradeManager.ts:60`): Accepts and stores `structureDetails` in `pending.structureDetails`
+3. **`handleApproval`** (`pendingTradeManager.ts:148, 194, 207`): Returns `structureDetails` in approval result
+4. **`PositionPlan` interface** (`riskManager.ts:65`): Added `structureDetails?: any`
+5. **`queueForApproval`** (`strategyEngine.ts:827`): Passes `result.structureDetails` to `queueTrade`
+6. **`handleTradeApproval`** (`strategyEngine.ts:400`): Copies `approvalResult.structureDetails` to `updatedPlan`
+7. **`burnSetup`** (`strategyEngine.ts:530-570`): Uses `plan.structureDetails` for guaranteed burning with fallback to `zoneDetails`
+
+**Result**: Ghost signals in Scenario 12 are now permanently burned — the CHoCH timestamp is preserved end-to-end.
+
+### Zero-NULL Database Guarantee for Closed Trades — v2026-10-06
+
+**Problem**: `closeTrade` was called with NULL `pnl`/`exit_price` when exchange data was unavailable, polluting the database.
+
+**Solution**: Comprehensive fallback logic in three locations:
+
+1. **`onExchangePositionClosed`** (lines 495-510): Calculates fallback PnL from trade data + `getLivePrice()` for exit price
+2. **`reconcile`** (lines 851-875): Calculates PnL from live price instead of passing null
+3. **`reconcileWithTrade`** (lines 990-1010): Fallback PnL calculation + live price for exit price
+
+**Guarantee**: `closeTrade` is never called with NULL `pnl` or `exit_price` — database integrity maintained.
+
+---
+
 ### Strict Mathematical Side Determination — v2026-10-05
 
 **Problem**: Previously, trade side (`Buy`/`Sell`) was derived from text-based direction fields (`zoneDetails.direction`, `sweepDirection`, `BULLISH`/`BEARISH` strings). This led to fatal errors when the text label disagreed with the actual SL/TP geometry (e.g., "BULLISH" label but SL above entry).

@@ -106,6 +106,10 @@ export class StrategyEngine {
     return { close: new Decimal(candle.close), timestamp: candle.timestamp };
   }
 
+  getLivePrice(): string | null {
+    return this.feedLtf.getCurrentLivePrice()?.toString() || null;
+  }
+
   async getDiagnostics(): Promise<{
     symbol: string;
     livePrice: string | null;
@@ -393,6 +397,7 @@ export class StrategyEngine {
       ...this.plan,
       orderType: approvalResult.orderType,
       limitPrice: approvalResult.limitPrice ?? null,
+      structureDetails: approvalResult.structureDetails,
     };
 
     logger.info(`${this.symbol}: trade ${tradeId} approved, executing ${approvalResult.orderType} order${approvalResult.limitPrice ? ` @ ${approvalResult.limitPrice}` : ''}`);
@@ -495,6 +500,28 @@ export class StrategyEngine {
       logger.warn(`${this.symbol}: Failed to fetch closedPnl, using WS PnL: ${pnlError instanceof Error ? pnlError.message : String(pnlError)}`);
     }
 
+    // Ensure we never pass null to closeTrade - calculate fallback PnL if needed
+    if (finalPnlString === null) {
+      // Calculate PnL from trade data if exchange data unavailable
+      const entryPrice = new Decimal(trade.entryPrice);
+      const exitPrice = finalExitPrice ? new Decimal(finalExitPrice) : new Decimal(this.getLivePrice() ?? trade.entryPrice);
+      const qty = new Decimal(trade.qty);
+      const isLong = trade.side === 'Buy';
+      
+      if (isLong) {
+        finalPnlString = exitPrice.minus(entryPrice).mul(qty).toFixed(8);
+      } else {
+        finalPnlString = entryPrice.minus(exitPrice).mul(qty).toFixed(8);
+      }
+      logger.warn(`${this.symbol}: Calculated fallback PnL from trade data: ${finalPnlString}`);
+    }
+
+if (finalExitPrice === null) {
+        // Use live price as fallback for exit price
+        finalExitPrice = this.getLivePrice() ?? trade.entryPrice;
+        logger.warn(`${this.symbol}: Using fallback exit price: ${finalExitPrice}`);
+      }
+
     // Determine close reason from PnL sign
     const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
     await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
@@ -540,17 +567,29 @@ export class StrategyEngine {
       });
 
       // Add structure to mitigatedStructures if available
-      if (zd.timestamp > 0 && (zd.direction === 'BULLISH' || zd.direction === 'BEARISH')) {
+      // Prefer structureDetails from plan if available (more accurate)
+      if (plan.structureDetails) {
+        const sd = plan.structureDetails;
+        if (sd.timestamp != null && sd.timestamp > 0) {
+          this.mitigatedStructures.push({
+            type: (sd.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+            timestamp: sd.timestamp,
+            price: sd.price?.toString() || plan.entryPrice.toString(),
+            direction: sd.direction || 'BULLISH',
+          });
+        }
+      } else if (zd.timestamp > 0 && (zd.direction === 'BULLISH' || zd.direction === 'BEARISH')) {
+        // Fallback to zoneDetails if structureDetails not available
         this.mitigatedStructures.push({
           type: 'CHoCH',
           timestamp: zd.timestamp,
           price: plan.entryPrice.toString(),
           direction: zd.direction,
         });
-        // Keep only last 100 to prevent memory leak
-        if (this.mitigatedStructures.length > 100) {
-          this.mitigatedStructures = this.mitigatedStructures.slice(-100);
-        }
+      }
+      // Keep only last 100 to prevent memory leak
+      if (this.mitigatedStructures.length > 100) {
+        this.mitigatedStructures = this.mitigatedStructures.slice(-100);
       }
       
       logger.warn(`[${this.symbol}] Setup burned: zone ${zd.type} mitigated, structure added to mitigatedStructures`);
@@ -785,7 +824,7 @@ export class StrategyEngine {
     this.transition(StrategyState.IN_TRADE);
   }
 
-  private async queueForApproval(result: { levels: any; scenario?: any; reason: string }): Promise<void> {
+  private async queueForApproval(result: { levels: any; scenario?: any; reason: string; structureDetails?: any }): Promise<void> {
     if (!this.plan) return;
 
     logger.info(`${this.symbol}: AUTO_TRADING=false, queuing for manual approval`);
@@ -799,7 +838,8 @@ export class StrategyEngine {
       result.reason,
       this.plan.side,
       this.plan.qty,
-      result.levels.entry  // idealEntry for dynamic Market/Limit decision at approval time
+      result.levels.entry,  // idealEntry for dynamic Market/Limit decision at approval time
+      result.structureDetails  // structureDetails for ghost signal mitigation
     );
 
     if (!queued) {
@@ -814,7 +854,21 @@ export class StrategyEngine {
     if (hasOpenPosition) return false;
     const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (trade && trade.pnl === null) {
-      await this.deps.db.closeTrade(trade.id, null, null, Date.now(), 'RECONCILIATION');
+      // Calculate fallback PnL for reconciliation close
+      const entryPrice = new Decimal(trade.entryPrice);
+      const exitPrice = new Decimal(this.getLivePrice() ?? trade.entryPrice);
+      const qty = new Decimal(trade.qty);
+      const isLong = trade.side === 'Buy';
+      
+      let pnlString: string;
+      if (isLong) {
+        pnlString = exitPrice.minus(entryPrice).mul(qty).toFixed(8);
+      } else {
+        pnlString = entryPrice.minus(exitPrice).mul(qty).toFixed(8);
+      }
+      
+      const exitPriceStr = this.getLivePrice() ?? trade.entryPrice;
+      await this.deps.db.closeTrade(trade.id, pnlString, exitPriceStr, Date.now(), 'RECONCILIATION');
     }
     logger.warn(`${this.symbol}: reconciliation force-reset IN_TRADE → SCANNING (no position on exchange)`);
     this.transition(StrategyState.SCANNING);
@@ -923,10 +977,30 @@ export class StrategyEngine {
         logger.warn(`${this.symbol}: Failed to fetch closedPnl, using calculated: ${pnlError instanceof Error ? pnlError.message : String(pnlError)}`);
       }
 
+      // Ensure we never pass null to closeTrade - use fallbacks
+      if (finalPnlString === null) {
+        const entryPrice = new Decimal(trade.entryPrice);
+        const exitPrice = finalExitPrice ? new Decimal(finalExitPrice) : new Decimal(this.getLivePrice() ?? trade.entryPrice);
+        const qty = new Decimal(trade.qty);
+        const isLong = trade.side === 'Buy';
+        
+        if (isLong) {
+          finalPnlString = exitPrice.minus(entryPrice).mul(qty).toFixed(8);
+        } else {
+          finalPnlString = entryPrice.minus(exitPrice).mul(qty).toFixed(8);
+        }
+        logger.warn(`${this.symbol}: reconciliation calculated fallback PnL: ${finalPnlString}`);
+      }
+
+      if (finalExitPrice === null) {
+        finalExitPrice = this.getLivePrice() ?? trade.entryPrice;
+        logger.warn(`${this.symbol}: reconciliation using fallback exit price: ${finalExitPrice}`);
+      }
+
       // Close the trade in DB
-// Determine close reason from PnL sign
-    const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
-    await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
+      // Determine close reason from PnL sign
+      const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
+      await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
 
       // Notify Telegram
       if (finalPnlString !== null) {
