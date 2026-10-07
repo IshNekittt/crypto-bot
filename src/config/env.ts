@@ -42,6 +42,7 @@ export interface BotConfig {
   readonly sniperDisplacementMultiplier?: string;
   readonly backtestDays: number;
   readonly maxWorkingCapital: number;
+  readonly useLocalCacheOnly: boolean;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -341,6 +342,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     ? parsePositiveNumberOrDefault(optionalEnv(env, "MAX_WORKING_CAPITAL"), "0", "MAX_WORKING_CAPITAL")
     : 0;
 
+  const useLocalCacheOnly = (optionalEnv(env, "USE_LOCAL_CACHE_ONLY") ?? "false").toLowerCase() === "true";
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, "BYBIT_API_KEY"),
@@ -383,5 +386,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     sniperDisplacementMultiplier,
     backtestDays,
     maxWorkingCapital,
+    useLocalCacheOnly,
   };
 }

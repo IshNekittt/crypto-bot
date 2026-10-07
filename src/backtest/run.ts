@@ -477,6 +477,7 @@ async function main(): Promise<void> {
           config.ltfTimeframe as Timeframe,
           fromMs,
           toMs,
+          config.useLocalCacheOnly
         ),
         loadCachedOrFetch(
           client,
@@ -484,6 +485,7 @@ async function main(): Promise<void> {
           config.htfTimeframe as Timeframe,
           fromMs,
           toMs,
+          config.useLocalCacheOnly
         ),
       ]);
 
@@ -498,6 +500,7 @@ async function main(): Promise<void> {
           "1",
           Math.max(fromMs, from1m),
           toMs,
+          config.useLocalCacheOnly
         );
         candles1m.push(...fetched1m);
       }

@@ -653,9 +653,9 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 
 Added two new sections to backtest report (`reporter.ts`):
 
-### 🗓️ TRADE TIMELINE (Last 30 Days) [Timezone: UTC]
+### 🗓️ TRADE TIMELINE (Last ${daysToShow} Days) [Timezone: UTC]
 
-Daily calendar with UTC timestamps:
+Daily calendar with UTC timestamps (shows up to 30 days based on backtest period):
 
 ```
 [2026-09-04] ✅ 10 trades | Daily PnL: +$4138.13
@@ -803,6 +803,9 @@ docker compose up -d
 | **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                           |
 | **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                        |
 | **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance. |
+| **USE_LOCAL_CACHE_ONLY**           |          |         `false`           | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys. |
+
+---
 
 ---
 
@@ -1319,6 +1322,7 @@ services:
 | **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                          | Hardcoded in `RiskManager`                    |
 | **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop too tight | `LEVERAGE` from config                        |
 | **Capacity Limit**   | `workingBalance = min(balance, MAX_WORKING_CAPITAL)` — caps risk base          | `MAX_WORKING_CAPITAL` (0 = unlimited)         |
+| **PnL Summation**    | Sums all `closedPnl` records where `symbol` matches & `createdTime >= trade.openedAt` for Adaptive Fractioning | `getClosedPnl` + filter/reduce logic |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
 

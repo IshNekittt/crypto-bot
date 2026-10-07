@@ -73,6 +73,7 @@ describe('ReconciliationLoop', () => {
       smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
     backtestDays: 60,
+    useLocalCacheOnly: false,
     maxWorkingCapital: 0,
     };
 

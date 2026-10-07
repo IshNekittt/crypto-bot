@@ -189,11 +189,14 @@ All REST calls wrapped in `executeWithRetry()`:
 
 1. Wait **2.5 seconds** for exchange to finalize.
 2. `GET /v5/position/closed-pnl` (`getClosedPnl(symbol, startTime, endTime)`).
-3. Match by `orderId` → fallback nearest `closedTime` (±5 min).
-4. Use exchange `closedPnl` (includes fees + funding) + `exitPrice`.
+3. **Match by symbol + `createdTime`** — filter all closedPnl records where `symbol === trade.symbol` AND `createdTime >= trade.openedAt` (Bybit closes position with a new order, different orderId).
+4. **Sum all `closedPnl` values** using `Decimal.reduce()` — critical for Adaptive Fractioning (partial closes) where one trade generates multiple closedPnl records.
+5. Use `avgExitPrice` from the record with latest `createdTime` (last partial close).
 5. Update `trades.pnl`, `trades.exit_price` in DB.
 6. Log: `Using exchange closedPnl (with funding/fees): -12.3456 vs calculated: -11.9876`.
-7. **Fallback**: calculated PnL from executions if closedPnL unavailable.
+8. **Fallback**: calculated PnL from executions if closedPnL unavailable.
+
+> **Important**: Uses `filter().reduce()` instead of `find()` to correctly sum PnL across multiple partial closes (Adaptive Fractioning).
 
 ---
 
@@ -703,6 +706,47 @@ public calculateLevels(
 - ✅ Dynamic log: `[SYMBOL] Starting backtest loop over 51840 5m candles...`
 - ✅ Progress: `candle ${i}/${candlesLtf.length} (${((i / candlesLtf.length) * 100).toFixed(1)}%)`
 - ✅ `runBacktestForSymbol` receives `ltfMinutes` parameter for dynamic calculations
+
+### 7.7.1 Offline Cache Mode (`USE_LOCAL_CACHE_ONLY`) — **NEW v2026-10-07**
+
+**Problem**: During development and CI/CD, hitting Bybit API rate limits (error 10016) causes backtest failures. Need a way to run backtests entirely from local cache without network calls.
+
+**Solution**: Added `USE_LOCAL_CACHE_ONLY` boolean flag (default: `false`).
+
+**Implementation** (`src/config/env.ts` + `src/backtest/historyLoader.ts` + `src/backtest/run.ts`):
+
+```typescript
+// In BotConfig interface
+readonly useLocalCacheOnly: boolean;
+
+// In loadConfig()
+const useLocalCacheOnly = (optionalEnv(env, "USE_LOCAL_CACHE_ONLY") ?? "false").toLowerCase() === "true";
+
+// In historyLoader.ts - loadCachedOrFetch()
+if (useLocalCacheOnly) {
+  if (fs.existsSync(cachePath)) {
+    logger.info(`[OFFLINE MODE] Loaded ${symbol} ${timeframe} strictly from cache.`);
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } else {
+    throw new Error(`[OFFLINE MODE] Cache file not found for ${symbol} ${timeframe}: ${filePath}`);
+  }
+}
+
+// In run.ts - passed via config
+loadCachedOrFetch(client, symbol, timeframe, fromMs, toMs, config.useLocalCacheOnly)
+```
+
+**Behavior**:
+- **`USE_LOCAL_CACHE_ONLY=false` (default)**: Normal operation — fetch from Bybit if cache miss, update cache
+- **`USE_LOCAL_CACHE_ONLY=true`**: **Zero network calls** — loads strictly from local `.json` cache files; throws if cache missing
+
+**Use Cases**:
+- CI/CD pipelines without API access
+- Local development without API keys
+- Re-running backtests with identical data for debugging
+- Avoiding Bybit API rate limits (error 10016)
+
+---
 
 ### 7.8 News Filter (News Embargo) — `src/services/newsService.ts`
 

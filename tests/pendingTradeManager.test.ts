@@ -42,6 +42,7 @@ describe('PendingTradeManager', () => {
     enableSniperMode: false,
     sniperDisplacementMultiplier: undefined,
     backtestDays: 60,
+    useLocalCacheOnly: false,
     maxWorkingCapital: 0,
   };
 

@@ -49,6 +49,7 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
     backtestDays: 60,
+    useLocalCacheOnly: false,
     maxWorkingCapital: 0,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };

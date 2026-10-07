@@ -463,34 +463,33 @@ export class StrategyEngine {
       const startTime = trade.openedAt;
       const closedPnls = await this.deps.client.getClosedPnl(trade.symbol, startTime, endTime);
       
-      // Find matching closed PnL record by orderId or time proximity
+// Find matching closed PnL records by symbol and createdTime after trade opened
+      // Bybit closes position with a new order (different orderId), so match by symbol and createdTime
+      // For Adaptive Fractioning (partial closes), we must SUM all PnL records for this trade
       let matchedPnl: { closedPnl: Decimal; exitPrice: Decimal } | null = null;
       
-      if (trade.orderId) {
-        // Try exact orderId match first
-        matchedPnl = closedPnls
-          .filter(p => p.orderId === trade.orderId)
-          .map(p => ({ closedPnl: p.closedPnl, exitPrice: p.exitPrice }))[0] ?? null;
-      }
+      // Filter all closedPnl records for this symbol that were created after trade opened
+      const relevantPnls = closedPnls.filter(p => 
+        p.symbol === trade.symbol && 
+        Number(p.closedTime) >= trade.openedAt
+      );
       
-      if (!matchedPnl && closedPnls.length > 0) {
-        // Fallback: find by closest closedTime to now
-        const now = Date.now();
-        let bestMatch = closedPnls[0];
-        let minTimeDiff = Math.abs(Number(bestMatch.closedTime) - now);
+      if (relevantPnls.length > 0) {
+        // Sum all closedPnl values using Decimal for precision
+        const totalClosedPnl = relevantPnls.reduce(
+          (sum, p) => sum.plus(p.closedPnl),
+          new Decimal('0')
+        );
         
-        for (const pnlRecord of closedPnls) {
-          const diff = Math.abs(Number(pnlRecord.closedTime) - now);
-          if (diff < minTimeDiff) {
-            minTimeDiff = diff;
-            bestMatch = pnlRecord;
-          }
-        }
+        // Use exitPrice from the record with the latest closedTime (last partial close)
+        const lastRecord = relevantPnls.reduce((latest, current) => 
+          Number(current.closedTime) > Number(latest.closedTime) ? current : latest
+        );
         
-        // Only use if time diff is reasonable (< 5 minutes)
-        if (minTimeDiff < 5 * 60 * 1000) {
-          matchedPnl = { closedPnl: bestMatch.closedPnl, exitPrice: bestMatch.exitPrice };
-        }
+        matchedPnl = { 
+          closedPnl: totalClosedPnl, 
+          exitPrice: lastRecord.exitPrice 
+        };
       }
       
       if (matchedPnl) {
@@ -941,35 +940,34 @@ if (finalExitPrice === null) {
       try {
         const closedPnls = await this.deps.client.getClosedPnl(trade.symbol, startTime, endTime);
         
-        // Find matching closed PnL record by orderId or time proximity
-        let matchedPnl: { closedPnl: Decimal; exitPrice: Decimal } | null = null;
+// Find matching closed PnL records by symbol and createdTime after trade opened
+      // Bybit closes position with a new order (different orderId), so match by symbol and createdTime
+      // For Adaptive Fractioning (partial closes), we must SUM all PnL records for this trade
+      let matchedPnl: { closedPnl: Decimal; exitPrice: Decimal } | null = null;
+      
+      // Filter all closedPnl records for this symbol that were created after trade opened
+      const relevantPnls = closedPnls.filter(p => 
+        p.symbol === trade.symbol && 
+        Number(p.closedTime) >= trade.openedAt
+      );
+      
+      if (relevantPnls.length > 0) {
+        // Sum all closedPnl values using Decimal for precision
+        const totalClosedPnl = relevantPnls.reduce(
+          (sum, p) => sum.plus(p.closedPnl),
+          new Decimal('0')
+        );
         
-        if (trade.orderId) {
-          // Try exact orderId match first
-          matchedPnl = closedPnls
-            .filter(p => p.orderId === trade.orderId)
-            .map(p => ({ closedPnl: p.closedPnl, exitPrice: p.exitPrice }))[0] ?? null;
-        }
+        // Use exitPrice from the record with the latest closedTime (last partial close)
+        const lastRecord = relevantPnls.reduce((latest, current) => 
+          Number(current.closedTime) > Number(latest.closedTime) ? current : latest
+        );
         
-        if (!matchedPnl && closedPnls.length > 0) {
-          // Fallback: find by closest closedTime to now
-          const now = Date.now();
-          let bestMatch = closedPnls[0];
-          let minTimeDiff = Math.abs(Number(bestMatch.closedTime) - now);
-          
-          for (const pnl of closedPnls) {
-            const diff = Math.abs(Number(pnl.closedTime) - now);
-            if (diff < minTimeDiff) {
-              minTimeDiff = diff;
-              bestMatch = pnl;
-            }
-          }
-          
-          // Only use if time diff is reasonable (< 5 minutes)
-          if (minTimeDiff < 5 * 60 * 1000) {
-            matchedPnl = { closedPnl: bestMatch.closedPnl, exitPrice: bestMatch.exitPrice };
-          }
-        }
+        matchedPnl = { 
+          closedPnl: totalClosedPnl, 
+          exitPrice: lastRecord.exitPrice 
+        };
+      }
         
         if (matchedPnl) {
           finalPnlString = matchedPnl.closedPnl.toFixed(8);

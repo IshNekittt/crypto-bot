@@ -69,7 +69,8 @@ export async function loadCachedOrFetch(
   symbol: string,
   timeframe: Timeframe,
   fromMs: number,
-  toMs: number
+  toMs: number,
+  useLocalCacheOnly: boolean = false
 ): Promise<Candle[]> {
   ensureCacheDir();
   const cachePath = getCachePath(symbol, timeframe);
@@ -89,6 +90,16 @@ export async function loadCachedOrFetch(
     const filtered = cached.candles.filter(c => c.timestamp >= fromMs && c.timestamp <= toMs);
     logger.info(`Using cached data for ${symbol} ${timeframe}: ${filtered.length} candles in range`);
     return filtered;
+  }
+
+  if (useLocalCacheOnly) {
+    if (cached) {
+      logger.info(`[OFFLINE MODE] Loaded ${symbol} ${timeframe} strictly from cache.`);
+      const filtered = cached.candles.filter(c => c.timestamp >= fromMs && c.timestamp <= toMs);
+      return filtered;
+    } else {
+      throw new Error(`[OFFLINE MODE] Cache file not found for ${symbol} ${timeframe}: ${cachePath}`);
+    }
   }
 
   logger.info(`Fetching ${symbol} ${timeframe} from Bybit: ${new Date(fromMs).toISOString()} - ${new Date(toMs).toISOString()}`);
