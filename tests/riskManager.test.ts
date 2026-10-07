@@ -22,6 +22,7 @@ describe('RiskManager', () => {
       baseRiskPercent: '2',
       reducedRiskPercent: '1',
       leverage: '10',
+      maxWorkingCapital: 0,
     });
   });
 

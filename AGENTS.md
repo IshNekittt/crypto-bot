@@ -458,7 +458,44 @@ pendingTradeManager.setPriceProvider((symbol: string) => {
 
 **Guarantee**: `closeTrade` is never called with NULL `pnl` or `exit_price` — database integrity maintained.
 
-## 6. ADAPTIVE FRACTIONING — Trade Management (`src/risk/tradeManager.ts`)
+### 5.9 Strategy Capacity Limit (MAX_WORKING_CAPITAL) — **NEW v2026-10-06**
+
+**Problem**: On large accounts, the strategy's edge can diminish due to slippage and market impact when position sizes become too large. There was no way to cap the capital used for risk calculations, leading to degraded performance on large deposits.
+
+**Solution**: **Strategy Capacity Limit (MAX_WORKING_CAPITAL)** — A configurable cap on the capital used for risk calculations:
+
+```typescript
+// In RiskManager.calculatePosition()
+let workingBalance = balance;
+if (this.options.maxWorkingCapital && this.options.maxWorkingCapital > 0) {
+  const maxCap = new Decimal(this.options.maxWorkingCapital);
+  if (balance.gt(maxCap)) {
+    workingBalance = maxCap;  // Cap the balance used for risk calculations
+  }
+}
+
+// Drawdown Guard: reduced risk applies to workingBalance
+const riskPercent = await this.getEffectiveRiskPercent();
+
+// Margin Buffer: Use 98% of workingBalance to leave 2% for fees/reserve
+const marginBuffer = workingBalance.mul(0.98);
+```
+
+**Behavior**:
+- **If balance ≤ cap**: Uses actual balance (no change)
+- **If balance > cap**: Uses cap for ALL risk calculations (position sizing, drawdown guard, margin buffer)
+- **If MAX_WORKING_CAPITAL = 0 (default)**: No cap applied (unlimited)
+
+**Backtester Integration**: The backtester (`src/backtest/executionSimulator.ts`) also respects `MAX_WORKING_CAPITAL`:
+- `calculatePositionSize()` accepts `maxWorkingCapital` parameter
+- `openTrade()` accepts `maxWorkingCapital` parameter
+- Both backtester and live engine use the same logic
+
+**Configuration**: Set `MAX_WORKING_CAPITAL` in `.env` (e.g., `MAX_WORKING_CAPITAL=50000` to cap at $50k). Default is `0` (unlimited).
+
+**Why This Matters**: Prevents strategy degradation on large accounts by ensuring position sizes don't exceed the strategy's capacity. The Drawdown Guard (risk reduction after 3 losses) now correctly applies to the capped working balance, not the full account balance.
+
+---
 
 **Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
 

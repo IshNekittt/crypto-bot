@@ -412,6 +412,7 @@ async function runBacktestForSymbol(
               undefined,
               undefined,
               symbol,
+              new Decimal(config.maxWorkingCapital || 0)
             );
 
             if (tradeOpened) Object.assign(state, newState);

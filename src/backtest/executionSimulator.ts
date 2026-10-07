@@ -148,7 +148,8 @@ function calculatePositionSize(
   entryPrice: Decimal,
   slPrice: Decimal,
   instrument: InstrumentInfo,
-  riskPercent: Decimal
+  riskPercent: Decimal,
+  maxWorkingCapital: Decimal
 ): Decimal {
   const tickSize = new Decimal(instrument.tickSize);
   const qtyStep = new Decimal(instrument.qtyStep);
@@ -162,8 +163,17 @@ function calculatePositionSize(
     return new Decimal('0');
   }
 
+  // Strategy Capacity Limit: Apply maxWorkingCapital if configured
+  let workingBalance = balance;
+  if (maxWorkingCapital.gt(0)) {
+    const maxCap = maxWorkingCapital;
+    if (balance.gt(maxCap)) {
+      workingBalance = maxCap;
+    }
+  }
+
   // FIX: Correct risk math - qty = (balance * riskPercent / 100) / |entry - sl|
-  const riskAmount = balance.mul(riskPercent.div(100));
+  const riskAmount = workingBalance.mul(riskPercent.div(100));
   const rawQty = riskAmount.div(slDistance);
   const qty = roundDownToStep(rawQty, qtyStep);
 
@@ -232,7 +242,8 @@ export function openTrade(
   },
   orderType: 'Market' | 'Limit' = 'Market',
   limitPrice?: Decimal,
-  symbol?: string
+  symbol?: string,
+  maxWorkingCapital: Decimal = new Decimal('0')
 ): { state: BacktestState; tradeOpened: boolean } {
   let slPriceAdjusted = slPrice;
   const slDistance = entryPrice.minus(slPrice).abs();
@@ -282,14 +293,24 @@ export function openTrade(
   }
 
   const riskPercent = getEffectiveRiskPercent(state.consecutiveLosses);
-  let qty = calculatePositionSize(state.balance, entryPrice, slPriceAdjusted, instrument, riskPercent);
+
+  // Strategy Capacity Limit: Apply maxWorkingCapital if configured
+  let workingBalance = state.balance;
+  if (maxWorkingCapital.gt(0)) {
+    const maxCap = maxWorkingCapital;
+    if (state.balance.gt(maxCap)) {
+      workingBalance = maxCap;
+    }
+  }
+
+  let qty = calculatePositionSize(workingBalance, entryPrice, slPriceAdjusted, instrument, riskPercent, maxWorkingCapital);
 
   if (qty.lte(0)) {
     return { state, tradeOpened: false };
   }
 
-  // Fix 2: Margin check - position value cannot exceed balance * LEVERAGE
-  const maxPositionValue = state.balance.mul(LEVERAGE);
+  // Fix 2: Margin check - position value cannot exceed workingBalance * LEVERAGE
+  const maxPositionValue = workingBalance.mul(LEVERAGE);
   const positionValue = qty.mul(entryPrice);
   if (positionValue.gt(maxPositionValue)) {
     // Reduce qty to fit within margin
@@ -777,6 +798,7 @@ export function processSniperMode1mCandle(
     cooldownCandles: number;
     smcSlAtrOffset: string;
     smcDisplacementMultiplier: string;
+    maxWorkingCapital: Decimal;
   },
 instrument: InstrumentInfo,
   _symbol?: string
@@ -876,7 +898,9 @@ instrument: InstrumentInfo,
     undefined,
     undefined,
     'Limit',
-    idealEntry
+    idealEntry,
+    undefined,
+    config.maxWorkingCapital
   );
 
   // Clear the sniper zone after triggering

@@ -802,6 +802,7 @@ docker compose up -d
 | **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                 |
 | **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                           |
 | **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                        |
+| **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance. |
 
 ---
 
@@ -853,6 +854,9 @@ LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
 
+# Strategy Capacity Limit
+MAX_WORKING_CAPITAL=20000
+
 # Symbols & Scenarios (per-symbol overrides)
 SYMBOLS=LINKUSDT,BTCUSDT,SOLUSDT,AVAXUSDT,NEARUSDT
 ACTIVE_SCENARIOS=1
@@ -902,6 +906,9 @@ SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5  # Strict 1m filter
+
+# Strategy Capacity Limit
+MAX_WORKING_CAPITAL=3000
 
 # Symbols & Scenarios (Sniper uses ONLY scenario 12)
 SYMBOLS=SOLUSDT,AVAXUSDT
@@ -1311,6 +1318,7 @@ services:
 | **Max Order Qty**    | If `qty > maxOrderQty` → **ABORT**                                             | Exchange `maxOrderQty`                        |
 | **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                          | Hardcoded in `RiskManager`                    |
 | **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop too tight | `LEVERAGE` from config                        |
+| **Capacity Limit**   | `workingBalance = min(balance, MAX_WORKING_CAPITAL)` — caps risk base          | `MAX_WORKING_CAPITAL` (0 = unlimited)         |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
 

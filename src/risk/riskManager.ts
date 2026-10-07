@@ -17,6 +17,7 @@ export interface RiskManagerOptions {
   readonly baseRiskPercent: string;
   readonly reducedRiskPercent: string;
   readonly leverage: string;
+  readonly maxWorkingCapital?: number;
 }
 
 export const DRAWDOWN_LOSING_TRADES_COUNT = 3;
@@ -138,7 +139,6 @@ export class RiskManager {
 
     const takeProfit = formatPrice(input.takeProfitRaw, tickSize);
 
-    const riskPercent = await this.getEffectiveRiskPercent();
     const balance = await this.balanceSource.getUsdtBalance();
     if (!balance.isFinite() || balance.lte(0)) {
       return {
@@ -147,8 +147,20 @@ export class RiskManager {
       };
     }
 
-    // Margin Buffer: Use 98% of balance to leave 2% for fees/reserve
-    const marginBuffer = balance.mul(0.98);
+    // Strategy Capacity Limit: Apply MAX_WORKING_CAPITAL if configured
+    let workingBalance = balance;
+    if (this.options.maxWorkingCapital && this.options.maxWorkingCapital > 0) {
+      const maxCap = new Decimal(this.options.maxWorkingCapital);
+      if (balance.gt(maxCap)) {
+        workingBalance = maxCap;
+      }
+    }
+
+    // Drawdown Guard: reduced risk applies to workingBalance
+    const riskPercent = await this.getEffectiveRiskPercent();
+
+    // Margin Buffer: Use 98% of workingBalance to leave 2% for fees/reserve
+    const marginBuffer = workingBalance.mul(0.98);
     
     // Leverage cap: max position value = marginBuffer * leverage
     const leverage = new Decimal(this.options.leverage);

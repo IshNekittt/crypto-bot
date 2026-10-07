@@ -41,6 +41,7 @@ export interface BotConfig {
   readonly enableSniperMode: boolean;
   readonly sniperDisplacementMultiplier?: string;
   readonly backtestDays: number;
+  readonly maxWorkingCapital: number;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -336,6 +337,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     throw new Error(`BACKTEST_DAYS must be an integer, got: ${backtestDays}`);
   }
 
+  const maxWorkingCapital = optionalEnv(env, "MAX_WORKING_CAPITAL")
+    ? parsePositiveNumberOrDefault(optionalEnv(env, "MAX_WORKING_CAPITAL"), "0", "MAX_WORKING_CAPITAL")
+    : 0;
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, "BYBIT_API_KEY"),
@@ -377,5 +382,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     enableSniperMode,
     sniperDisplacementMultiplier,
     backtestDays,
+    maxWorkingCapital,
   };
 }

@@ -36,6 +36,7 @@ const mockConfig: BotConfig = {
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
     backtestDays: 60,
+    maxWorkingCapital: 0,
 };
 
 describe('Scenario2: FVG Fill', () => {

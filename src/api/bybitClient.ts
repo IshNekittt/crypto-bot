@@ -641,22 +641,45 @@ export class BybitClient {
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       if (currentEnd <= startTime) break;
 
-      const response = await this.executeWithRetry(async () => {
-        const params: any = {
-          category: 'linear',
-          symbol,
-          interval,
-          limit: chunkSize,
-          end: currentEnd,
-        };
-        return this.rest.getKline(params);
-      }, `fetchHistoricalCandlesInChunks-${symbol}-${interval}`);
+      // Retry logic for each chunk (up to 3 attempts for 10016 errors)
+      let chunk: Candle[] = [];
+      let retries = 0;
+      const maxRetries = 3;
+      let response: any = null;
 
-      if (response.retCode !== 0) {
-        throw new Error(`Chunk fetch failed for ${symbol} ${interval}: [${response.retCode}] ${response.retMsg}`);
+      while (retries < maxRetries) {
+        try {
+          const apiResponse = await this.executeWithRetry(async () => {
+            const params: any = {
+              category: 'linear',
+              symbol,
+              interval,
+              limit: chunkSize,
+              end: currentEnd,
+            };
+            return this.rest.getKline(params);
+          }, `fetchHistoricalCandlesInChunks-${symbol}-${interval}`);
+
+          response = apiResponse;
+          break;
+        } catch (error: any) {
+          const errorMessage = error.message || String(error);
+          // Check for 10016 error specifically
+          if (errorMessage.includes('10016') && retries < maxRetries - 1) {
+            retries++;
+            logger.warn(`[${symbol}] Chunk fetch failed with 10016, retry ${retries}/${maxRetries}: ${errorMessage}`);
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay before retry
+            continue;
+          }
+          throw error;
+        }
       }
 
-      const chunk = parseRestKlines(response.result.list);
+if (!response || response.retCode !== 0) {
+        throw new Error(`Chunk fetch failed for ${symbol} ${interval}: [${response?.retCode}] ${response?.retMsg}`);
+      }
+ 
+      chunk = parseRestKlines(response.result.list);
       
       if (chunk.length === 0) {
         logger.info(`[${symbol}] No more candles returned, stopping at iteration ${iteration}`);
@@ -670,9 +693,9 @@ export class BybitClient {
       const earliestTimestamp = chunk[0].timestamp;
       currentEnd = earliestTimestamp - 1;
 
-      // Rate limit protection: 150ms delay between requests
+      // Rate limit protection: 300ms delay between requests (increased from 150ms)
       if (currentEnd > startTime) {
-        await new Promise(resolve => setTimeout(resolve, 150));
+        await new Promise(resolve => setTimeout(resolve, 300));
       }
 
       logger.debug(`[${symbol}] Fetched chunk ${iteration + 1}: ${chunk.length} candles, earliest=${new Date(earliestTimestamp).toISOString()}, remaining=${Math.max(0, Math.ceil((currentEnd - startTime) / (60 * 1000)))} min`);
