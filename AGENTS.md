@@ -178,7 +178,9 @@ All REST calls wrapped in `executeWithRetry()`:
 
 - Runs every **10 minutes**.
 - **Step 1**: For each `IN_TRADE` engine → `getOpenPositions()` → if gone, force `SCANNING`.
+  - **Limit Order Awareness** (`v2026-10-06`): Before force-reset `IN_TRADE → SCANNING`, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`) via `getOpenOrders()`. If active Limit orders exist, **skips force-reset** to prevent Race Condition and signal duplication.
 - **Step 2**: `db.getAllOpenTrades()` → for each, check exchange position → if missing, `reconcileWithTrade()` with zoneDetails for mitigatedZones tracking.
+  - **Limit Order Awareness** (`v2026-10-06`): Before force-reset, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`). If active Limit orders exist, **skips force-reset** to prevent signal duplication.
 - Idempotent, safe to run concurrently with WS events.
 
 ### 3.5 Accurate PnL with Funding — `src/engine/strategyEngine.ts` + `src/api/bybitClient.ts`
@@ -229,6 +231,7 @@ this.bot.use(async (ctx, next) => {
    - If price moved **> 0.2% toward TP** → **REJECT** + log `[Slippage Guard] ... rejecting`.
    - If price already **≥ TP** → **REJECT**.
 4. On approve: `ExecutionEngine.execute()` → `db.openTrade()` → `IN_TRADE`.
+5. **On Reject / Timeout**: Bot **MUST** call `burnSetup()` to prevent spam cycles — zone + structure added to mitigation lists, state → `SCANNING`.
 
 ### 4.4 Dynamic Approval (Anti-Slippage) — **NEW v2026-09-30**
 
@@ -1369,6 +1372,8 @@ CREATE TABLE symbol_state (
 - Line 684: `closeReason = PnL < 0 ? 'SL' : 'TP'`
 
 **Fix Applied v2026-10-05**: `openTrade` INSERT column/value count mismatch fixed — column list and VALUES clause now both have 20 items (19 columns + status='OPEN' literal).
+
+**Critical Note — `order_id` (v2026-10-07)**: The `order_id` column (VARCHAR(255)) stores the Bybit exchange order ID (UUID). It is **critical** for linking DB records to exchange orders and is passed as the 20th parameter in `openTrade()`. Ensure `order_id` is always passed (even if null initially) to maintain DB-exchange linkage.
 
 ## 10. BACKTEST ENGINE — `src/backtest/`
 

@@ -84,6 +84,17 @@ export class ReconciliationLoop {
         if (engine.getState() !== 'IN_TRADE') continue;
         try {
           const positions = await this.source.getOpenPositions(engine.symbol);
+          
+          // Check for active limit orders before force-reset
+          const openOrders = await this.source.getOpenOrders(engine.symbol);
+          const hasActiveLimitOrder = openOrders.some(
+            (o) => o.orderType === 'Limit' && (o.status === 'New' || o.status === 'PartiallyFilled')
+          );
+          if (hasActiveLimitOrder) {
+            logger.info(`[${engine.symbol}] Reconciliation: Keeping IN_TRADE state due to active Limit order`);
+            continue; // Skip force-reset, limit order is still active
+          }
+          
           const changed = await engine.reconcile(positions);
           if (changed) resets += 1;
         } catch (error) {
@@ -111,6 +122,16 @@ export class ReconciliationLoop {
         try {
           const positions = await this.source.getOpenPositions(trade.symbol);
           const hasPosition = positions.some((p) => Number(p.size) > 0);
+
+          // Check for active limit orders before force-reset
+          const openOrders = await this.source.getOpenOrders(trade.symbol);
+          const hasActiveLimitOrder = openOrders.some(
+            (o) => o.orderType === 'Limit' && (o.status === 'New' || o.status === 'PartiallyFilled')
+          );
+          if (hasActiveLimitOrder) {
+            logger.info(`[${trade.symbol}] Reconciliation: Keeping IN_TRADE state due to active Limit order`);
+            continue; // Skip force-reset, limit order is still active
+          }
 
           if (!hasPosition) {
             // Position closed on exchange but DB still shows OPEN - reconcile with trade data

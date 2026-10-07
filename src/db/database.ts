@@ -219,12 +219,13 @@ async openTrade(input: {
     order_type?: string | null;
     limit_price?: string | null;
     management_state?: any | null;
+    order_id?: string | null;
   }): Promise<string> {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price, management_state)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'OPEN', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        `INSERT INTO trades (id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, status, reason, opened_at, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price, management_state, order_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'OPEN', $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          RETURNING id`,
         [
           input.id,
@@ -246,6 +247,7 @@ async openTrade(input: {
           input.order_type ?? null,
           input.limit_price ?? null,
           input.management_state ? JSON.stringify(input.management_state) : '{}',
+          input.order_id ?? null,
         ],
       );
       return result.rows[0].id;

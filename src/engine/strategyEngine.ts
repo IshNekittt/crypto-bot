@@ -360,6 +360,9 @@ export class StrategyEngine {
       } else {
         logger.warn(`${this.symbol}: approval for unknown/expired trade ${tradeId}`);
       }
+      if (this.plan) {
+        await this.burnSetup(this.plan);
+      }
       this.transition(StrategyState.SCANNING);
       return;
     }
@@ -429,6 +432,7 @@ export class StrategyEngine {
         zone_timestamp: updatedPlan.zoneDetails?.timestamp ?? null,
         order_type: updatedPlan.orderType,
         limit_price: updatedPlan.limitPrice,
+        order_id: result.orderId,
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
       this.transition(StrategyState.IN_TRADE);
@@ -819,6 +823,7 @@ if (finalExitPrice === null) {
       zone_timestamp: this.plan.zoneDetails?.timestamp ?? null,
       order_type: this.plan.orderType,
       limit_price: this.plan.limitPrice,
+      order_id: result.orderId,
     });
     logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
     this.transition(StrategyState.IN_TRADE);
