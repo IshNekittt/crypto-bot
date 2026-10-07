@@ -471,7 +471,7 @@ export class StrategyEngine {
       // Filter all closedPnl records for this symbol that were created after trade opened
       const relevantPnls = closedPnls.filter(p => 
         p.symbol === trade.symbol && 
-        Number(p.closedTime) >= trade.openedAt
+        Number(p.createdTime) >= trade.openedAt
       );
       
       if (relevantPnls.length > 0) {
@@ -481,9 +481,9 @@ export class StrategyEngine {
           new Decimal('0')
         );
         
-        // Use exitPrice from the record with the latest closedTime (last partial close)
+        // Use exitPrice from the record with the latest createdTime (last partial close)
         const lastRecord = relevantPnls.reduce((latest, current) => 
-          Number(current.closedTime) > Number(latest.closedTime) ? current : latest
+          Number(current.createdTime) > Number(latest.createdTime) ? current : latest
         );
         
         matchedPnl = { 
@@ -948,7 +948,7 @@ if (finalExitPrice === null) {
       // Filter all closedPnl records for this symbol that were created after trade opened
       const relevantPnls = closedPnls.filter(p => 
         p.symbol === trade.symbol && 
-        Number(p.closedTime) >= trade.openedAt
+        Number(p.createdTime) >= trade.openedAt
       );
       
       if (relevantPnls.length > 0) {
@@ -958,9 +958,9 @@ if (finalExitPrice === null) {
           new Decimal('0')
         );
         
-        // Use exitPrice from the record with the latest closedTime (last partial close)
+        // Use exitPrice from the record with the latest createdTime (last partial close)
         const lastRecord = relevantPnls.reduce((latest, current) => 
-          Number(current.closedTime) > Number(latest.closedTime) ? current : latest
+          Number(current.createdTime) > Number(latest.createdTime) ? current : latest
         );
         
         matchedPnl = { 

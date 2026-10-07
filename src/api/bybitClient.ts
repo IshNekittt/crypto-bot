@@ -32,6 +32,7 @@ export interface ClosedPnlRecord {
   readonly exitPrice: Decimal;
   readonly closedPnl: Decimal;
   readonly closedTime: number;
+  readonly createdTime: number;
   readonly orderId: string;
 }
 
@@ -514,6 +515,7 @@ export class BybitClient {
           exitPrice: new Decimal(item.avgExitPrice ?? '0'),
           closedPnl: new Decimal(item.closedPnl),
           closedTime: Number(item.updatedTime),
+          createdTime: Number(item.updatedTime),
           orderId: item.orderId,
         }));
     }, 'getClosedPnl');
