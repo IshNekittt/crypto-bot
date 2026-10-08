@@ -406,10 +406,11 @@ export class StrategyEngine {
     logger.info(`${this.symbol}: trade ${tradeId} approved, executing ${approvalResult.orderType} order${approvalResult.limitPrice ? ` @ ${approvalResult.limitPrice}` : ''}`);
     const result = await this.deps.executionEngine.execute(updatedPlan);
     if (!result.ok) {
-      logger.error(`${this.symbol}: order execution failed after approval: ${result.reason}`);
+      logger.error(`[${this.symbol}] Order execution failed: ${result.reason}`);
       await this.burnSetup(this.plan);
       this.transition(StrategyState.SCANNING);
-      return;
+      // Throw error so Telegram handler catches it and shows rejection to user
+      throw new Error(`Exchange Error: ${result.reason}`);
     }
 
     try {
@@ -451,47 +452,47 @@ export class StrategyEngine {
       return;
     }
 
-    // === ACCURATE PNL: Fetch real closed PnL from Bybit (includes fees + funding) ===
     // Wait 2-3 seconds for exchange to finalize data
     await new Promise(resolve => setTimeout(resolve, 2500));
-    
+
     let finalPnlString = pnl;
     let finalExitPrice: string | null = null;
-    
+
     try {
+      // === ACCURATE PNL: Fetch real closed PnL from Bybit (includes fees + funding) ===
       const endTime = Date.now();
       const startTime = trade.openedAt;
       const closedPnls = await this.deps.client.getClosedPnl(trade.symbol, startTime, endTime);
-      
-// Find matching closed PnL records by symbol and createdTime after trade opened
+
+      // Find matching closed PnL records by symbol and createdTime after trade opened
       // Bybit closes position with a new order (different orderId), so match by symbol and createdTime
       // For Adaptive Fractioning (partial closes), we must SUM all PnL records for this trade
       let matchedPnl: { closedPnl: Decimal; exitPrice: Decimal } | null = null;
-      
+
       // Filter all closedPnl records for this symbol that were created after trade opened
-      const relevantPnls = closedPnls.filter(p => 
-        p.symbol === trade.symbol && 
+      const relevantPnls = closedPnls.filter(p =>
+        p.symbol === trade.symbol &&
         Number(p.createdTime) >= trade.openedAt
       );
-      
+
       if (relevantPnls.length > 0) {
         // Sum all closedPnl values using Decimal for precision
         const totalClosedPnl = relevantPnls.reduce(
           (sum, p) => sum.plus(p.closedPnl),
           new Decimal('0')
         );
-        
+
         // Use exitPrice from the record with the latest createdTime (last partial close)
-        const lastRecord = relevantPnls.reduce((latest, current) => 
+        const lastRecord = relevantPnls.reduce((latest, current) =>
           Number(current.createdTime) > Number(latest.createdTime) ? current : latest
         );
-        
-        matchedPnl = { 
-          closedPnl: totalClosedPnl, 
-          exitPrice: lastRecord.exitPrice 
+
+        matchedPnl = {
+          closedPnl: totalClosedPnl,
+          exitPrice: lastRecord.exitPrice
         };
       }
-      
+
       if (matchedPnl) {
         finalPnlString = matchedPnl.closedPnl.toFixed(8);
         finalExitPrice = matchedPnl.exitPrice.toFixed(8);
@@ -499,57 +500,59 @@ export class StrategyEngine {
       } else {
         logger.warn(`${this.symbol}: No matching closedPnl found, using WS PnL`);
       }
-    } catch (pnlError) {
-      logger.warn(`${this.symbol}: Failed to fetch closedPnl, using WS PnL: ${pnlError instanceof Error ? pnlError.message : String(pnlError)}`);
-    }
 
-    // Ensure we never pass null to closeTrade - calculate fallback PnL if needed
-    if (finalPnlString === null) {
-      // Calculate PnL from trade data if exchange data unavailable
-      const entryPrice = new Decimal(trade.entryPrice);
-      const exitPrice = finalExitPrice ? new Decimal(finalExitPrice) : new Decimal(this.getLivePrice() ?? trade.entryPrice);
-      const qty = new Decimal(trade.qty);
-      const isLong = trade.side === 'Buy';
-      
-      if (isLong) {
-        finalPnlString = exitPrice.minus(entryPrice).mul(qty).toFixed(8);
-      } else {
-        finalPnlString = entryPrice.minus(exitPrice).mul(qty).toFixed(8);
+      // Ensure we never pass null to closeTrade - calculate fallback PnL if needed
+      if (finalPnlString === null) {
+        // Calculate PnL from trade data if exchange data unavailable
+        const entryPrice = new Decimal(trade.entryPrice);
+        const exitPrice = finalExitPrice ? new Decimal(finalExitPrice) : new Decimal(this.getLivePrice() ?? trade.entryPrice);
+        const qty = new Decimal(trade.qty);
+        const isLong = trade.side === 'Buy';
+
+        if (isLong) {
+          finalPnlString = exitPrice.minus(entryPrice).mul(qty).toFixed(8);
+        } else {
+          finalPnlString = entryPrice.minus(exitPrice).mul(qty).toFixed(8);
+        }
+        logger.warn(`${this.symbol}: Calculated fallback PnL from trade data: ${finalPnlString}`);
       }
-      logger.warn(`${this.symbol}: Calculated fallback PnL from trade data: ${finalPnlString}`);
-    }
 
-if (finalExitPrice === null) {
+      if (finalExitPrice === null) {
         // Use live price as fallback for exit price
         finalExitPrice = this.getLivePrice() ?? trade.entryPrice;
         logger.warn(`${this.symbol}: Using fallback exit price: ${finalExitPrice}`);
       }
 
-    // Determine close reason from PnL sign
-    const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
-    await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
+      // Determine close reason from PnL sign
+      const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
+      await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
 
-    // Add the zone used for entry to mitigated zones
-    if (trade.zoneDetails) {
-      this.addMitigatedZone(trade.zoneDetails);
-    }
-    if (finalPnlString !== null) {
-      await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0%');
-    } else {
-      logger.warn(`${this.symbol}: position closed by exchange event, PnL unknown`);
-    }
-    logger.info(`${this.symbol}: IN_TRADE → SCANNING (position close event)`);
+      // Add the zone used for entry to mitigated zones
+      if (trade.zoneDetails) {
+        this.addMitigatedZone(trade.zoneDetails);
+      }
+      if (finalPnlString !== null) {
+        await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0%');
+      } else {
+        logger.warn(`${this.symbol}: position closed by exchange event, PnL unknown`);
+      }
+      logger.info(`${this.symbol}: IN_TRADE → SCANNING (position close event)`);
 
-    // Set cooldown after SL hit (cooldownCandles * ltfTimeframe minutes)
-    if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-      const ltfMinutes = Number(this.deps.config.ltfTimeframe);
-      const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
-      this.cooldownUntil = Date.now() + cooldownMs;
-      const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
-      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h (${this.deps.config.cooldownCandles} candles × ${ltfMinutes}m).`);
+      // Set cooldown after SL hit (cooldownCandles * ltfTimeframe minutes)
+      if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
+        const ltfMinutes = Number(this.deps.config.ltfTimeframe);
+        const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+        this.cooldownUntil = Date.now() + cooldownMs;
+        const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+        logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h (${this.deps.config.cooldownCandles} candles × ${ltfMinutes}m).`);
+      }
+    } catch (error) {
+      logger.error(`[${this.symbol}] Failed to process closed position: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      // GUARANTEED STATE RESET
+      this.transition(StrategyState.SCANNING);
+      logger.info(`[${this.symbol}] Position closed processing finished. State reset to SCANNING.`);
     }
-
-    this.transition(StrategyState.SCANNING);
   }
 
   private burnSetup(plan: PositionPlan): void {
@@ -639,7 +642,9 @@ if (finalExitPrice === null) {
     if (state === StrategyState.SCANNING) {
       this.plan = null;
     }
-    void this.deps.db.setSymbolState(this.symbol, state);
+    this.deps.db.setSymbolState(this.symbol, state).catch((err) =>
+      logger.error(`Failed to update symbol state in DB: ${err}`),
+    );
     logger.info(`${this.symbol}: state → ${state}`);
   }
 

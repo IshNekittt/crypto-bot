@@ -30,64 +30,6 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ---
 
-## ⚙️ Adaptive Fractioning (Dynamic Position Management) — v2026-10-02
-
-**Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
-
-**Solution**: **Adaptive Fractioning** — Dynamic position management that adapts to the trade's initial R:R ratio.
-
-### Two Management Modes
-
-| Trade Type | Condition | Management Strategy |
-|------------|-----------|---------------------|
-| **Classic** | TotalR < 4 (e.g., 1:3 R:R) | Single milestone: Move SL to entry at 66% progress |
-| **Sniper** | TotalR ≥ 4 (e.g., 1:5+ R:R) | Two milestones: 33% (close 25%, SL→entry) → 66% (close 25%, trail SL) |
-
-### Progress Calculation
-
-```
-progress = |currentPrice - entry| / |takeProfit - entry|  // 0.0 to 1.0
-```
-
-### Milestone Logic
-
-| Mode | Milestone | Progress | Action |
-|------|-----------|----------|--------|
-| Classic | 1 (only) | ≥ 66% | SL → Entry (breakeven) |
-| Sniper | 1 | ≥ 33% | Close 25% of position, SL → Entry |
-| Sniper | 2 | ≥ 66% | Close another 25%, Trail SL to Entry + 33% of TP distance |
-
-### State Persistence (`management_state` JSONB in `trades` table)
-
-```json
-{
-  "milestone1Triggered": true,
-  "milestone2Triggered": false,
-  "initialTotalR": "5.2",
-  "initialQty": "0.1"
-}
-```
-
-### Live Execution (`StrategyEngine.checkAndManagePosition`)
-
-Called on **every 1m candle** when `state === IN_TRADE`:
-1. **Verify actual position exists on exchange** — calls `client.getOpenPositions()` to confirm position size > 0; if position is 0 (unfilled limit order), returns early without management
-2. Fetch open trade + `management_state` from DB
-3. Call `evaluateTradeManagement()` with current 1m candle price
-4. Execute signal:
-   - `move_sl_to_entry` / `trail_sl_to_profit` → `client.setTradingStop()` (position-level SL update)
-   - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order, qty rounded to `qtyStep`, min `minOrderQty` enforced)
-   - Update `management_state` in DB via `updateTradeManagementState()` **only after successful API response**
-
-### Backtest Simulation (`executionSimulator.ts`)
-
-In `checkAndCloseTrade()`:
-1. Evaluate management signal on each candle
-2. For partial closes: Calculate PnL for closed portion, reduce `qty`, update balance
-3. Update SL and management state in state
-
----
-
 ## 📊 Backtest Results (180 days, 3 symbols, all 11 scenarios)
 
 | Symbol      | Final Balance | Net Profit   | Trades | Win Rate   | Max DD |
@@ -347,6 +289,27 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 
 ---
 
+## 📚 Technical Deep-Dives (see AGENTS.md for full details)
+
+| Topic | Section in AGENTS.md |
+|-------|----------------------|
+| **Adaptive Fractioning** (dynamic position management) | §6 |
+| **Hybrid Smart Entry** (Market vs Limit at approval time) | §7.20 |
+| **Strict SL Calculation** (single source of truth, inverted zone defense) | §7.6 |
+| **V5 Sniper Mode** (1m execution inside 15m macro zones) | §7.4 |
+| **Ghost Signal Elimination** (mitigated structures/zone tracking) | §7.12, §7.13, §7.19 |
+| **News Embargo Filter** (±30 min around high-impact USD news) | §7.8 |
+| **Funding Monitor** (delta-neutral arbitrage alerts) | §7.9 |
+| **Dynamic Macro Context** (lookahead bias elimination in backtest) | §7.10 |
+| **Timezone Sanity Check** (Docker + luxon + tzdata) | §7.11 |
+| **Same-Candle SL/TP Resolution** (conservative lookahead fix) | §7.15 |
+| **Cooldown Logic** (only after LOSS, dynamic timeframe) | §7.17 |
+| **Scenario 11** (Mitigation Block implementation) | §7.24 |
+| **Database CRUD Audit** | §9.1 |
+| **Critical Anti-Patterns** (blood-signed lessons) | §14 |
+
+---
+
 ## 🎯 Strict Stop-Loss Calculation (v2026-09-20 — Safety Hardened)
 
 **Problem**: Zone objects (OB, FVG, Breaker, Mitigation) can have arbitrary `top`/`bottom` ordering — not guaranteed `top > bottom`. Naive SL formulas fail when zone is inverted.
@@ -397,8 +360,6 @@ public calculateLevels(
 - Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
 - 16 dedicated tests verify geometry: 4 scenarios × 2 directions × 2 zone orientations
 
-or `None for today` / error state.
-
 ---
 
 ## 📰 News Filter (News Embargo) — v2026-09-12
@@ -417,13 +378,9 @@ or `None for today` / error state.
 | **Check**          | In `StrategyEngine.process()` (15m candle close): `if (newsService.isNewsEmbargo(candleTimestamp)) → skip scan` |
 | **Resilience**     | Network/HTTP/parse errors → empty cache + `logger.warn`, never throws (fail-open)                               |
 
-**Telegram /status**:
+**Telegram /status**: `📰 Next USD High-Impact News: NFP at 2026-09-15 14:00:00 UTC` or `None for today`
 
-```
-📰 Next USD High-Impact News: NFP at 2026-09-15 14:00:00 UTC
-```
-
-or `None for today` / error state.
+*Full implementation details: [AGENTS.md §7.8](AGENTS.md#78-news-filter-news-embargo--srcservicesnewsservicets)*
 
 ---
 
@@ -445,12 +402,9 @@ or `None for today` / error state.
 | **Telegram Alert (Restore)**  | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate}% (APY: ~{apy}%)\nМожно снова открывать арбитраж!` |
 | **Public API**                | `getCurrentRates(): Map<string, Decimal>` for `/status` command                                             |
 
-**Integration**:
+**Integration**: Conditionally created if `ENABLE_FUNDING_MONITOR=true`, started via `fundingMonitor.start()`, graceful shutdown via `fundingMonitor.stop()`. `/status` shows funding rates.
 
-- Conditionally created if `ENABLE_FUNDING_MONITOR=true` and symbols configured
-- Started via `fundingMonitor.start()` in bootstrap
-- Graceful shutdown via `fundingMonitor.stop()`
-- `/status` shows: `📊 Funding: BTC: +0.0100% | ETH: +0.0150% | SOL: +0.0200%` or `Disabled`
+*Full implementation details: [AGENTS.md §7.9](AGENTS.md#79-funding-monitor-delta-neutral-arbitrage--srcservicesfundingmonitorservicets)*
 
 ---
 
@@ -470,13 +424,9 @@ or `None for today` / error state.
 | **Atomic Update**   | `recognizer.setMacroContext(symbol, {...})` — no lookahead!                                    |
 | **Sliding Windows** | 96 candles (15m) = 24h for daily; 96×7 = 1 week for weekly                                     |
 
-**Key Changes**:
+**Key Changes**: Removed all `initializeMacroContext()` calls before backtest loop; Added `PatternRecognizer.setMacroContext()` / `getMacroContext()` for atomic cache updates; Strict causality using only data before current candle; Per-symbol scenarios now respected in backtester; Full rejection stats logged.
 
-- ❌ **Removed**: All `initializeMacroContext()` calls before backtest loop (both CSV and online modes)
-- ✅ **Added**: `PatternRecognizer.setMacroContext()` / `getMacroContext()` for atomic cache updates
-- ✅ **Strict causality**: Only uses data strictly before current candle (`slice(0, i)`)
-- ✅ **Per-symbol scenarios**: `config.symbolScenarios.get(symbol)` now respected in backtester
-- ✅ **Full rejection stats**: All 8 scenarios (2,4,5,7,8,9,10,11) logged in both modes
+*Full implementation details: [AGENTS.md §7.10](AGENTS.md#710-dynamic-macro-context-in-backtester--lookahead-bias-elimination--srcbacktestrunts--new-v2026-09-20)*
 
 ---
 
@@ -513,6 +463,8 @@ logger.info(
 
 **Critical**: Alpine base images lack `tzdata` by default. Always install `tzdata` when using luxon with named IANA zones in Docker.
 
+*Full implementation details: [AGENTS.md §7.11](AGENTS.md#711-timezone-sanity-check-docker--luxon--new-v2026-09-22)*
+
 ---
 
 ## 🎯 Scenario 11 — Mitigation Block — Full Implementation Details — v2026-09-21
@@ -520,32 +472,10 @@ logger.info(
 **File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
 
 **Core Logic**: Mitigation Block is a reversal pattern that forms after a Failed Swing (SMS):
-
 1. Price attempts a higher high (bearish SMS) / lower low (bullish SMS) but fails
 2. Price reverses with a CHoCH in opposite direction (≥1.5 ATR displacement)
 3. The Order Block that formed the failed swing extreme becomes the Mitigation Block
 4. Trade triggers on retest of this MB by current 15m candle
-
-**Critical Implementation Details (v2026-09-21 — Critical Bug Fixes):**
-
-| Aspect               | Implementation                                                                                                  | Why Critical                                             |
-| -------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| **SMS Selection**    | `structures.filter(s => s.type === 'SMS')` → `smsList[smsList.length-1]`                                        | `.find()` returns OLDEST; must take NEWEST SMS           |
-| **CHoCH Selection**  | `structures.filter(s => ...)` → `validChochs[validChochs.length-1]`                                             | Must take NEWEST CHoCH after the chosen SMS              |
-| **MB Selection**     | `zones.filter(...)` → `mbObs[mbObs.length-1]`                                                                   | Must take NEWEST OB before SMS (formed the failed swing) |
-| **Retest Logic**     | **Current 15m candle ONLY** (`candles15m[candles15m.length-1]`)                                                 | No historical search — trade triggers NOW                |
-| **Time Window**      | `0 < timeSinceChoch ≤ 12h`                                                                                      | Blocks stale setups; 12h max hold                        |
-| **Retest Condition** | Current candle wicks touch MB zone (`high ≥ mbBottom && low ≤ mbTop`) AND closes inside zone in trade direction | Confirms institutional interest at MB                    |
-| **Premium/Discount** | Dynamic equilibrium from `SMS price → CHoCH price` impulse                                                      | Long = Discount (below eq), Short = Premium (above eq)   |
-| **Rejection Stats**  | `NoSms`, `InvalidSmsPattern`, `NoChoch`, `Displacement`, `NoMB`, `NoRetest`, `PremDisc`                         | Full observability                                       |
-
-**Key Invariants:**
-
-- `structures` and `zones` arrays are timestamp-ascending (oldest first)
-- **Always use `[array.length-1]` for "newest"** — never `[0]` or `.find()`
-- Retest is **current candle only** — no historical search
-- P/D equilibrium calculated from `SMS price → CHoCH price` impulse
-- Maximum 12h from CHoCH to retest (prevents stale setups)
 
 ---
 
@@ -555,17 +485,28 @@ logger.info(
 
 **Solution**: **mitigatedStructures** tracking — structures (SMS, CHoCH, BOS) that have been traded and should never be re-used.
 
-| Component              | Implementation                                                         |
-| ---------------------- | ---------------------------------------------------------------------- | ------- | ------------------------------------------------------------- | ------------ |
+| Component | Implementation |
+|-----------|----------------|
+| **BacktestState** | Added `mitigatedStructures: MitigatedStructure[]` |
+| **MitigatedStructure** | `{ type: 'SMS' \| 'CHoCH' \| 'BOS', timestamp: number, price: string, direction: 'BULLISH' \| 'BEARISH' }` |
+| **On trade close** | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures` |
+| **ScenarioRouter** | Filters `patternData.structures` via `filterMitigatedStructures()` |
+| **Scenarios 6 & 11** | Call `setStructureDetails()` with trigger CHoCH |
+
+**Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
+
+*Note v2026-10-05*: In Scenario 12 (Sniper Touch), the `isMitigated` check now uses only `timestamp` (not `direction`) because when structures are burned via `PendingTradeManager`, the `direction` field may be undefined. Timestamp alone is sufficient since candle timestamps are unique.
+
+*Full implementation details: [AGENTS.md §7.12, §7.13](AGENTS.md#712-mitigated-structures-ghost-signal-elimination--new-v2026-09-24)*
+
+---
+
+## ⚡ Same-Candle SL/TP Resolution (Lookahead Bias Fix) — v2026-09-24
 | **BacktestState**      | Added `mitigatedStructures: MitigatedStructure[]`                      |
 | **MitigatedStructure** | `{ type: 'SMS'                                                         | 'CHoCH' | 'BOS', timestamp: number, price: string, direction: 'BULLISH' | 'BEARISH' }` |
 | **On trade close**     | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures` |
 | **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()`     |
 | **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                        |
-
-**Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
-
-> **Note v2026-10-05**: In Scenario 12 (Sniper Touch), the `isMitigated` check now uses only `timestamp` (not `direction`) because when structures are burned via `PendingTradeManager`, the `direction` field may be undefined. Timestamp alone is sufficient since candle timestamps are unique.
 
 ---
 
@@ -574,25 +515,17 @@ logger.info(
 **Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
 
 **Fix** (`checkAndCloseTrade` in `executionSimulator.ts`):
-
 ```typescript
-// CRITICAL: Check SL FIRST - if both hit same candle, it's a LOSS (wick hit SL first)
 const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
 const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
-
-// SL checked FIRST
-if (hitSL) {
-  exitPrice = trade.slPrice;
-  closedBy = "SL";
-} else if (hitTP) {
-  exitPrice = trade.tpPrice;
-  closedBy = "TP";
-}
-// If both hit same candle → LOSS (BOTH)
+if (hitSL) { exitPrice = trade.slPrice; closedBy = "SL"; }
+else if (hitTP) { exitPrice = trade.tpPrice; closedBy = "TP"; }
 if (hitSL && hitTP) closedBy = "BOTH";
 ```
 
 **Rule**: On same-candle SL+TP hit → ALWAYS treat as LOSS (conservative). This eliminates the "20 wins in a row every 15 min" artifact.
+
+*Full implementation details: [AGENTS.md §7.15](AGENTS.md#715-same-candle-sltp-resolution-lookahead-bias-fix--new-v2026-09-24)*
 
 ---
 
@@ -601,9 +534,7 @@ if (hitSL && hitTP) closedBy = "BOTH";
 **Problem**: `mitigatedZones` was only updated on trade CLOSE. Bot would enter, close, then re-enter same zone because the zone wasn't "burned" until after close.
 
 **Fix** (`openTrade` in `executionSimulator.ts`):
-
 ```typescript
-// Add zone to mitigatedZones to prevent re-entry on same zone
 mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
   type: zoneDetails.type as 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION',
   top: zoneDetails.top.toString(),
@@ -615,6 +546,8 @@ mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
 ```
 
 **Result**: Zone is "burned" immediately on entry — no re-entry possible on same zone.
+
+*Full implementation details: [AGENTS.md §7.16](AGENTS.md#716-mitigated-zones-fix-zone-re-entry-bug--new-v2026-09-24)*
 
 ---
 
@@ -641,11 +574,9 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 ```
 
 **Rule**: Cooldown = `COOLDOWN_CANDLES` candles (default 16) ONLY after LOSS. WIN = no cooldown, ride the trend.
-**Examples**:
+**Examples**: `LTF=15` → 4h; `LTF=5` → 1h 20m; `LTF=60` → 16h
 
-- `LTF_TIMEFRAME=15`, `COOLDOWN_CANDLES=16` → 4 hours (default)
-- `LTF_TIMEFRAME=5`, `COOLDOWN_CANDLES=16` → 1h 20min
-- `LTF_TIMEFRAME=60`, `COOLDOWN_CANDLES=16` → 16 hours
+*Full implementation details: [AGENTS.md §7.17](AGENTS.md#717-cooldown-logic-fix--new-v2026-09-24-updated-v2026-09-27-dynamic-timeframe-support)*
 
 ---
 
@@ -653,10 +584,9 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 
 Added two new sections to backtest report (`reporter.ts`):
 
-### 🗓️ TRADE TIMELINE (Last ${daysToShow} Days) [Timezone: UTC]
+### 🗓️ TRADE TIMELINE (Last 30 Days) [Timezone: UTC]
 
-Daily calendar with UTC timestamps (shows up to 30 days based on backtest period):
-
+Daily calendar with UTC timestamps:
 ```
 [2026-09-04] ✅ 10 trades | Daily PnL: +$4138.13
   ↳ 07:45:00 UTC - Scenario 6 (WIN: +$60.00)
@@ -666,7 +596,6 @@ Daily calendar with UTC timestamps (shows up to 30 days based on backtest period
 ### 🔍 DETAILED RECENT TRADES (Last 5 trades)
 
 Full details with exact UTC timestamps:
-
 ```
 ↳ ETHUSDT | Scenario 6 (SMS) | WIN
    Entry: 2026-05-23 06:30:00 UTC | Exit: 2026-05-23 06:45:00 UTC
@@ -679,6 +608,8 @@ Full details with exact UTC timestamps:
 Max consecutive days without trades, periods >3/5/7 days.
 
 All timestamps in **UTC** for cross-referencing with live logs.
+
+*Full implementation details: [AGENTS.md §7.18](AGENTS.md#718-backtest-report-enhancements--new-v2026-09-24)*
 
 ---
 
@@ -1099,20 +1030,6 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 🟢 ETH: +0.0150%
 🟢 SOL: +0.0200%
 ```
-
-### `/backup` — How It Works
-
-1. Bot queries `SELECT * FROM trades` (all **22 columns** including new fields)
-2. Converts to CSV with headers (now includes `order_type`, `limit_price`, `management_state`)
-3. Gzips the CSV in memory
-4. Encrypts with AES-256-CBC (if `BACKUP_PASSWORD` set)
-5. Sends via **native `fetch` + `Blob` + `FormData`** to `api.telegram.org/bot<token>/sendDocument`
-6. **No `fs.writeFileSync`, no local files, no Telegraf `sendDocument` buffer bug**
-
-**CSV Columns**: All 22 trade columns including new fields:
-- `order_type` — `Market` or `Limit`
-- `limit_price` — Limit price for Limit orders (null for Market)
-- `management_state` — JSON string of adaptive fractioning state (`{"milestone1Triggered":true,"milestone2Triggered":false,"initialTotalR":"5.2","initialQty":"0.1"}`)
 
 ### `/test_live_order` — End-to-End Verification
 
