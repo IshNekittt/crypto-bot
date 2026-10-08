@@ -18,15 +18,15 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ## 🎯 Features at a Glance
 
-| Category                 | Capability                                                                                                                                                  |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **12 SMC Scenarios**     | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block, **Sniper Touch (1m)** |
-| **🎯 V5 Sniper Mode**    | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                      |
-| **📊 Dynamic Approval**  | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)       |
-| **🛡 Pre-flight SL Check** | **Validates SL at approval**: If price crossed SL during wait, setup is auto-cancelled — prevents "SL below base_price" Bybit rejection                    |
-| **👻 Ghost Signal Guard** | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                     |
-| **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R          |
-| **🧮 Strict Math Side** | **Side determined by geometry**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — eliminates text-based direction errors and invalid SL levels      |
+| Category                    | Capability                                                                                                                                                             |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **12 SMC Scenarios**        | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block, **Sniper Touch (1m)** |
+| **🎯 V5 Sniper Mode**       | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                                 |
+| **📊 Dynamic Approval**     | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)                  |
+| **🛡 Pre-flight SL Check**  | **Validates SL at approval**: If price crossed SL during wait, setup is auto-cancelled — prevents "SL below base_price" Bybit rejection                                |
+| **👻 Ghost Signal Guard**   | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                                   |
+| **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R                             |
+| **🧮 Strict Math Side**     | **Side determined by geometry**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — eliminates text-based direction errors and invalid SL levels                            |
 
 ---
 
@@ -65,10 +65,10 @@ const orderType = useMarketOrder ? "Market" : "Limit";
 const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 ```
 
-| Condition | Order Type | Price |
-| --------- | ---------- | ----- |
-| `\|idealEntry - currentPrice\| / idealEntry ≤ 0.15%` | **Market** (IOC) | — |
-| `\|idealEntry - currentPrice\| / idealEntry > 0.15%` | **Limit** (GTC) | `idealEntry` |
+| Condition                                            | Order Type       | Price        |
+| ---------------------------------------------------- | ---------------- | ------------ |
+| `\|idealEntry - currentPrice\| / idealEntry ≤ 0.15%` | **Market** (IOC) | —            |
+| `\|idealEntry - currentPrice\| / idealEntry > 0.15%` | **Limit** (GTC)  | `idealEntry` |
 
 **Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
 
@@ -94,16 +94,20 @@ const currentPrice = this.feedLtf.getCurrentLivePrice();
 if (currentPrice) {
   const currentPriceDecimal = new Decimal(currentPrice);
   const slDecimal = new Decimal(this.plan.stopLoss);
-  const isLong = this.plan.side === 'Buy';
+  const isLong = this.plan.side === "Buy";
 
   if (isLong && currentPriceDecimal.lte(slDecimal)) {
-    logger.warn(`Setup DEAD: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
+    logger.warn(
+      `Setup DEAD: Current price (${currentPrice}) is already below SL (${this.plan.stopLoss})`,
+    );
     this.burnSetup(this.plan); // Burn zone + structure to prevent spam
     this.transition(StrategyState.SCANNING);
     return;
   }
   if (!isLong && currentPriceDecimal.gte(slDecimal)) {
-    logger.warn(`Setup DEAD: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
+    logger.warn(
+      `Setup DEAD: Current price (${currentPrice}) is already above SL (${this.plan.stopLoss})`,
+    );
     this.burnSetup(this.plan); // Burn zone + structure to prevent spam
     this.transition(StrategyState.SCANNING);
     return;
@@ -135,6 +139,7 @@ async handleTradeApproval(tradeId: string, approved: boolean): Promise<void> {
 ### Concurrency Lock in `process()` — v2026-10-05
 
 **Problem**: When 1m and 15m candles close simultaneously, `process()` can be called concurrently. This creates a race condition where:
+
 - The state machine can be corrupted (e.g., `ENTRY_STAGED` reset to `SCANNING`)
 - Multiple evaluations can run simultaneously, leading to duplicate signal evaluation
 - The state machine can transition to invalid states
@@ -165,7 +170,8 @@ private async process(timeframe: Timeframe): Promise<void> {
 }
 ```
 
-**Behavior**: 
+**Behavior**:
+
 - First call to `process()` acquires the lock (`isProcessing = true`)
 - Subsequent concurrent calls immediately return
 - Lock is released in `finally` block, guaranteeing release even on error
@@ -185,6 +191,7 @@ getLivePrice(): string | null {
 ```
 
 Updated `src/index.ts` to wire this provider:
+
 ```typescript
 pendingTradeManager.setPriceProvider((symbol: string) => {
   const engine = engines.find((e) => e.symbol === symbol);
@@ -233,7 +240,7 @@ pendingTradeManager.setPriceProvider((symbol: string) => {
 ```typescript
 const idealEntry = new Decimal(result.levels.entry);
 const slDecimal = new Decimal(result.levels.stopLoss);
-const side = idealEntry.gt(slDecimal) ? 'Buy' : 'Sell';
+const side = idealEntry.gt(slDecimal) ? "Buy" : "Sell";
 ```
 
 **Rule**: Never hardcode `side`. Never derive side from text labels. Always compute from Entry vs SL geometry at the point of RiskManager call.
@@ -291,22 +298,22 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 
 ## 📚 Technical Deep-Dives (see AGENTS.md for full details)
 
-| Topic | Section in AGENTS.md |
-|-------|----------------------|
-| **Adaptive Fractioning** (dynamic position management) | §6 |
-| **Hybrid Smart Entry** (Market vs Limit at approval time) | §7.20 |
-| **Strict SL Calculation** (single source of truth, inverted zone defense) | §7.6 |
-| **V5 Sniper Mode** (1m execution inside 15m macro zones) | §7.4 |
-| **Ghost Signal Elimination** (mitigated structures/zone tracking) | §7.12, §7.13, §7.19 |
-| **News Embargo Filter** (±30 min around high-impact USD news) | §7.8 |
-| **Funding Monitor** (delta-neutral arbitrage alerts) | §7.9 |
-| **Dynamic Macro Context** (lookahead bias elimination in backtest) | §7.10 |
-| **Timezone Sanity Check** (Docker + luxon + tzdata) | §7.11 |
-| **Same-Candle SL/TP Resolution** (conservative lookahead fix) | §7.15 |
-| **Cooldown Logic** (only after LOSS, dynamic timeframe) | §7.17 |
-| **Scenario 11** (Mitigation Block implementation) | §7.24 |
-| **Database CRUD Audit** | §9.1 |
-| **Critical Anti-Patterns** (blood-signed lessons) | §14 |
+| Topic                                                                     | Section in AGENTS.md |
+| ------------------------------------------------------------------------- | -------------------- |
+| **Adaptive Fractioning** (dynamic position management)                    | §6                   |
+| **Hybrid Smart Entry** (Market vs Limit at approval time)                 | §7.20                |
+| **Strict SL Calculation** (single source of truth, inverted zone defense) | §7.6                 |
+| **V5 Sniper Mode** (1m execution inside 15m macro zones)                  | §7.4                 |
+| **Ghost Signal Elimination** (mitigated structures/zone tracking)         | §7.12, §7.13, §7.19  |
+| **News Embargo Filter** (±30 min around high-impact USD news)             | §7.8                 |
+| **Funding Monitor** (delta-neutral arbitrage alerts)                      | §7.9                 |
+| **Dynamic Macro Context** (lookahead bias elimination in backtest)        | §7.10                |
+| **Timezone Sanity Check** (Docker + luxon + tzdata)                       | §7.11                |
+| **Same-Candle SL/TP Resolution** (conservative lookahead fix)             | §7.15                |
+| **Cooldown Logic** (only after LOSS, dynamic timeframe)                   | §7.17                |
+| **Scenario 11** (Mitigation Block implementation)                         | §7.24                |
+| **Database CRUD Audit**                                                   | §9.1                 |
+| **Critical Anti-Patterns** (blood-signed lessons)                         | §14                  |
 
 ---
 
@@ -380,7 +387,7 @@ public calculateLevels(
 
 **Telegram /status**: `📰 Next USD High-Impact News: NFP at 2026-09-15 14:00:00 UTC` or `None for today`
 
-*Full implementation details: [AGENTS.md §7.8](AGENTS.md#78-news-filter-news-embargo--srcservicesnewsservicets)*
+_Full implementation details: [AGENTS.md §7.8](AGENTS.md#78-news-filter-news-embargo--srcservicesnewsservicets)_
 
 ---
 
@@ -404,7 +411,7 @@ public calculateLevels(
 
 **Integration**: Conditionally created if `ENABLE_FUNDING_MONITOR=true`, started via `fundingMonitor.start()`, graceful shutdown via `fundingMonitor.stop()`. `/status` shows funding rates.
 
-*Full implementation details: [AGENTS.md §7.9](AGENTS.md#79-funding-monitor-delta-neutral-arbitrage--srcservicesfundingmonitorservicets)*
+_Full implementation details: [AGENTS.md §7.9](AGENTS.md#79-funding-monitor-delta-neutral-arbitrage--srcservicesfundingmonitorservicets)_
 
 ---
 
@@ -426,7 +433,7 @@ public calculateLevels(
 
 **Key Changes**: Removed all `initializeMacroContext()` calls before backtest loop; Added `PatternRecognizer.setMacroContext()` / `getMacroContext()` for atomic cache updates; Strict causality using only data before current candle; Per-symbol scenarios now respected in backtester; Full rejection stats logged.
 
-*Full implementation details: [AGENTS.md §7.10](AGENTS.md#710-dynamic-macro-context-in-backtester--lookahead-bias-elimination--srcbacktestrunts--new-v2026-09-20)*
+_Full implementation details: [AGENTS.md §7.10](AGENTS.md#710-dynamic-macro-context-in-backtester--lookahead-bias-elimination--srcbacktestrunts--new-v2026-09-20)_
 
 ---
 
@@ -463,7 +470,7 @@ logger.info(
 
 **Critical**: Alpine base images lack `tzdata` by default. Always install `tzdata` when using luxon with named IANA zones in Docker.
 
-*Full implementation details: [AGENTS.md §7.11](AGENTS.md#711-timezone-sanity-check-docker--luxon--new-v2026-09-22)*
+_Full implementation details: [AGENTS.md §7.11](AGENTS.md#711-timezone-sanity-check-docker--luxon--new-v2026-09-22)_
 
 ---
 
@@ -472,6 +479,7 @@ logger.info(
 **File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
 
 **Core Logic**: Mitigation Block is a reversal pattern that forms after a Failed Swing (SMS):
+
 1. Price attempts a higher high (bearish SMS) / lower low (bullish SMS) but fails
 2. Price reverses with a CHoCH in opposite direction (≥1.5 ATR displacement)
 3. The Order Block that formed the failed swing extreme becomes the Mitigation Block
@@ -485,28 +493,19 @@ logger.info(
 
 **Solution**: **mitigatedStructures** tracking — structures (SMS, CHoCH, BOS) that have been traded and should never be re-used.
 
-| Component | Implementation |
-|-----------|----------------|
-| **BacktestState** | Added `mitigatedStructures: MitigatedStructure[]` |
+| Component              | Implementation                                                                                             |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **BacktestState**      | Added `mitigatedStructures: MitigatedStructure[]`                                                          |
 | **MitigatedStructure** | `{ type: 'SMS' \| 'CHoCH' \| 'BOS', timestamp: number, price: string, direction: 'BULLISH' \| 'BEARISH' }` |
-| **On trade close** | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures` |
-| **ScenarioRouter** | Filters `patternData.structures` via `filterMitigatedStructures()` |
-| **Scenarios 6 & 11** | Call `setStructureDetails()` with trigger CHoCH |
+| **On trade close**     | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures`                                     |
+| **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()`                                         |
+| **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                                                            |
 
 **Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
 
-*Note v2026-10-05*: In Scenario 12 (Sniper Touch), the `isMitigated` check now uses only `timestamp` (not `direction`) because when structures are burned via `PendingTradeManager`, the `direction` field may be undefined. Timestamp alone is sufficient since candle timestamps are unique.
+_Note v2026-10-05_: In Scenario 12 (Sniper Touch), the `isMitigated` check now uses only `timestamp` (not `direction`) because when structures are burned via `PendingTradeManager`, the `direction` field may be undefined. Timestamp alone is sufficient since candle timestamps are unique.
 
-*Full implementation details: [AGENTS.md §7.12, §7.13](AGENTS.md#712-mitigated-structures-ghost-signal-elimination--new-v2026-09-24)*
-
----
-
-## ⚡ Same-Candle SL/TP Resolution (Lookahead Bias Fix) — v2026-09-24
-| **BacktestState**      | Added `mitigatedStructures: MitigatedStructure[]`                      |
-| **MitigatedStructure** | `{ type: 'SMS'                                                         | 'CHoCH' | 'BOS', timestamp: number, price: string, direction: 'BULLISH' | 'BEARISH' }` |
-| **On trade close**     | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures` |
-| **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()`     |
-| **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                        |
+_Full implementation details: [AGENTS.md §7.12, §7.13](AGENTS.md#712-mitigated-structures-ghost-signal-elimination--new-v2026-09-24)_
 
 ---
 
@@ -515,17 +514,23 @@ logger.info(
 **Problem**: In `checkAndCloseTrade()`, if a 15m candle's wick pierced BOTH SL and TP, the old code checked TP first → counted as WIN. This is lookahead bias — in reality, the SL was hit first (wick down), then price reversed to TP.
 
 **Fix** (`checkAndCloseTrade` in `executionSimulator.ts`):
+
 ```typescript
 const hitSL = isLong ? low.lte(trade.slPrice) : high.gte(trade.slPrice);
 const hitTP = isLong ? high.gte(trade.tpPrice) : low.lte(trade.tpPrice);
-if (hitSL) { exitPrice = trade.slPrice; closedBy = "SL"; }
-else if (hitTP) { exitPrice = trade.tpPrice; closedBy = "TP"; }
+if (hitSL) {
+  exitPrice = trade.slPrice;
+  closedBy = "SL";
+} else if (hitTP) {
+  exitPrice = trade.tpPrice;
+  closedBy = "TP";
+}
 if (hitSL && hitTP) closedBy = "BOTH";
 ```
 
 **Rule**: On same-candle SL+TP hit → ALWAYS treat as LOSS (conservative). This eliminates the "20 wins in a row every 15 min" artifact.
 
-*Full implementation details: [AGENTS.md §7.15](AGENTS.md#715-same-candle-sltp-resolution-lookahead-bias-fix--new-v2026-09-24)*
+_Full implementation details: [AGENTS.md §7.15](AGENTS.md#715-same-candle-sltp-resolution-lookahead-bias-fix--new-v2026-09-24)_
 
 ---
 
@@ -534,6 +539,7 @@ if (hitSL && hitTP) closedBy = "BOTH";
 **Problem**: `mitigatedZones` was only updated on trade CLOSE. Bot would enter, close, then re-enter same zone because the zone wasn't "burned" until after close.
 
 **Fix** (`openTrade` in `executionSimulator.ts`):
+
 ```typescript
 mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
   type: zoneDetails.type as 'OB' | 'FVG' | 'BREAKER' | 'MITIGATION',
@@ -547,7 +553,7 @@ mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
 
 **Result**: Zone is "burned" immediately on entry — no re-entry possible on same zone.
 
-*Full implementation details: [AGENTS.md §7.16](AGENTS.md#716-mitigated-zones-fix-zone-re-entry-bug--new-v2026-09-24)*
+_Full implementation details: [AGENTS.md §7.16](AGENTS.md#716-mitigated-zones-fix-zone-re-entry-bug--new-v2026-09-24)_
 
 ---
 
@@ -576,7 +582,7 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
 **Rule**: Cooldown = `COOLDOWN_CANDLES` candles (default 16) ONLY after LOSS. WIN = no cooldown, ride the trend.
 **Examples**: `LTF=15` → 4h; `LTF=5` → 1h 20m; `LTF=60` → 16h
 
-*Full implementation details: [AGENTS.md §7.17](AGENTS.md#717-cooldown-logic-fix--new-v2026-09-24-updated-v2026-09-27-dynamic-timeframe-support)*
+_Full implementation details: [AGENTS.md §7.17](AGENTS.md#717-cooldown-logic-fix--new-v2026-09-24-updated-v2026-09-27-dynamic-timeframe-support)_
 
 ---
 
@@ -587,6 +593,7 @@ Added two new sections to backtest report (`reporter.ts`):
 ### 🗓️ TRADE TIMELINE (Last 30 Days) [Timezone: UTC]
 
 Daily calendar with UTC timestamps:
+
 ```
 [2026-09-04] ✅ 10 trades | Daily PnL: +$4138.13
   ↳ 07:45:00 UTC - Scenario 6 (WIN: +$60.00)
@@ -596,6 +603,7 @@ Daily calendar with UTC timestamps:
 ### 🔍 DETAILED RECENT TRADES (Last 5 trades)
 
 Full details with exact UTC timestamps:
+
 ```
 ↳ ETHUSDT | Scenario 6 (SMS) | WIN
    Entry: 2026-05-23 06:30:00 UTC | Exit: 2026-05-23 06:45:00 UTC
@@ -609,7 +617,7 @@ Max consecutive days without trades, periods >3/5/7 days.
 
 All timestamps in **UTC** for cross-referencing with live logs.
 
-*Full implementation details: [AGENTS.md §7.18](AGENTS.md#718-backtest-report-enhancements--new-v2026-09-24)*
+_Full implementation details: [AGENTS.md §7.18](AGENTS.md#718-backtest-report-enhancements--new-v2026-09-24)_
 
 ---
 
@@ -695,46 +703,46 @@ docker compose up -d
 
 ## ⚙️ Environment Variables
 
-| Variable                           | Required |          Default          | Description                                                                                                           |
-| ---------------------------------- | :------: | :-----------------------: | --------------------------------------------------------------------------------------------------------------------- |
-| **BYBIT_API_KEY**                  |    ✅    |             —             | Bybit API Key                                                                                                         |
-| **BYBIT_API_SECRET**               |    ✅    |             —             | Bybit API Secret                                                                                                      |
-| **SYMBOLS**                        |    ✅    |             —             | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`                                                                            |
-| **DATABASE_URL**                   |    ✅    |             —             | Supabase Direct Connection string                                                                                     |
-| **TELEGRAM_BOT_TOKEN**             |    ✅    |             —             | BotFather token                                                                                                       |
-| **TELEGRAM_CHAT_ID**               |    ✅    |             —             | Your numeric chat ID (security)                                                                                       |
-| **DEMO_TRADING**                   |          |          `true`           | `true` = Demo, `false` = Mainnet                                                                                      |
-| **TESTNET**                        |          |          `false`          | Ignored if `DEMO_TRADING=true`                                                                                        |
-| **RISK_PERCENT**                   |          |            `2`            | Base risk per trade (%)                                                                                               |
-| **REDUCED_RISK_PERCENT**           |          |            `1`            | Risk after 3 consecutive losses (%)                                                                                   |
-| **LEVERAGE**                       |          |           `10`            | Isolated margin leverage                                                                                              |
-| **AUTO_TRADING**                   |          |          `false`          | `true` = auto-execute, `false` = manual approval                                                                      |
-| **TRADE_APPROVAL_TIMEOUT_MINUTES** |          |            `5`            | Approval window for manual trades                                                                                     |
-| **HISTORY_CANDLES**                |          |           `200`           | 15m/4H history (max 1000)                                                                                             |
-| **MACRO_CANDLES**                  |          |          `1000`           | 1W/1D macro context (max 1000)                                                                                        |
-| **LTF_TIMEFRAME**                  |          |           `15`            | Lower timeframe (15m)                                                                                                 |
-| **HTF_TIMEFRAME**                  |          |           `240`           | Higher timeframe (4H)                                                                                                 |
-| **ENABLE_LIVE_TEST_ORDERS**        |          |          `false`          | Enable `/test_live_order` (real Demo orders)                                                                          |
-| **ACTIVE_SCENARIOS**               |          |          `1-11`           | Comma-separated: `1,2,3,5,7`                                                                                          |
-| **LOG_LEVEL**                      |          |          `info`           | `debug`, `info`, `warn`, `error`                                                                                      |
-| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups                                                                           |
-| **ENABLE_FUNDING_MONITOR**         |          |          `false`          | Enable funding rate monitoring                                                                                        |
-| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates                                                                                  |
-| **FUNDING_ALERT_THRESHOLD**        |          |           `0.0`           | Alert when funding rate ≤ this value                                                                                  |
-| **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value                                                                          |
-| **SCENARIOS\_<SYMBOL>**            |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol.          |
-| **COOLDOWN_CANDLES**               |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m. |
-| **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5)                                                                            |
-| **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                           |
-| **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                 |
-| **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                        |
-| **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                 |
-| **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                |
-| **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                 |
-| **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                           |
-| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                        |
-| **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance. |
-| **USE_LOCAL_CACHE_ONLY**           |          |         `false`           | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys. |
+| Variable                           | Required |          Default          | Description                                                                                                                            |
+| ---------------------------------- | :------: | :-----------------------: | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **BYBIT_API_KEY**                  |    ✅    |             —             | Bybit API Key                                                                                                                          |
+| **BYBIT_API_SECRET**               |    ✅    |             —             | Bybit API Secret                                                                                                                       |
+| **SYMBOLS**                        |    ✅    |             —             | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`                                                                                             |
+| **DATABASE_URL**                   |    ✅    |             —             | Supabase Direct Connection string                                                                                                      |
+| **TELEGRAM_BOT_TOKEN**             |    ✅    |             —             | BotFather token                                                                                                                        |
+| **TELEGRAM_CHAT_ID**               |    ✅    |             —             | Your numeric chat ID (security)                                                                                                        |
+| **DEMO_TRADING**                   |          |          `true`           | `true` = Demo, `false` = Mainnet                                                                                                       |
+| **TESTNET**                        |          |          `false`          | Ignored if `DEMO_TRADING=true`                                                                                                         |
+| **RISK_PERCENT**                   |          |            `2`            | Base risk per trade (%)                                                                                                                |
+| **REDUCED_RISK_PERCENT**           |          |            `1`            | Risk after 3 consecutive losses (%)                                                                                                    |
+| **LEVERAGE**                       |          |           `10`            | Isolated margin leverage                                                                                                               |
+| **AUTO_TRADING**                   |          |          `false`          | `true` = auto-execute, `false` = manual approval                                                                                       |
+| **TRADE_APPROVAL_TIMEOUT_MINUTES** |          |            `5`            | Approval window for manual trades                                                                                                      |
+| **HISTORY_CANDLES**                |          |           `200`           | 15m/4H history (max 1000)                                                                                                              |
+| **MACRO_CANDLES**                  |          |          `1000`           | 1W/1D macro context (max 1000)                                                                                                         |
+| **LTF_TIMEFRAME**                  |          |           `15`            | Lower timeframe (15m)                                                                                                                  |
+| **HTF_TIMEFRAME**                  |          |           `240`           | Higher timeframe (4H)                                                                                                                  |
+| **ENABLE_LIVE_TEST_ORDERS**        |          |          `false`          | Enable `/test_live_order` (real Demo orders)                                                                                           |
+| **ACTIVE_SCENARIOS**               |          |          `1-11`           | Comma-separated: `1,2,3,5,7`                                                                                                           |
+| **LOG_LEVEL**                      |          |          `info`           | `debug`, `info`, `warn`, `error`                                                                                                       |
+| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups                                                                                            |
+| **ENABLE_FUNDING_MONITOR**         |          |          `false`          | Enable funding rate monitoring                                                                                                         |
+| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates                                                                                                   |
+| **FUNDING_ALERT_THRESHOLD**        |          |           `0.0`           | Alert when funding rate ≤ this value                                                                                                   |
+| **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value                                                                                           |
+| **SCENARIOS\_<SYMBOL>**            |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol.                           |
+| **COOLDOWN_CANDLES**               |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m.                  |
+| **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5)                                                                                             |
+| **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                                            |
+| **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                                  |
+| **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                                         |
+| **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                                  |
+| **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                                 |
+| **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                                    |
+| **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                                            |
+| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                                           |
+| **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance.              |
+| **USE_LOCAL_CACHE_ONLY**           |          |          `false`          | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys. |
 
 ---
 
@@ -774,19 +782,34 @@ SCENARIOS_SOLUSDT=5,6,7,10
 **Philosophy**: High win-rate, fewer trades, institutional SMC on 15m closes. Best for stable trending markets.
 
 **File: `.env.subaru`** (for `db-subaru` + `bot-subaru` via docker-compose)
+
 ```bash
+# --- Bybit API ---
+BYBIT_API_KEY=your_bybit_api_key_here
+BYBIT_API_SECRET=your_bybit_api_secret_here
+
 # Database (read by postgres:15-alpine directly)
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=SubaruSecurePass123
 POSTGRES_DB=smc_subaru
 DATABASE_URL=postgresql://postgres:SubaruSecurePass123@db-subaru:5432/smc_subaru
 
+# --- Telegram ---
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+TELEGRAM_CHAT_ID=your_numeric_chat_id_here
+
+# --- Trading Mode ---
+DEMO_TRADING=true
+TESTNET=false
+
 # Core
 ENABLE_SNIPER_MODE=false
+BACKTEST_DAYS=60
 SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
+SNIPER_DISPLACEMENT_MULTIPLIER=1.5
 
 # Strategy Capacity Limit
 MAX_WORKING_CAPITAL=20000
@@ -806,18 +829,42 @@ FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,AVAXUSDT,SUIUSDT,NEARUSDT
 FUNDING_ALERT_THRESHOLD=0.0
 FUNDING_RESTORE_THRESHOLD=0.00015
 
+# Trading Settings
+RISK_PERCENT=2
+REDUCED_RISK_PERCENT=1
+LEVERAGE=10
+AUTO_TRADING=false
+TRADE_APPROVAL_TIMEOUT_MINUTES=5
+ENABLE_LIVE_TEST_ORDERS=false
+
+# Timeframes (V4 Classic: 15m / 4H)
+LTF_TIMEFRAME=15
+HTF_TIMEFRAME=240
+HISTORY_CANDLES=200
+MACRO_CANDLES=1000
+
+# Risk Management
+COOLDOWN_CANDLES=16
+
 # Logging & Data
 LOG_LEVEL=info
 DATA_DIR=data
+
+# Backup
+BACKUP_PASSWORD=your_backup_encryption_password_here
+
+# --- Local CSV Backtest (optional) ---
+# Раскомментируй для прогона локального CSV бэктеста конкретного актива:
+# BACKTEST_CSV_PATH=./data/csv/EURUSD_15m.csv
 ```
 
-| Aspect | Setting | Rationale |
-|--------|---------|-----------|
-| **Timeframes** | 15m / 4H | Classic SMC timeframe |
-| **Scenarios** | 1 (global), 1,5 per major symbols | HTF Continuation + HTF Sweep only |
-| **Entry** | 15m close | Classic SMC execution |
-| **Funding Monitor** | Enabled | Tracks funding for delta-neutral awareness |
-| **Win Rate** | ~70-80% | Fewer, higher-quality setups |
+| Aspect              | Setting                           | Rationale                                  |
+| ------------------- | --------------------------------- | ------------------------------------------ |
+| **Timeframes**      | 15m / 4H                          | Classic SMC timeframe                      |
+| **Scenarios**       | 1 (global), 1,5 per major symbols | HTF Continuation + HTF Sweep only          |
+| **Entry**           | 15m close                         | Classic SMC execution                      |
+| **Funding Monitor** | Enabled                           | Tracks funding for delta-neutral awareness |
+| **Win Rate**        | ~70-80%                           | Fewer, higher-quality setups               |
 
 ---
 
@@ -826,12 +873,25 @@ DATA_DIR=data
 **Philosophy**: Surgical entries inside macro zones. Lower win-rate but superior R:R. Best for ranging/choppy markets.
 
 **File: `.env.emilia`** (for `db-emilia` + `bot-emilia` via docker-compose)
+
 ```bash
+# --- Bybit API ---
+BYBIT_API_KEY=your_bybit_api_key_here
+BYBIT_API_SECRET=your_bybit_api_secret_here
+
 # Database (read by postgres:15-alpine directly)
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=EmiliaSecurePass123
 POSTGRES_DB=smc_emilia
 DATABASE_URL=postgresql://postgres:EmiliaSecurePass123@db-emilia:5432/smc_emilia
+
+# --- Telegram ---
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+TELEGRAM_CHAT_ID=your_numeric_chat_id_here
+
+# --- Trading Mode ---
+DEMO_TRADING=true
+TESTNET=false
 
 # Core
 ENABLE_SNIPER_MODE=true
@@ -839,7 +899,8 @@ BACKTEST_DAYS=60
 SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
 SMC_SL_ATR_OFFSET=0.5
-SNIPER_DISPLACEMENT_MULTIPLIER=1.5  # Strict 1m filter
+SMC_DISPLACEMENT_MULTIPLIER=1.5
+SNIPER_DISPLACEMENT_MULTIPLIER=1.5
 
 # Strategy Capacity Limit
 MAX_WORKING_CAPITAL=3000
@@ -853,18 +914,38 @@ SCENARIOS_AVAXUSDT=12
 # Funding Monitor DISABLED for V5
 ENABLE_FUNDING_MONITOR=false
 
+# Trading Settings
+RISK_PERCENT=2
+REDUCED_RISK_PERCENT=1
+LEVERAGE=10
+AUTO_TRADING=false
+TRADE_APPROVAL_TIMEOUT_MINUTES=5
+ENABLE_LIVE_TEST_ORDERS=false
+
+# Timeframes (V5 Sniper: 1m entry / 15m radar / 4H macro)
+LTF_TIMEFRAME=15
+HTF_TIMEFRAME=240
+HISTORY_CANDLES=300
+MACRO_CANDLES=1000
+
+# Risk Management
+COOLDOWN_CANDLES=16
+
 # Logging & Data
 LOG_LEVEL=info
 DATA_DIR=data
+
+# Backup
+BACKUP_PASSWORD=your_backup_encryption_password_here
 ```
 
-| Aspect | Setting | Rationale |
-|--------|---------|-----------|
-| **Timeframes** | 1m (entry) / 15m (radar) / 4H (macro) | Two-loop architecture |
-| **Scenario** | 12 only (Sniper Touch) | Specialized 1m macro touch |
-| **Entry** | 1m CHoCH inside macro zone | Jewel precision |
-| **Symbols** | SOLUSDT, AVAXUSDT | Focused 2-coin portfolio |
-| **Filters** | Killzone + Sweep + CHoCH + OB | Institutional grade |
+| Aspect         | Setting                               | Rationale                  |
+| -------------- | ------------------------------------- | -------------------------- |
+| **Timeframes** | 1m (entry) / 15m (radar) / 4H (macro) | Two-loop architecture      |
+| **Scenario**   | 12 only (Sniper Touch)                | Specialized 1m macro touch |
+| **Entry**      | 1m CHoCH inside macro zone            | Jewel precision            |
+| **Symbols**    | SOLUSDT, AVAXUSDT                     | Focused 2-coin portfolio   |
+| **Filters**    | Killzone + Sweep + CHoCH + OB         | Institutional grade        |
 
 ---
 
@@ -872,13 +953,13 @@ DATA_DIR=data
 
 **V4 and V5 CANNOT run on the same process** — they share the `IN_TRADE` state machine. To run both:
 
-| Component | V4 Instance | V5 Instance |
-|-----------|-------------|-------------|
-| Process | Separate Node.js | Separate Node.js |
-| Database | Separate Supabase | Separate Supabase |
-| Telegram | Separate bot token | Separate bot token |
-| Bybit | Sub-account A | Sub-account B |
-| WS | 15m, 240m | 1m, 15m, 240m |
+| Component | V4 Instance        | V5 Instance        |
+| --------- | ------------------ | ------------------ |
+| Process   | Separate Node.js   | Separate Node.js   |
+| Database  | Separate Supabase  | Separate Supabase  |
+| Telegram  | Separate bot token | Separate bot token |
+| Bybit     | Sub-account A      | Sub-account B      |
+| WS        | 15m, 240m          | 1m, 15m, 240m      |
 
 Deploy as two separate Render services with different `.env` files pointing to the same Docker image.
 
@@ -952,17 +1033,19 @@ docker stats smc-bot                     # Resource usage
 ```
 
 ---
+
 ## 📊 Backup CSV Export (Updated v2026-10-01)
 
 The `/backup` command now exports **22 columns** (previously 19) including new fields:
 
-| Column | Description |
-|--------|-------------|
-| `order_type` | `Market` or `Limit` |
-| `limit_price` | Limit price for Limit orders (null for Market) |
+| Column             | Description                                                                                                                                           |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `order_type`       | `Market` or `Limit`                                                                                                                                   |
+| `limit_price`      | Limit price for Limit orders (null for Market)                                                                                                        |
 | `management_state` | JSON string of adaptive fractioning state (e.g., `{"milestone1Triggered":true,"milestone2Triggered":false,"initialTotalR":"5.2","initialQty":"0.1"}`) |
 
 **CSV Export Process**:
+
 1. Bot queries `SELECT * FROM trades` (all **22 columns** including new fields)
 2. Converts to CSV with headers (now includes `order_type`, `limit_price`, `management_state`)
 3. `management_state` JSONB serialized via `JSON.stringify()` and CSV-escaped
@@ -995,7 +1078,7 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 | Command            | Description                                                                                                                                                                                          | Auth Required |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `/status`          | **Live X-Ray** per engine: Live Price, Last Candle, 4H Trend, Zones in Memory, Nearest Macro %dist, State. Also shows next high-impact USD news and funding rates.                                   | ✅            |
-| `/backup`          | Full DB dump (all **22** trades columns) → gzip → Telegram via `fetch`+Blob (no disk I/O, no `fs` usage). Encrypted with AES-256-CBC if `BACKUP_PASSWORD` set.                                           | ✅            |
+| `/backup`          | Full DB dump (all **22** trades columns) → gzip → Telegram via `fetch`+Blob (no disk I/O, no `fs` usage). Encrypted with AES-256-CBC if `BACKUP_PASSWORD` set.                                       | ✅            |
 | `/test_signal`     | **Dry-run** — creates a fake setup (BTCUSDT, entry 45000, SL 44000, TP 48000) → Inline Approve/Reject buttons → logs `✅ Test trade approved (DRY RUN)`. No real order placed.                       | ✅            |
 | `/test_live_order` | **E2E Live Demo** — places REAL order on Bybit Demo when approved. Requires `ENABLE_LIVE_TEST_ORDERS=true`. Uses real balance, real position sizing via RiskManager. Full Bybit API response logged. | ✅            |
 | `/test_db`         | Integration test: INSERT/SELECT/DELETE with Decimal zoneDetails. Verifies database connectivity and NUMERIC(24,8) precision.                                                                         | ✅            |
@@ -1230,16 +1313,16 @@ services:
 
 ## 🛡 Risk Management Rules
 
-| Guard                | Logic                                                                          | Config                                        |
-| -------------------- | ------------------------------------------------------------------------------ | --------------------------------------------- |
-| **Drawdown Guard**   | 3 consecutive losing trades → risk reduced to 1%                               | `RISK_PERCENT` (base), `REDUCED_RISK_PERCENT` |
-| **Position Sizing**  | `qty = (balance × risk%) / SL_distance` → rounded to `qtyStep`                 | `LEVERAGE` (default 10x) via isolated margin  |
-| **Min Order Qty**    | If `rounded_qty < minOrderQty` → **ABORT** + `[WARN]` + state→`SCANNING`       | Exchange `minOrderQty`                        |
-| **Max Order Qty**    | If `qty > maxOrderQty` → **ABORT**                                             | Exchange `maxOrderQty`                        |
-| **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                          | Hardcoded in `RiskManager`                    |
-| **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop too tight | `LEVERAGE` from config                        |
-| **Capacity Limit**   | `workingBalance = min(balance, MAX_WORKING_CAPITAL)` — caps risk base          | `MAX_WORKING_CAPITAL` (0 = unlimited)         |
-| **PnL Summation**    | Sums all `closedPnl` records where `symbol` matches & `createdTime >= trade.openedAt` for Adaptive Fractioning | `getClosedPnl` + filter/reduce logic |
+| Guard                | Logic                                                                                                          | Config                                        |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| **Drawdown Guard**   | 3 consecutive losing trades → risk reduced to 1%                                                               | `RISK_PERCENT` (base), `REDUCED_RISK_PERCENT` |
+| **Position Sizing**  | `qty = (balance × risk%) / SL_distance` → rounded to `qtyStep`                                                 | `LEVERAGE` (default 10x) via isolated margin  |
+| **Min Order Qty**    | If `rounded_qty < minOrderQty` → **ABORT** + `[WARN]` + state→`SCANNING`                                       | Exchange `minOrderQty`                        |
+| **Max Order Qty**    | If `qty > maxOrderQty` → **ABORT**                                                                             | Exchange `maxOrderQty`                        |
+| **Micro-Stop Guard** | SL distance must be **> 0.1%** (prevents noise stops)                                                          | Hardcoded in `RiskManager`                    |
+| **Leverage Cap**     | `maxAllowedQty = marginBuffer * leverage / entry` — caps qty if stop too tight                                 | `LEVERAGE` from config                        |
+| **Capacity Limit**   | `workingBalance = min(balance, MAX_WORKING_CAPITAL)` — caps risk base                                          | `MAX_WORKING_CAPITAL` (0 = unlimited)         |
+| **PnL Summation**    | Sums all `closedPnl` records where `symbol` matches & `createdTime >= trade.openedAt` for Adaptive Fractioning | `getClosedPnl` + filter/reduce logic          |
 
 **Leverage**: Set once at bootstrap via `setupMarginAndLeverage(symbol, leverage)` (isolated margin).
 

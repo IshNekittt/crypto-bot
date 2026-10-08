@@ -1356,7 +1356,7 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 
 ---
 
-## 8. THE 12 SCENARIOS — `src/engine/scenarios/`
+## 9. THE 12 SCENARIOS — `src/engine/scenarios/`
 
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -1373,13 +1373,13 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 | **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`). **FRESHNESS**: Always takes newest SMS (`smsList[smsList.length-1]`), newest CHoCH after SMS (`validChochs[validChochs.length-1]`), newest OB before SMS (`mbObs[mbObs.length-1]`). **RETEST**: Current 15m candle must test MB zone with wicks, close inside zone in trade direction, within 12h of CHoCH. **P/D**: Entry close tested against SMS→CHoCH impulse equilibrium (Long=Discount, Short=Premium). |
 | **12** | Sniper Touch        | 1m CHoCH inside 15m macro zone (PDH/PDL/PWH/PWL)           | Killzone (London/NY) + Sweep validation + 1m CHoCH + 1m OB entry              |
 
-### 7.22 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
+### 9.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
 - Scenarios setting `zoneDetails`: **1, 2, 4, 5, 7, 8, 10, 11, 12**.
 
-### 7.23 Contextual Quality Filters (Confluence)
+### 9.3 Contextual Quality Filters (Confluence)
 
 | Scenario                  | Filter                                       | Rejection Stat               |
 | ------------------------- | -------------------------------------------- | ---------------------------- |
@@ -1387,7 +1387,7 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 
 ---
 
-### 7.24 Scenario 11 — Mitigation Block — Full Implementation Details
+### 9.4 Scenario 11 — Mitigation Block — Full Implementation Details
 
 **File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
 
@@ -1419,7 +1419,7 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 
 ---
 
-## 9. DATABASE SCHEMA — `src/db/database.ts`
+## 10. DATABASE SCHEMA — `src/db/database.ts`
 
 ```sql
 CREATE TABLE trades (
@@ -1459,7 +1459,7 @@ CREATE TABLE symbol_state (
 **Connection Pool**: `max=5`, `idleTimeout=10s`, `keepAlive=true` (Supabase compatibility).
 **Leak Proof**: Every method uses `const client = await pool.connect(); try {...} finally { client.release() }`.
 
-### 9.1 CRUD Operations Audit — **v2026-10-05**
+### 10.1 CRUD Operations Audit — **v2026-10-05**
 
 | Operation | SQL / Code | Status |
 |-----------|------------|--------|
@@ -1478,7 +1478,7 @@ CREATE TABLE symbol_state (
 
 **Critical Note — `order_id` (v2026-10-07)**: The `order_id` column (VARCHAR(255)) stores the Bybit exchange order ID (UUID). It is **critical** for linking DB records to exchange orders and is passed as the 20th parameter in `openTrade()`. Ensure `order_id` is always passed (even if null initially) to maintain DB-exchange linkage.
 
-## 10. BACKTEST ENGINE — `src/backtest/`
+## 11. BACKTEST ENGINE — `src/backtest/`
 
 - **State Machine**: `openTrade()` / `checkAndCloseTrade()` in `executionSimulator.ts`.
 - **Drawdown Guard**: `consecutiveLosses` increments on loss → feeds `RiskManager.getEffectiveRiskPercent()`.
@@ -1488,7 +1488,7 @@ CREATE TABLE symbol_state (
 
 ---
 
-## 11. ENVIRONMENT VARIABLES (`.env`)
+## 12. ENVIRONMENT VARIABLES (`.env`)
 
 ```bash
 # Required
@@ -1542,7 +1542,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ---
 
-## 12. BUILD & VERIFICATION COMMANDS
+## 13. BUILD & VERIFICATION COMMANDS
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
@@ -1556,7 +1556,7 @@ docker compose up -d
 
 ---
 
-## 11. CRITICAL INVARIANTS (DO NOT BREAK)
+## 14. CRITICAL INVARIANTS (DO NOT BREAK)
 
 1. **No `number` for money** — only `Decimal` + string serialization.
 2. **Single `PatternRecognizer`** instance shared across all engines.
@@ -1578,12 +1578,13 @@ docker compose up -d
 18. **Hybrid Smart Entry** — `idealEntry` always from scenario geometry (zone equilibrium), never `candle.close`. Market vs Limit decision uses `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%) against `|idealEntry - currentPrice| / idealEntry`.
 19. **Limit Order Cancellation** — ReconciliationLoop cancels Limit orders older than `LIMIT_EXPIRATION_CANDLES × LTF_TIMEFRAME` minutes. Zone burned immediately on Limit placement (not on fill).
 20. **Backtester Limit Simulation** — State machine: SCANNING → PENDING (limitPrice, placedAt, candlesWaited) → IN_TRADE (on wick touch) OR CANCELLED (after LIMIT_EXPIRATION_CANDLES). Filled at exact `limitPrice`, not candle close.
+21. **Macro liquidity pools (PDH/PDL/PWH/PWL) are NEVER burned** — they may be swept multiple times. Adding them to `mitigatedZones` is forbidden. Spam protection works exclusively via burning 1m CHoCH structures via `mitigatedStructures`.
 
 ---
 
-## 12. DOCKER & DEPLOYMENT
+## 15. DOCKER & DEPLOYMENT
 
-### 12.1 Dockerfile (Multi-stage, Node 26)
+### 15.1 Dockerfile (Multi-stage, Node 26)
 
 ```dockerfile
 # builder: compiles TS → dist/
@@ -1615,7 +1616,7 @@ CMD ["node", "dist/index.js"]
 - `TZ=UTC` — consistent timestamps for SMC killzones
 - `EXPOSE 3000` — health check endpoint for Render/load balancer
 
-### 12.2 docker-compose.yml (Single Service for Render/Oracle Cloud)
+### 15.2 docker-compose.yml (Single Service for Render/Oracle Cloud)
 
 ```yaml
 services:
@@ -1640,7 +1641,7 @@ services:
 - **Resource limits**: 0.5 CPU / 512MB — fits Oracle Cloud Free Tier (ARM) or Render free tier
 - **Single `.env` file** with all configuration
 
-### 12.3 Render Deployment (Recommended)
+### 15.3 Render Deployment (Recommended)
 
 ```yaml
 # render.yaml
@@ -1680,7 +1681,7 @@ services:
 - **Auto-deploy** on push to main
 - **Environment variables** via Render dashboard (secrets for keys)
 
-### 12.4 Local Development Commands
+### 15.4 Local Development Commands
 
 ```bash
 # Build image
@@ -1707,7 +1708,7 @@ docker rm smc-bot
 docker compose up -d --build
 ```
 
-### 12.5 Health Checks & Monitoring
+### 15.5 Health Checks & Monitoring
 
 | Endpoint | Purpose | Expected Response |
 |----------|---------|-------------------|
@@ -1724,7 +1725,7 @@ docker compose up -d --build
 
 ---
 
-## 13. BACKTEST RESULTS (Reference)
+## 16. BACKTEST RESULTS (Reference)
 
 | Symbol      | Final Balance | Net Profit | Trades | Win Rate | Max DD |
 | ----------- | ------------- | ---------- | ------ | -------- | ------ |
@@ -1737,43 +1738,43 @@ docker compose up -d --build
 
 ---
 
-## 14. CRITICAL ANTI-PATTERNS & LESSONS LEARNED (BLOOD-SIGNED)
+## 17. CRITICAL ANTI-PATTERNS & LESSONS LEARNED (BLOOD-SIGNED)
 
 > These rules exist because we **lost money, time, or sanity** discovering them. Do NOT "optimize" them away.
 
-### 14.1 ❌ FORBIDDEN: O(N²) and `while` loops in Math Hot Paths
+### 17.1 ❌ FORBIDDEN: O(N²) and `while` loops in Math Hot Paths
 **Root Cause**: `detectEqualLevels()` used nested `for` loops on 17,000 candles → 100% CPU, event loop blocked.
 **Fix**: All candle iteration is **strictly `for (let i = 0; i < n; i++)`** with index pointers. Macro context builds in <10ms via single linear passes.
 **Rule**: No nested loops over candles. No `while (true)` with break conditions. Use pre-computed arrays + pointer advancement.
 
-### 14.2 ❌ FORBIDDEN: Inline Stop-Loss Calculations in Scenarios
+### 17.2 ❌ FORBIDDEN: Inline Stop-Loss Calculations in Scenarios
 **Root Cause**: `invalid SL level` errors — zone `top`/`bottom` ordering was arbitrary (not guaranteed `top > bottom`). `zone.bottom - offset` produced SL *above* entry for Longs when zone was inverted.
 **Fix**: **ONLY** `BaseScenario.calculateLevels()` — single source of truth.
 - **Long**: `Decimal.min(zone.bottom, entry).minus(offset)` — SL *always* below entry
 - **Short**: `Decimal.max(zone.top, entry).plus(offset)` — SL *always* above entry
 **Rule**: Zero inline SL math in scenarios. Call `this.calculateLevels(...)` and use returned levels.
 
-### 14.3 ❌ FORBIDDEN: `toFixed(2)` or Hardcoded Decimal Places for Prices
+### 17.3 ❌ FORBIDDEN: `toFixed(2)` or Hardcoded Decimal Places for Prices
 **Root Cause**: Forex pairs (JPY) and crypto with 4-5 decimals got truncated. Bybit rejected orders with `Invalid price precision`.
 **Fix**: `utils/precision.ts` — `formatPrice(price, tickSize, 'nearest')` and `formatQuantity(qty, qtyStep, 'down')`. Rounding uses instrument's actual `tickSize`/`qtyStep`.
 **Rule**: Never hardcode decimal places. Always format via instrument precision.
 
-### 14.4 ❌ FORBIDDEN: `fs.writeFileSync` / Local File I/O in Telegram Backup
+### 17.4 ❌ FORBIDDEN: `fs.writeFileSync` / Local File I/O in Telegram Backup
 **Root Cause**: Node 26 + Telegraf `sendDocument({ source: buffer })` → `socket hang up` / `ECONNRESET`. Telegraf's internal `form-data` + `fs.createReadStream` from Buffer is broken on Node 26.
 **Fix**: Convert Buffer → `Uint8Array` → **Web API `Blob`** → `fetch` + `FormData` to `api.telegram.org/bot<token>/sendDocument`. **Zero disk I/O**.
 **Rule**: No `fs` in Telegram file sending. Use native `fetch` + `Blob` + `FormData`.
 
-### 14.5 ❌ FORBIDDEN: Local Time for Daily Schedulers
+### 17.5 ❌ FORBIDDEN: Local Time for Daily Schedulers
 **Root Cause**: `new Date().setHours(0,0,0,0)` uses **local timezone**. On Render (UTC) vs dev machine (local) → macro refresh at wrong hour, clock drift unnoticed.
 **Fix**: `new Date().setUTCHours(0,0,0,0); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)` — **strictly UTC**.
 **Rule**: All time calculations use `DateTime.setZone('UTC')` or `setUTCHours`/`setUTCDate`. Never `Date.now()` + local offsets.
 
-### 14.6 ❌ FORBIDDEN: Multiple Concurrent Trades per Symbol
+### 17.6 ❌ FORBIDDEN: Multiple Concurrent Trades per Symbol
 **Root Cause**: Missing `IN_TRADE` guard in `ScenarioRouter` → 400 trades/day on choppy market (machine gun). Account blown.
 **Fix**: `ScenarioRouter` **hard-blocked** if `engine.openTrade !== null` (or `state === IN_TRADE`). Strictly **1 trade per symbol**.
 **Rule**: State machine must be `SCANNING` → `ENTRY_STAGED` → `IN_TRADE` → `SCANNING`. No parallel entries.
 
-### 14.7 ❌ FORBIDDEN: Static Macro Context in Backtester (Lookahead Bias)
+### 17.7 ❌ FORBIDDEN: Static Macro Context in Backtester (Lookahead Bias)
 **Root Cause**: `initializeMacroContext()` called once before backtest loop loaded daily levels (PDH/PDL, PWH/PWL) from **end of history** (e.g., September 2026). During simulation of March–August, the bot used future levels — Scenarios 5, 7, 8, 9 missed valid sweeps.
 **Fix**: Dynamic macro context in `runBacktestForSymbol()`:
 - Track `currentDayUtc` / `currentWeekUtc` per candle
@@ -1783,21 +1784,29 @@ docker compose up -d --build
 - Atomic `recognizer.setMacroContext()` update
 **Rule**: Never call `initializeMacroContext()` before backtest loop. Macro levels must be computed on-the-fly from data strictly before current candle.
 
-### 14.8 ❌ FORBIDDEN: Zero Stop-Loss Offset (Division by Zero in RiskManager)
+### 17.8 ❌ FORBIDDEN: Zero Stop-Loss Offset (Division by Zero in RiskManager)
 **Root Cause**: In low volatility, ATR ≈ 0 → offset = 0 → SL = Entry → `slDistance = 0` → division by zero in RiskManager position sizing.
 **Fix**: Minimum offset floor in `BaseScenario.calculateLevels()`: `offset = max(atr * 0.5, entry * 0.1%)`. SL always at least 0.1% from entry.
 **Rule**: Always enforce minimum offset in SL calculation. Never allow SL == Entry.
 
-### 14.9 ❌ FORBIDDEN: Inverted Zone Stop-Loss (Stop Inside Entry Block)
+### 17.9 ❌ FORBIDDEN: Inverted Zone Stop-Loss (Stop Inside Entry Block)
 **Root Cause**: Zone objects can have `top < bottom` (not guaranteed `top > bottom`). `min(zone.bottom, entry)` for Long fails when zone is inverted — SL ends up *above* entry.
 **Fix**: `Decimal.min(zone.top, zone.bottom, entry)` for Long, `Decimal.max(zone.top, zone.bottom, entry)` for Short — min/max of ALL THREE guarantees correct SL side.
 **Rule**: Always use min/max of top, bottom, AND entry for SL. Never assume zone ordering.
 
-### 14.10 ❌ FORBIDDEN: Hardcoded Trade Directions and String-Based Side Determination
+### 17.10 ❌ FORBIDDEN: Hardcoded Trade Directions and String-Based Side Determination
 **Root Cause**: Using `side: 'Buy'` or `zoneDetails.direction === 'BULLISH'` to determine trade side leads to fatal errors when setup logic is complex (e.g., Sweep scenarios where sweep direction ≠ zone direction). The `invalid SL level for Buy side` error in Live was caused by hardcoded `side: 'Buy'` while SL geometry implied Short.
 
 **Fix**: Trade side (Buy/Sell) MUST be determined EXCLUSIVELY by geometry: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'`. Math never lies.
 
 **Rule**: Never hardcode `side`. Never derive side from text labels (`zoneDetails.direction`, `sweepDirection`, `BULLISH`/`BEARISH` strings). Always compute from Entry vs SL geometry at the point of RiskManager call.
 
-_Last updated: 2026-10-04. All 240 tests green. Build passes. Enterprise-ready._
+### 17.11 ❌ FORBIDDEN: Timeframe Asymmetry (The 100R Illusion)
+
+**Root Cause**: Attempting to use dynamic macro targets (PDH/PDL/PWH/PWL) on the 1-minute timeframe generated massive R:R ratios (1:15+). With micro-stops (0.15%), natural market noise stopped out positions at breakeven before targets were reached, while commissions consumed micro-profits on partial closes.
+
+**Fix**: Hard-capped Take-Profit at 3R for 1-minute Sniper. This guarantees 100% position closure before the first major pullback, maximizing win-rate and covering commissions.
+
+**Rule**: Never target macro structure when scalping with micro-stops. Scalping math demands fast takes (3R).
+
+_Last updated: 2026-10-08. All 240 tests green. Build passes. Enterprise-ready._
