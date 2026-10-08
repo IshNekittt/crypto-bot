@@ -90,20 +90,6 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Check if the swept macro level is already mitigated (burned)
-    if (sweptLevel) {
-      const isZoneMitigated = patternData.mitigatedZones?.some(mz => 
-        mz.type === 'MITIGATION' &&
-        mz.direction === sweptLevel.direction &&
-        new Decimal(mz.top).eq(sweptLevel.price)
-      );
-
-      if (isZoneMitigated) {
-        this.logRejection(`Macro level ${sweptLevel.name} at ${sweptLevel.price} is already mitigated`);
-        return false;
-      }
-    }
-
     const direction = sweptLevel.direction;
 
     // === FILTER 3: VALID CHoCH + ORDER BLOCK ENTRY ===
