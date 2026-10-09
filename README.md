@@ -849,6 +849,7 @@ COOLDOWN_CANDLES=16
 # Logging & Data
 LOG_LEVEL=info
 DATA_DIR=data
+USE_LOCAL_CACHE_ONLY=true
 
 # Backup
 BACKUP_PASSWORD=your_backup_encryption_password_here
@@ -934,6 +935,7 @@ COOLDOWN_CANDLES=16
 # Logging & Data
 LOG_LEVEL=info
 DATA_DIR=data
+USE_LOCAL_CACHE_ONLY=true
 
 # Backup
 BACKUP_PASSWORD=your_backup_encryption_password_here

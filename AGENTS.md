@@ -178,7 +178,7 @@ All REST calls wrapped in `executeWithRetry()`:
 
 - Runs every **10 minutes**.
 - **Step 1**: For each `IN_TRADE` engine → `getOpenPositions()` → if gone, force `SCANNING`.
-  - **Limit Order Awareness** (`v2026-10-06`): Before force-reset `IN_TRADE → SCANNING`, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`) via `getOpenOrders()`. If active Limit orders exist, **skips force-reset** to prevent Race Condition and signal duplication.
+  - **Limit Order Awareness** (`v2026-10-06`): Before force-reset `IN_TRADE → SCANNING`, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`) via `getActiveOrders()`. If active Limit orders exist, **skips force-reset** to prevent Race Condition and signal duplication.
 - **Step 2**: `db.getAllOpenTrades()` → for each, check exchange position → if missing, `reconcileWithTrade()` with zoneDetails for mitigatedZones tracking.
   - **Limit Order Awareness** (`v2026-10-06`): Before force-reset, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`). If active Limit orders exist, **skips force-reset** to prevent signal duplication.
 - Idempotent, safe to run concurrently with WS events.
@@ -1356,7 +1356,7 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 
 ---
 
-## 9. THE 12 SCENARIOS — `src/engine/scenarios/`
+## 8. THE 12 SCENARIOS — `src/engine/scenarios/`
 
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -1373,13 +1373,17 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 | **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`). **FRESHNESS**: Always takes newest SMS (`smsList[smsList.length-1]`), newest CHoCH after SMS (`validChochs[validChochs.length-1]`), newest OB before SMS (`mbObs[mbObs.length-1]`). **RETEST**: Current 15m candle must test MB zone with wicks, close inside zone in trade direction, within 12h of CHoCH. **P/D**: Entry close tested against SMS→CHoCH impulse equilibrium (Long=Discount, Short=Premium). |
 | **12** | Sniper Touch        | 1m CHoCH inside 15m macro zone (PDH/PDL/PWH/PWL)           | Killzone (London/NY) + Sweep validation + 1m CHoCH + 1m OB entry              |
 
-### 9.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
+### 8.1 Scenario Overview
+
+The table above lists all 12 scenarios implemented in `src/engine/scenarios/`. Scenarios 1–11 are classic SMC patterns (15m/4H), Scenario 12 is V5 Sniper Mode (1m execution inside 15m macro zones). Each scenario has dedicated rejection statistics for observability.
+
+### 8.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
 - Scenarios setting `zoneDetails`: **1, 2, 4, 5, 7, 8, 10, 11, 12**.
 
-### 9.3 Contextual Quality Filters (Confluence)
+### 8.3 Contextual Quality Filters (Confluence)
 
 | Scenario                  | Filter                                       | Rejection Stat               |
 | ------------------------- | -------------------------------------------- | ---------------------------- |
@@ -1387,7 +1391,7 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 
 ---
 
-### 9.4 Scenario 11 — Mitigation Block — Full Implementation Details
+### 8.4 Scenario 11 — Mitigation Block — Full Implementation Details
 
 **File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
 
@@ -1419,7 +1423,7 @@ this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: lev
 
 ---
 
-## 10. DATABASE SCHEMA — `src/db/database.ts`
+## 9. DATABASE SCHEMA — `src/db/database.ts`
 
 ```sql
 CREATE TABLE trades (
@@ -1478,7 +1482,7 @@ CREATE TABLE symbol_state (
 
 **Critical Note — `order_id` (v2026-10-07)**: The `order_id` column (VARCHAR(255)) stores the Bybit exchange order ID (UUID). It is **critical** for linking DB records to exchange orders and is passed as the 20th parameter in `openTrade()`. Ensure `order_id` is always passed (even if null initially) to maintain DB-exchange linkage.
 
-## 11. BACKTEST ENGINE — `src/backtest/`
+## 10. BACKTEST ENGINE — `src/backtest/`
 
 - **State Machine**: `openTrade()` / `checkAndCloseTrade()` in `executionSimulator.ts`.
 - **Drawdown Guard**: `consecutiveLosses` increments on loss → feeds `RiskManager.getEffectiveRiskPercent()`.
@@ -1488,7 +1492,7 @@ CREATE TABLE symbol_state (
 
 ---
 
-## 12. ENVIRONMENT VARIABLES (`.env`)
+## 11. ENVIRONMENT VARIABLES (`.env`)
 
 ```bash
 # Required
@@ -1542,7 +1546,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ---
 
-## 13. BUILD & VERIFICATION COMMANDS
+## 12. BUILD & VERIFICATION COMMANDS
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
@@ -1556,7 +1560,7 @@ docker compose up -d
 
 ---
 
-## 14. CRITICAL INVARIANTS (DO NOT BREAK)
+## 13. CRITICAL INVARIANTS (DO NOT BREAK)
 
 1. **No `number` for money** — only `Decimal` + string serialization.
 2. **Single `PatternRecognizer`** instance shared across all engines.
@@ -1580,9 +1584,21 @@ docker compose up -d
 20. **Backtester Limit Simulation** — State machine: SCANNING → PENDING (limitPrice, placedAt, candlesWaited) → IN_TRADE (on wick touch) OR CANCELLED (after LIMIT_EXPIRATION_CANDLES). Filled at exact `limitPrice`, not candle close.
 21. **Macro liquidity pools (PDH/PDL/PWH/PWL) are NEVER burned** — they may be swept multiple times. Adding them to `mitigatedZones` is forbidden. Spam protection works exclusively via burning 1m CHoCH structures via `mitigatedStructures`.
 
+22. **DB Pool Safety** — All DB calls MUST use `const client = await pool.connect(); try {...} finally { client.release(); }`. Connection leaks are forbidden. Every method in `PostgresDatabase` follows this pattern.
+
+23. **Execution Fail-Fast** — On ANY error in `executionEngine.execute()` or `db.openTrade()`, the bot MUST call `burnSetup()` (to prevent spam cycles) and transition to `SCANNING` in a `finally` block — state machine must never stall in `IN_TRADE`.
+
+24. **Pre-flight Slippage Guard** — Before sending order to exchange, bot MUST fetch `getLivePrice()`. If live price has crossed SL during approval wait, setup is marked DEAD, burned, and cancelled. No order is sent.
+
+25. **Ghost Signal Prevention** — `isMitigated` checks ONLY timestamp (1m candle timestamps are unique). Direction is NOT checked (may be lost during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
+
+26. **PnL Summation (Adaptive Fractioning)** — PnL calculated via `.filter().reduce()` on `closedPnl` records where `symbol` matches AND `createdTime >= trade.openedAt`. This correctly sums all partial closes.
+
+27. **Limit Order Awareness** — ReconciliationLoop MUST NOT reset `IN_TRADE` → `SCANNING` if active Limit orders exist (`status === 'New' | 'PartiallyFilled'`). Checked via `getOpenOrders()` before force-reset.
+
 ---
 
-## 15. DOCKER & DEPLOYMENT
+## 14. DOCKER & DEPLOYMENT
 
 ### 15.1 Dockerfile (Multi-stage, Node 26)
 
@@ -1725,7 +1741,7 @@ docker compose up -d --build
 
 ---
 
-## 16. BACKTEST RESULTS (Reference)
+## 15. BACKTEST RESULTS (Reference)
 
 | Symbol      | Final Balance | Net Profit | Trades | Win Rate | Max DD |
 | ----------- | ------------- | ---------- | ------ | -------- | ------ |
@@ -1738,43 +1754,43 @@ docker compose up -d --build
 
 ---
 
-## 17. CRITICAL ANTI-PATTERNS & LESSONS LEARNED (BLOOD-SIGNED)
+## 16. CRITICAL ANTI-PATTERNS & LESSONS LEARNED (BLOOD-SIGNED)
 
 > These rules exist because we **lost money, time, or sanity** discovering them. Do NOT "optimize" them away.
 
-### 17.1 ❌ FORBIDDEN: O(N²) and `while` loops in Math Hot Paths
+### 16.1 ❌ FORBIDDEN: O(N²) and `while` loops in Math Hot Paths
 **Root Cause**: `detectEqualLevels()` used nested `for` loops on 17,000 candles → 100% CPU, event loop blocked.
 **Fix**: All candle iteration is **strictly `for (let i = 0; i < n; i++)`** with index pointers. Macro context builds in <10ms via single linear passes.
 **Rule**: No nested loops over candles. No `while (true)` with break conditions. Use pre-computed arrays + pointer advancement.
 
-### 17.2 ❌ FORBIDDEN: Inline Stop-Loss Calculations in Scenarios
+### 16.2 ❌ FORBIDDEN: Inline Stop-Loss Calculations in Scenarios
 **Root Cause**: `invalid SL level` errors — zone `top`/`bottom` ordering was arbitrary (not guaranteed `top > bottom`). `zone.bottom - offset` produced SL *above* entry for Longs when zone was inverted.
 **Fix**: **ONLY** `BaseScenario.calculateLevels()` — single source of truth.
 - **Long**: `Decimal.min(zone.bottom, entry).minus(offset)` — SL *always* below entry
 - **Short**: `Decimal.max(zone.top, entry).plus(offset)` — SL *always* above entry
 **Rule**: Zero inline SL math in scenarios. Call `this.calculateLevels(...)` and use returned levels.
 
-### 17.3 ❌ FORBIDDEN: `toFixed(2)` or Hardcoded Decimal Places for Prices
+### 16.3 ❌ FORBIDDEN: `toFixed(2)` or Hardcoded Decimal Places for Prices
 **Root Cause**: Forex pairs (JPY) and crypto with 4-5 decimals got truncated. Bybit rejected orders with `Invalid price precision`.
 **Fix**: `utils/precision.ts` — `formatPrice(price, tickSize, 'nearest')` and `formatQuantity(qty, qtyStep, 'down')`. Rounding uses instrument's actual `tickSize`/`qtyStep`.
 **Rule**: Never hardcode decimal places. Always format via instrument precision.
 
-### 17.4 ❌ FORBIDDEN: `fs.writeFileSync` / Local File I/O in Telegram Backup
+### 16.4 ❌ FORBIDDEN: `fs.writeFileSync` / Local File I/O in Telegram Backup
 **Root Cause**: Node 26 + Telegraf `sendDocument({ source: buffer })` → `socket hang up` / `ECONNRESET`. Telegraf's internal `form-data` + `fs.createReadStream` from Buffer is broken on Node 26.
 **Fix**: Convert Buffer → `Uint8Array` → **Web API `Blob`** → `fetch` + `FormData` to `api.telegram.org/bot<token>/sendDocument`. **Zero disk I/O**.
 **Rule**: No `fs` in Telegram file sending. Use native `fetch` + `Blob` + `FormData`.
 
-### 17.5 ❌ FORBIDDEN: Local Time for Daily Schedulers
+### 16.5 ❌ FORBIDDEN: Local Time for Daily Schedulers
 **Root Cause**: `new Date().setHours(0,0,0,0)` uses **local timezone**. On Render (UTC) vs dev machine (local) → macro refresh at wrong hour, clock drift unnoticed.
 **Fix**: `new Date().setUTCHours(0,0,0,0); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)` — **strictly UTC**.
 **Rule**: All time calculations use `DateTime.setZone('UTC')` or `setUTCHours`/`setUTCDate`. Never `Date.now()` + local offsets.
 
-### 17.6 ❌ FORBIDDEN: Multiple Concurrent Trades per Symbol
+### 16.6 ❌ FORBIDDEN: Multiple Concurrent Trades per Symbol
 **Root Cause**: Missing `IN_TRADE` guard in `ScenarioRouter` → 400 trades/day on choppy market (machine gun). Account blown.
 **Fix**: `ScenarioRouter` **hard-blocked** if `engine.openTrade !== null` (or `state === IN_TRADE`). Strictly **1 trade per symbol**.
 **Rule**: State machine must be `SCANNING` → `ENTRY_STAGED` → `IN_TRADE` → `SCANNING`. No parallel entries.
 
-### 17.7 ❌ FORBIDDEN: Static Macro Context in Backtester (Lookahead Bias)
+### 16.7 ❌ FORBIDDEN: Static Macro Context in Backtester (Lookahead Bias)
 **Root Cause**: `initializeMacroContext()` called once before backtest loop loaded daily levels (PDH/PDL, PWH/PWL) from **end of history** (e.g., September 2026). During simulation of March–August, the bot used future levels — Scenarios 5, 7, 8, 9 missed valid sweeps.
 **Fix**: Dynamic macro context in `runBacktestForSymbol()`:
 - Track `currentDayUtc` / `currentWeekUtc` per candle
@@ -1784,24 +1800,24 @@ docker compose up -d --build
 - Atomic `recognizer.setMacroContext()` update
 **Rule**: Never call `initializeMacroContext()` before backtest loop. Macro levels must be computed on-the-fly from data strictly before current candle.
 
-### 17.8 ❌ FORBIDDEN: Zero Stop-Loss Offset (Division by Zero in RiskManager)
+### 16.8 ❌ FORBIDDEN: Zero Stop-Loss Offset (Division by Zero in RiskManager)
 **Root Cause**: In low volatility, ATR ≈ 0 → offset = 0 → SL = Entry → `slDistance = 0` → division by zero in RiskManager position sizing.
 **Fix**: Minimum offset floor in `BaseScenario.calculateLevels()`: `offset = max(atr * 0.5, entry * 0.1%)`. SL always at least 0.1% from entry.
 **Rule**: Always enforce minimum offset in SL calculation. Never allow SL == Entry.
 
-### 17.9 ❌ FORBIDDEN: Inverted Zone Stop-Loss (Stop Inside Entry Block)
+### 16.9 ❌ FORBIDDEN: Inverted Zone Stop-Loss (Stop Inside Entry Block)
 **Root Cause**: Zone objects can have `top < bottom` (not guaranteed `top > bottom`). `min(zone.bottom, entry)` for Long fails when zone is inverted — SL ends up *above* entry.
 **Fix**: `Decimal.min(zone.top, zone.bottom, entry)` for Long, `Decimal.max(zone.top, zone.bottom, entry)` for Short — min/max of ALL THREE guarantees correct SL side.
 **Rule**: Always use min/max of top, bottom, AND entry for SL. Never assume zone ordering.
 
-### 17.10 ❌ FORBIDDEN: Hardcoded Trade Directions and String-Based Side Determination
+### 16.10 ❌ FORBIDDEN: Hardcoded Trade Directions and String-Based Side Determination
 **Root Cause**: Using `side: 'Buy'` or `zoneDetails.direction === 'BULLISH'` to determine trade side leads to fatal errors when setup logic is complex (e.g., Sweep scenarios where sweep direction ≠ zone direction). The `invalid SL level for Buy side` error in Live was caused by hardcoded `side: 'Buy'` while SL geometry implied Short.
 
 **Fix**: Trade side (Buy/Sell) MUST be determined EXCLUSIVELY by geometry: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'`. Math never lies.
 
 **Rule**: Never hardcode `side`. Never derive side from text labels (`zoneDetails.direction`, `sweepDirection`, `BULLISH`/`BEARISH` strings). Always compute from Entry vs SL geometry at the point of RiskManager call.
 
-### 17.11 ❌ FORBIDDEN: Timeframe Asymmetry (The 100R Illusion)
+### 16.11 ❌ FORBIDDEN: Timeframe Asymmetry (The 100R Illusion)
 
 **Root Cause**: Attempting to use dynamic macro targets (PDH/PDL/PWH/PWL) on the 1-minute timeframe generated massive R:R ratios (1:15+). With micro-stops (0.15%), natural market noise stopped out positions at breakeven before targets were reached, while commissions consumed micro-profits on partial closes.
 
@@ -1809,4 +1825,88 @@ docker compose up -d --build
 
 **Rule**: Never target macro structure when scalping with micro-stops. Scalping math demands fast takes (3R).
 
-_Last updated: 2026-10-08. All 240 tests green. Build passes. Enterprise-ready._
+### 16.12 ❌ FORBIDDEN: Using `getOpenOrders` for Bybit V5
+
+**Root Cause**: Bybit V5 API does not have `getOpenOrders` method. Code that called this non-existent method crashed at runtime. The correct method is `getActiveOrders`.
+
+**Fix**: All order queries use `getActiveOrders` exclusively. Removed all references to `getOpenOrders`.
+
+**Rule**: Never assume API methods exist. Always verify against official Bybit V5 documentation. Use `getActiveOrders` for querying active orders.
+
+### 16.13 ❌ FORBIDDEN: Running Scenario 12 (Sniper) and Scenarios 1–11 (Classic) in Same Process
+
+**Root Cause**: V4 Classic (15m/4H) and V5 Sniper (1m/15m/4H) share the same `IN_TRADE` state machine per symbol. Running both modes in the same process causes state conflicts, double position risk, `IN_TRADE` blocking, and DB conflicts from concurrent `trades` table writes.
+
+**Fix**: Complete infrastructure separation via Docker Compose — separate Node.js processes, separate Supabase databases, separate Telegram bots, separate Bybit sub-accounts.
+
+**Rule**: V4 Classic and V5 Sniper **MUST NOT** run on the same process/instance. Deploy as separate services with separate `.env` files pointing to the same Docker image.
+
+### 16.14 ❌ FORBIDDEN: Recomputing Macro Context on Every 1m Candle in Backtester
+
+**Root Cause**: Backtester was recomputing heavy macro context (PDH/PDL, PWH/PWL, ATH/ATL) on every 1m candle, causing massive redundant computation and incorrect state propagation.
+
+**Fix**: In `runBacktestForSymbol()`, `PatternData` is computed **only on 15m candle close**. The 1m loop only passes cached macro context to `ScenarioRouter`. Macro context updates only on 15m boundaries via `recognizer.setMacroContext()`.
+
+**Rule**: In backtester, heavy macro context updates ONLY on LTF (15m) candle close. 1m candles reuse cached context — no recomputation.
+
+### 16.15 ❌ FORBIDDEN: Using `amendOrder` for Position Stop-Loss/Take-Profit Updates
+
+**Root Cause**: Bybit V5 requires `setTradingStop` (position-level) for modifying SL/TP on open positions. `amendOrder` is for pending/conditional orders only. Using `amendOrder` for live positions fails silently or rejects.
+
+**Fix**: All SL/TP updates on open positions (breakeven, trailing, post-partial-close) use `client.setTradingStop()` with `positionIdx: 0` (One-Way Mode).
+
+**Rule**: **NEVER** use `amendOrder` for `IN_TRADE` positions. Only `setTradingStop` with `positionIdx: 0` for open position SL/TP management.
+
+### 16.16 ❌ FORBIDDEN: Checking `direction` in Ghost Signal Mitigation (`isMitigated`)
+
+**Root Cause**: When structures are burned via `PendingTradeManager`, the `direction` field may be undefined (lost during `PendingTrade` mapping). Checking `direction` in `isMitigated` caused valid structures to not be filtered, allowing ghost re-entries.
+
+**Fix**: `isMitigated` checks **ONLY timestamp** — 1m candle timestamps are globally unique. Direction check removed entirely. `structureDetails` flows through Telegram pipeline end-to-end.
+
+**Rule**: `isMitigated` checks ONLY timestamp. Direction is NOT checked (may be lost during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
+
+### 16.17 ❌ FORBIDDEN: Blind Order Execution After Human Approval (Latency Slippage)
+
+**Root Cause**: Bot received a setup, waited for user to click "Approve" in Telegram (5–60 seconds), and blindly submitted the order. On 1m timeframe, price moved enough to cross the calculated Stop-Loss. Bybit rejected the order with error [10001] "StopLoss should be greater/lower than base_price".
+
+**Fix**: Implemented Pre-flight Check. At the moment of "Approve" click, bot fetches `getLivePrice()`. If live price is already worse than the Stop-Loss — setup marked as DEAD, burned in DB, and order is not sent.
+
+**Rule**: Never trust a price from the past. Always validate SL against Live Price immediately before calling `submitOrder`.
+
+### 16.18 ❌ FORBIDDEN: Unprotected Concurrent `process()` Execution (Race Conditions)
+
+**Root Cause**: When 1m and 15m candles closed simultaneously, WebSockets triggered `process()` twice in the same millisecond. Bot created two clones of the same trade, sent duplicate buttons to Telegram, and when one was rejected — reset state to SCANNING, forgetting about the open position.
+
+**Fix**: Added mutex `private isProcessing: boolean` with try/finally lock around `process()`. Added State Guard: ignore Telegram clicks if bot is no longer in `ENTRY_STAGED`.
+
+**Rule**: Main strategy evaluation loop MUST be locked against parallel execution. State machine must strictly verify current status before any mutations.
+
+### 16.19 ❌ FORBIDDEN: Using `.find()` or `closedTime` for Bybit PnL Fetching
+
+**Root Cause**: With Adaptive Fractioning (partial closes), a trade generates multiple PnL records. Using `.find()` picked only the first record (losing remaining profit). Using non-existent `closedTime` field broke Bybit V5 API filter, returning empty array and falling back to fake local PnL calculation.
+
+**Fix**: Strictly use `p.createdTime`. Use `.filter().reduce()` to sum all PnL records where time >= `trade.openedAt`.
+
+**Rule**: PnL from partial closes is ALWAYS summed (reduce). Time field in Bybit V5 API (closed-pnl endpoint) is `createdTime` and `updatedTime`, never `closedTime`.
+
+### 16.20 ❌ FORBIDDEN: Force-Resetting State Without Checking Limit Orders
+
+**Root Cause**: ReconciliationLoop saw `IN_TRADE` status, saw position size = 0 on exchange, and forcibly reset bot to SCANNING. It ignored that a live Limit Order was still pending on exchange. This caused "amnesia" and duplicate signal spam.
+
+**Fix**: ReconciliationLoop first calls `getActiveOrders`. If any Limit order exists (status `New` or `PartiallyFilled`), state reset is blocked.
+
+**Rule**: Absence of position (size = 0) does NOT mean absence of trade. ALWAYS check active Limit orders before force-resetting state machine.
+
+### 16.21 ❌ FORBIDDEN: Unformatted QTY in Partial Closes (Adaptive Fractioning)
+
+**Root Cause**: Closing 25% of position produced fractional quantities (e.g., 0.7875). Bybit rejected Market Reduce-Only orders with "Invalid quantity precision", leaving position unmanaged and unprotected.
+
+**Fix**: Any calculated close quantity is strictly passed through `formatQuantity(qty, instrument.qtyStep)`. Added check: if qty < minOrderQty, round up to minimum lot size.
+
+**Rule**: NO trade or partial close is sent to exchange without formatting against instrument's `qtyStep` and checking `minOrderQty`.
+
+---
+
+_Last updated: 2026-10-09. All 240 tests green. Build passes. Enterprise-ready._
+
+_Last updated: 2026-10-09. All 240 tests green. Build passes. Enterprise-ready._
