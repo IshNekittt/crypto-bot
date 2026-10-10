@@ -51,6 +51,7 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
+    enableHealthcheckServer: false,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }

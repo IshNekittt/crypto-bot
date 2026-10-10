@@ -74,8 +74,9 @@ describe('ReconciliationLoop', () => {
     enableSniperMode: false,
     backtestDays: 60,
     useLocalCacheOnly: false,
-    maxWorkingCapital: 0,
-    };
+maxWorkingCapital: 0,
+    enableHealthcheckServer: false,
+};
 
     reconciliation = new ReconciliationLoop(mockSource, mockDb, mockEngines, mockConfig);
   });

@@ -743,6 +743,7 @@ docker compose up -d
 | **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                                           |
 | **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance.              |
 | **USE_LOCAL_CACHE_ONLY**           |          |          `false`          | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys. |
+| **ENABLE_HEALTHCHECK_SERVER**      |          |          `false`          | Enable Express health check server for cloud platforms (e.g., Render.com). Default `false` for security (Secure Mode). **Required `true` on Render.com.** |
 
 ---
 
@@ -851,6 +852,9 @@ LOG_LEVEL=info
 DATA_DIR=data
 USE_LOCAL_CACHE_ONLY=true
 
+# Health Check
+ENABLE_HEALTHCHECK_SERVER=false
+
 # Backup
 BACKUP_PASSWORD=your_backup_encryption_password_here
 
@@ -937,6 +941,9 @@ LOG_LEVEL=info
 DATA_DIR=data
 USE_LOCAL_CACHE_ONLY=true
 
+# Health Check
+ENABLE_HEALTHCHECK_SERVER=false
+
 # Backup
 BACKUP_PASSWORD=your_backup_encryption_password_here
 ```
@@ -991,7 +998,7 @@ docker compose down                    # Stop + remove
 docker compose pull && docker compose up -d  # Update base image + restart
 ```
 
-**docker-compose.yml** (single service with resource limits):
+**docker-compose.yml** (single service with resource limits and log rotation):
 
 ```yaml
 services:
@@ -1003,12 +1010,19 @@ services:
     ports:
       - "3000:3000"
     stop_grace_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     deploy:
       resources:
         limits:
           cpus: "0.5"
           memory: 512M
 ```
+
+**Log Rotation**: Each service in docker-compose.yml **MUST** include a `logging` block with `driver: "json-file"` and options `max-size: "50m"`, `max-file: "3"`. This prevents "No space left on device" errors by capping log files at 50 MB each, keeping only the 3 most recent (total 150 MB per service). Server can run for years without manual log cleanup.
 
 - **No volumes** — fully stateless (Supabase for persistence)
 - **Port 3000** — health check (`GET /health`) for Render/load balancer
@@ -1181,6 +1195,7 @@ services:
      - `BYBIT_API_KEY`, `BYBIT_API_SECRET` (sync: false = secret)
      - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (sync: false)
      - `BACKUP_PASSWORD` (optional, for encrypted backups)
+     - `ENABLE_HEALTHCHECK_SERVER=true` **(REQUIRED for Render.com - enables health check HTTP server)**
 
 3. **Deploy** — auto-deploys on push to main
 

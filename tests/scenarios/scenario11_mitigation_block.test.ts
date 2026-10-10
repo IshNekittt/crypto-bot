@@ -38,6 +38,7 @@ const mockConfig: BotConfig = {
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
+    enableHealthcheckServer: false,
 };
 
 describe('Scenario11: Mitigation Block', () => {

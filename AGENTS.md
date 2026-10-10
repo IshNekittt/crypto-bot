@@ -180,7 +180,6 @@ All REST calls wrapped in `executeWithRetry()`:
 - **Step 1**: For each `IN_TRADE` engine → `getOpenPositions()` → if gone, force `SCANNING`.
   - **Limit Order Awareness** (`v2026-10-06`): Before force-reset `IN_TRADE → SCANNING`, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`) via `getActiveOrders()`. If active Limit orders exist, **skips force-reset** to prevent Race Condition and signal duplication.
 - **Step 2**: `db.getAllOpenTrades()` → for each, check exchange position → if missing, `reconcileWithTrade()` with zoneDetails for mitigatedZones tracking.
-  - **Limit Order Awareness** (`v2026-10-06`): Before force-reset, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`). If active Limit orders exist, **skips force-reset** to prevent signal duplication.
 - Idempotent, safe to run concurrently with WS events.
 
 ### 3.5 Accurate PnL with Funding — `src/engine/strategyEngine.ts` + `src/api/bybitClient.ts`
@@ -192,8 +191,8 @@ All REST calls wrapped in `executeWithRetry()`:
 3. **Match by symbol + `createdTime`** — filter all closedPnl records where `symbol === trade.symbol` AND `createdTime >= trade.openedAt` (Bybit closes position with a new order, different orderId).
 4. **Sum all `closedPnl` values** using `Decimal.reduce()` — critical for Adaptive Fractioning (partial closes) where one trade generates multiple closedPnl records.
 5. Use `avgExitPrice` from the record with latest `createdTime` (last partial close).
-5. Update `trades.pnl`, `trades.exit_price` in DB.
-6. Log: `Using exchange closedPnl (with funding/fees): -12.3456 vs calculated: -11.9876`.
+6. Update `trades.pnl`, `trades.exit_price` in DB.
+7. Log: `Using exchange closedPnl (with funding/fees): -12.3456 vs calculated: -11.9876`.
 8. **Fallback**: calculated PnL from executions if closedPnL unavailable.
 
 > **Important**: Uses `filter().reduce()` instead of `find()` to correctly sum PnL across multiple partial closes (Adaptive Fractioning).
@@ -1644,6 +1643,11 @@ services:
     ports:
       - "3000:3000"
     stop_grace_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -1651,7 +1655,7 @@ services:
           memory: 512M
 ```
 
-- **No volumes** — fully stateless (Supabase for persistence)
+**Log Rotation**: Each service in docker-compose.yml (bot and DB) **MUST** include a `logging` block with `driver: "json-file"` and options `max-size: "50m"`, `max-file: "3"`. This prevents "No space left on device" errors by capping log files at 50 MB each, keeping only the 3 most recent (total 150 MB per service). Server can run for years without manual log cleanup.
 - **Port 3000** — health check (`GET /health`) for Render/load balancer
 - **stop_grace_period: 30s** — matches `SIGTERM` handler in `index.ts`
 - **Resource limits**: 0.5 CPU / 512MB — fits Oracle Cloud Free Tier (ARM) or Render free tier

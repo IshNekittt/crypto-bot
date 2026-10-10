@@ -43,6 +43,7 @@ export interface BotConfig {
   readonly backtestDays: number;
   readonly maxWorkingCapital: number;
   readonly useLocalCacheOnly: boolean;
+  readonly enableHealthcheckServer: boolean;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -344,6 +345,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
 
   const useLocalCacheOnly = (optionalEnv(env, "USE_LOCAL_CACHE_ONLY") ?? "false").toLowerCase() === "true";
 
+  const enableHealthcheckServer = (optionalEnv(env, "ENABLE_HEALTHCHECK_SERVER") ?? "false").toLowerCase() === "true";
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, "BYBIT_API_KEY"),
@@ -387,5 +390,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     backtestDays,
     maxWorkingCapital,
     useLocalCacheOnly,
+    enableHealthcheckServer,
   };
 }

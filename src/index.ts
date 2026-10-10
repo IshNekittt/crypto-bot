@@ -72,8 +72,12 @@ async function main(): Promise<void> {
   // Initialize PostgreSQL database
   await db.initialize();
 
-  // Start health check server for Render
-  await startHealthServer();
+  // Start health check server for Render (conditional)
+  if (config.enableHealthcheckServer) {
+    await startHealthServer();
+  } else {
+    logger.info('Health check HTTP server disabled (Secure Mode)');
+  }
 
   const client = BybitClient.create(config);
   // Set Telegram notifier for global rate limit alerts

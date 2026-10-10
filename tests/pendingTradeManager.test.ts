@@ -43,8 +43,9 @@ describe('PendingTradeManager', () => {
     sniperDisplacementMultiplier: undefined,
     backtestDays: 60,
     useLocalCacheOnly: false,
-    maxWorkingCapital: 0,
-  };
+maxWorkingCapital: 0,
+    enableHealthcheckServer: false,
+};
 
   beforeEach(() => {
     sendMessageMock = jest.fn().mockResolvedValue({ message_id: 12345 });
