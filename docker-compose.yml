@@ -18,6 +18,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - smc-network
     # Без проброса портов наружу! Доступ только внутри сети Docker.
@@ -41,6 +46,11 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - smc-network
     # Порт 3000 не пробрасываем - бот stateless, healthcheck через curl на 127.0.0.1:3000 внутри контейнера
@@ -62,6 +72,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - smc-network
 
@@ -84,6 +99,11 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - smc-network
 
