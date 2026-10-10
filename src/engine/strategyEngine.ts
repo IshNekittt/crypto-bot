@@ -45,11 +45,22 @@ function parseClosedPositions(payload: unknown, ownSymbol: string): ClosedPositi
   for (const item of payload.data) {
     if (!isRecord(item)) continue;
     if (item.symbol !== ownSymbol) continue;
-    const size = Number(item.size);
-    const isOpen = Number.isFinite(size) && size > 0 && item.side !== 'None';
-    if (isOpen) continue;
-    const rawPnl = item.closedPnl ?? item.curRealisedPnl;
-    events.push({ pnl: typeof rawPnl === 'string' ? rawPnl : null });
+
+    // Check if position size is 0 or side is None (handles string sizes like "0", "0.0000")
+    const sizeStr = String(item.size ?? '0');
+    let isZeroSize = false;
+    try {
+      isZeroSize = new Decimal(sizeStr).isZero();
+    } catch {
+      isZeroSize = Number(sizeStr) === 0;
+    }
+
+    const isClosedSide = item.side === 'None' || !item.side;
+
+    if (isZeroSize || isClosedSide) {
+      const rawPnl = item.closedPnl ?? item.curRealisedPnl;
+      events.push({ pnl: typeof rawPnl === 'string' ? rawPnl : null });
+    }
   }
   return events;
 }
@@ -801,36 +812,70 @@ export class StrategyEngine {
   private async executeStagedEntry(): Promise<void> {
     if (!this.plan) return;
 
-    logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry`);
-    const result = await this.deps.executionEngine.execute(this.plan);
-    if (!result.ok) {
-      this.transition(StrategyState.SCANNING);
-      return;
+    // Pre-flight check: validate live price against SL
+    const livePriceStr = this.getLivePrice();
+    if (livePriceStr) {
+      const currentPriceDecimal = new Decimal(livePriceStr);
+      const slDecimal = new Decimal(this.plan.stopLoss);
+      const isLong = this.plan.side === 'Buy';
+
+      const isDead = isLong
+        ? currentPriceDecimal.lte(slDecimal)
+        : currentPriceDecimal.gte(slDecimal);
+
+      if (isDead) {
+        logger.warn(
+          `[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already breached SL (${this.plan.stopLoss}) for ${this.plan.side}. Aborting & burning.`
+        );
+        this.burnSetup(this.plan);
+        this.plan = null;
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
     }
 
-    await this.deps.db.openTrade({
-      id: result.orderId,
-      symbol: this.symbol,
-      scenario_id: this.plan.scenarioId ?? null,
-      entry_price: this.plan.entryPrice,
-      sl_price: this.plan.stopLoss,
-      tp_price: this.plan.takeProfit,
-      qty: this.plan.qty,
-      reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
-      opened_at: Date.now(),
-      side: this.plan.side,
-      zone_type: this.plan.zoneDetails?.type ?? null,
-      zone_top: this.plan.zoneDetails?.top?.toString() ?? null,
-      zone_bottom: this.plan.zoneDetails?.bottom?.toString() ?? null,
-      zone_timeframe: this.plan.zoneDetails?.timeframe ?? null,
-      zone_direction: this.plan.zoneDetails?.direction ?? null,
-      zone_timestamp: this.plan.zoneDetails?.timestamp ?? null,
-      order_type: this.plan.orderType,
-      limit_price: this.plan.limitPrice,
-      order_id: result.orderId,
-    });
-    logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
-    this.transition(StrategyState.IN_TRADE);
+    logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry`);
+    try {
+      const result = await this.deps.executionEngine.execute(this.plan);
+      if (!result.ok) {
+        logger.warn(`[${this.symbol}] Auto-trading order rejected: ${result.reason}. Burning setup.`);
+        this.burnSetup(this.plan);
+        this.plan = null;
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
+
+      await this.deps.db.openTrade({
+        id: result.orderId,
+        symbol: this.symbol,
+        scenario_id: this.plan.scenarioId ?? null,
+        entry_price: this.plan.entryPrice,
+        sl_price: this.plan.stopLoss,
+        tp_price: this.plan.takeProfit,
+        qty: this.plan.qty,
+        reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
+        opened_at: Date.now(),
+        side: this.plan.side,
+        zone_type: this.plan.zoneDetails?.type ?? null,
+        zone_top: this.plan.zoneDetails?.top?.toString() ?? null,
+        zone_bottom: this.plan.zoneDetails?.bottom?.toString() ?? null,
+        zone_timeframe: this.plan.zoneDetails?.timeframe ?? null,
+        zone_direction: this.plan.zoneDetails?.direction ?? null,
+        zone_timestamp: this.plan.zoneDetails?.timestamp ?? null,
+        order_type: this.plan.orderType,
+        limit_price: this.plan.limitPrice,
+        order_id: result.orderId,
+      });
+      logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
+      this.transition(StrategyState.IN_TRADE);
+    } catch (error) {
+      logger.error(`[${this.symbol}] Exception during auto-trading execution: ${error instanceof Error ? error.message : String(error)}. Burning setup.`);
+      if (this.plan) {
+        this.burnSetup(this.plan);
+      }
+      this.plan = null;
+      this.transition(StrategyState.SCANNING);
+    }
   }
 
   private async queueForApproval(result: { levels: any; scenario?: any; reason: string; structureDetails?: any }): Promise<void> {
@@ -878,6 +923,15 @@ export class StrategyEngine {
       
       const exitPriceStr = this.getLivePrice() ?? trade.entryPrice;
       await this.deps.db.closeTrade(trade.id, pnlString, exitPriceStr, Date.now(), 'RECONCILIATION');
+
+      // Cooldown after SL hit via reconciliation
+      if (new Decimal(pnlString).lt(0)) {
+        const ltfMinutes = Number(this.deps.config.ltfTimeframe);
+        const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+        this.cooldownUntil = Date.now() + cooldownMs;
+        const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+        logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);
+      }
     }
     logger.warn(`${this.symbol}: reconciliation force-reset IN_TRADE → SCANNING (no position on exchange)`);
     this.transition(StrategyState.SCANNING);
@@ -1009,6 +1063,15 @@ export class StrategyEngine {
       // Determine close reason from PnL sign
       const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
       await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
+
+      // Cooldown after SL hit via reconciliation
+      if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
+        const ltfMinutes = Number(this.deps.config.ltfTimeframe);
+        const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+        this.cooldownUntil = Date.now() + cooldownMs;
+        const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+        logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);
+      }
 
       // Notify Telegram
       if (finalPnlString !== null) {

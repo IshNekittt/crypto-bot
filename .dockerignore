@@ -9,6 +9,8 @@ npm-debug.log*
 .DS_Store
 tests
 jest.config.js
-AGENTS.md
-smc_full_guide.md
 *.sh
+*.csv
+*.csv.enc
+*.log
+coverage

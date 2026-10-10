@@ -8,9 +8,12 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Tests](https://img.shields.io/badge/Tests-240%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Version](https://img.shields.io/badge/Version-v2026--10--10-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
+
+**v2026-10-10**: Hardened auto-trading pre-flight checks, robust Bybit V5 position parsing, reconciliation cooldown, and fail-fast burnSetup guarantees.
 
 </div>
 
@@ -83,11 +86,15 @@ const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 
 **Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
 
-### Pre-flight SL Check at Approval — v2026-10-03 (Updated v2026-10-05)
+### Pre-flight SL Check (Manual & Auto-Trading) — v2026-10-03 (Hardened v2026-10-10)
 
-**Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price).
+**Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price). The same risk exists in auto-trading mode (`AUTO_TRADING=true`) where `executeStagedEntry()` fires immediately after signal detection.
 
-**Solution**: **Pre-flight SL validation** at approval time — before sending order to ExecutionEngine:
+**Solution**: **Pre-flight SL validation** at two points:
+1. **At approval time** (manual mode): Before sending order to ExecutionEngine (in `StrategyEngine.handleTradeApproval`)
+2. **At auto-execution time** (auto mode): Inside `executeStagedEntry()` before calling `executionEngine.execute()`
+
+Both paths fetch `getLivePrice()` and validate against the calculated SL. If live price has crossed the SL, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next minute.
 
 ```typescript
 const currentPrice = this.feedLtf.getCurrentLivePrice();
@@ -557,11 +564,11 @@ _Full implementation details: [AGENTS.md §7.16](AGENTS.md#716-mitigated-zones-f
 
 ---
 
-## 🛡 Cooldown Logic Fix — v2026-09-24 (Updated v2026-09-27: Dynamic Timeframe Support)
+## 🛡 Cooldown Logic Fix — v2026-09-24 (Updated v2026-09-27: Dynamic Timeframe Support, **v2026-10-10: Reconciliation Cooldown**)
 
 **Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation. Also, the cooldown was hardcoded to 15-minute timeframe (`16 * 15 * 60 * 1000`), breaking when LTF_TIMEFRAME changed.
 
-**Fix**: Cooldown ONLY after LOSS (revenge trading protection). WIN trades have NO cooldown. Cooldown duration is now fully dynamic: `COOLDOWN_CANDLES × LTF_TIMEFRAME` minutes.
+**Fix**: Cooldown ONLY after LOSS (revenge trading protection). WIN trades have NO cooldown. Cooldown duration is now fully dynamic: `COOLDOWN_CANDLES × LTF_TIMEFRAME` minutes. **Additionally, cooldown is now triggered not only on WS position close but also when a trade is closed via ReconciliationLoop (`reconcile()` / `reconcileWithTrade()`) with a negative PnL.**
 
 ```typescript
 // executionSimulator.ts (backtest)
@@ -569,13 +576,22 @@ const ltfMinutes = Number(config.ltfTimeframe);
 const cooldownMs = config.cooldownCandles * ltfMinutes * 60 * 1000;
 cooldownUntil: netPnl.lt(0) ? candle.timestamp + cooldownMs : 0,
 
-// strategyEngine.ts (live)
+// strategyEngine.ts (live) — on WS position close
 if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
   const ltfMinutes = Number(this.deps.config.ltfTimeframe);
   const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
   this.cooldownUntil = Date.now() + cooldownMs;
   const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
   logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h.`);
+}
+
+// strategyEngine.ts (live) — on ReconciliationLoop close (reconcile / reconcileWithTrade)
+if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
+  const ltfMinutes = Number(this.deps.config.ltfTimeframe);
+  const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+  this.cooldownUntil = Date.now() + cooldownMs;
+  const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+  logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);
 }
 ```
 

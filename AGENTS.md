@@ -197,6 +197,30 @@ All REST calls wrapped in `executeWithRetry()`:
 
 > **Important**: Uses `filter().reduce()` instead of `find()` to correctly sum PnL across multiple partial closes (Adaptive Fractioning).
 
+### 3.6 Robust Bybit V5 Position Parsing — `src/engine/strategyEngine.ts:42-55`
+
+**Problem**: Bybit V5 WebSocket position updates send position sizes as strings (`"0"`, `"0.000"`, `"0.0000"`, `""`) or side `'None'`. Native `Number()` comparison can fail due to precision or string falsiness; `new Decimal(sizeStr).isZero()` with fallback is required.
+
+**Solution**: In `parseClosedPositions()` (`src/engine/strategyEngine.ts:42-55`), position closure is detected by:
+
+```typescript
+const sizeStr = String(item.size ?? '0');
+let isZeroSize = false;
+try {
+  isZeroSize = new Decimal(sizeStr).isZero();
+} catch {
+  isZeroSize = Number(sizeStr) === 0;
+}
+
+const isClosedSide = item.side === 'None' || !item.side;
+
+if (isZeroSize || isClosedSide) {
+  // Position is closed
+}
+```
+
+**Rule**: Always parse Bybit V5 position sizes using `Decimal.isZero()` with fallback — never rely on `Number()` alone.
+
 ### 3.6 Guaranteed State Reset on Position Close — `src/engine/strategyEngine.ts:447-556` — **NEW v2026-10-08**
 
 **Problem**: When `onExchangePositionClosed` processes a position close event (WS execution), any failure in `getClosedPnl()`, DB writes, or Telegram notifications would leave the engine stuck in `IN_TRADE` until the ReconciliationLoop forcibly reset it (up to 10 minutes).
@@ -381,13 +405,18 @@ async setTradingStop(request: { symbol: string; stopLoss?: string; takeProfit?: 
 
 **Invariant**: `amendOrder` is **never** called for `IN_TRADE` positions. Only `setTradingStop` with `positionIdx: 0`.
 
-### 5.3 Pre-flight SL Check at Approval — **NEW v2026-10-03** (Updated v2026-10-05: with burnSetup)
+### 5.3 Pre-flight SL Check at Approval & Auto-Execution — **NEW v2026-10-03** (Hardened v2026-10-10)
 
-**Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price).
+**Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price). The same risk exists in auto-trading mode (`AUTO_TRADING=true`) where `executeStagedEntry()` fires immediately after signal detection.
 
-**Solution**: **Pre-flight SL validation** at approval time — before sending order to ExecutionEngine (in `StrategyEngine.handleTradeApproval`):
+**Solution**: **Pre-flight SL validation** at two points:
+1. **At approval time** (manual mode): Before sending order to ExecutionEngine (in `StrategyEngine.handleTradeApproval`)
+2. **At auto-execution time** (auto mode): Inside `executeStagedEntry()` before calling `executionEngine.execute()`
+
+Both paths fetch `getLivePrice()` and validate against the calculated SL. If live price has crossed the SL, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`.
 
 ```typescript
+// In handleTradeApproval() AND executeStagedEntry()
 const currentPrice = this.feedLtf.getCurrentLivePrice();
 if (currentPrice) {
   const currentPriceDecimal = new Decimal(currentPrice);
@@ -396,18 +425,20 @@ if (currentPrice) {
 
   if (isLong && currentPriceDecimal.lte(slDecimal)) {
     logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
-    this.burnSetup(this.plan); // Burn zone + structure to prevent spam
+    this.burnSetup(this.plan);
     this.transition(StrategyState.SCANNING);
     return;
   }
   if (!isLong && currentPriceDecimal.gte(slDecimal)) {
     logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
-    this.burnSetup(this.plan); // Burn zone + structure to prevent spam
+    this.burnSetup(this.plan);
     this.transition(StrategyState.SCANNING);
     return;
   }
 }
 ```
+
+**Fail-Fast on Execution Failure** (auto-trading path, `executeStagedEntry`): If `executionEngine.execute()` returns `{ ok: false }` or throws, `burnSetup(this.plan)` is **guaranteed** to be called before transitioning to `SCANNING`. This prevents rejection loops (e.g., Bybit error [10001] spam) by immediately burning the zone/structure so the bot doesn't re-detect the dead setup on the next candle.
 
 If price has crossed the SL during approval wait, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next candle.
 
@@ -1163,11 +1194,11 @@ mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
 
 ---
 
-### 7.17 Cooldown Logic Fix — **NEW v2026-09-24** (Updated v2026-09-27: Dynamic Timeframe Support)
+### 7.17 Cooldown Logic Fix — **NEW v2026-09-24** (Updated v2026-09-27: Dynamic Timeframe Support, **v2026-10-10: Reconciliation Cooldown**)
 
 **Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation. Also, the cooldown was hardcoded to 15-minute timeframe (`16 * 15 * 60 * 1000`), breaking when `LTF_TIMEFRAME` changed.
 
-**Fix**: Cooldown ONLY after LOSS (revenge trading protection). After WIN → no cooldown. Cooldown duration is now fully dynamic: `COOLDOWN_CANDLES × LTF_TIMEFRAME` minutes.
+**Fix**: Cooldown ONLY after LOSS (revenge trading protection). After WIN → no cooldown. Cooldown duration is now fully dynamic: `COOLDOWN_CANDLES × LTF_TIMEFRAME` minutes. **Additionally, cooldown is now triggered not only on WS position close but also when a trade is closed via ReconciliationLoop (`reconcile()` / `reconcileWithTrade()`) with a negative PnL.**
 
 ```typescript
 // executionSimulator.ts (backtest)
@@ -1175,7 +1206,7 @@ const ltfMinutes = Number(config.ltfTimeframe);
 const cooldownMs = config.cooldownCandles * ltfMinutes * 60 * 1000;
 cooldownUntil: netPnl.lt(0) ? candle.timestamp + cooldownMs : 0;
 
-// strategyEngine.ts (live)
+// strategyEngine.ts (live) — on WS position close
 if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
   const ltfMinutes = Number(this.deps.config.ltfTimeframe);
   const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
@@ -1183,15 +1214,18 @@ if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
   const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
   logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h.`);
 }
+
+// strategyEngine.ts (live) — on ReconciliationLoop close (reconcile / reconcileWithTrade)
+if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
+  const ltfMinutes = Number(this.deps.config.ltfTimeframe);
+  const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+  this.cooldownUntil = Date.now() + cooldownMs;
+  const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+  logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);
+}
 ```
 
-**Rule**: Cooldown = `COOLDOWN_CANDLES` candles (default 16) ONLY after LOSS. WIN = no cooldown, ride the trend.
-**Examples**:
-- `LTF_TIMEFRAME=15`, `COOLDOWN_CANDLES=16` → 4 hours (default)
-- `LTF_TIMEFRAME=5`, `COOLDOWN_CANDLES=16` → 1h 20min
-- `LTF_TIMEFRAME=60`, `COOLDOWN_CANDLES=16` → 16 hours
-
----
+**Rule**: Cooldown = `COOLDOWN_CANDLES` candles (default 16) ONLY after LOSS. WIN = no cooldown, ride the trend. Triggered by WS position close, ReconciliationLoop, or `reconcileWithTrade()`.
 
 ### 7.18 Backtest Report Enhancements — **NEW v2026-09-24**
 
@@ -1585,15 +1619,17 @@ docker compose up -d
 
 22. **DB Pool Safety** — All DB calls MUST use `const client = await pool.connect(); try {...} finally { client.release(); }`. Connection leaks are forbidden. Every method in `PostgresDatabase` follows this pattern.
 
-23. **Execution Fail-Fast** — On ANY error in `executionEngine.execute()` or `db.openTrade()`, the bot MUST call `burnSetup()` (to prevent spam cycles) and transition to `SCANNING` in a `finally` block — state machine must never stall in `IN_TRADE`.
+23. **Execution Fail-Fast** — On ANY error in `executionEngine.execute()` or `db.openTrade()`, the bot MUST call `burnSetup()` (to prevent spam cycles) and transition to `SCANNING` in a `finally` block — state machine must never stall in `IN_TRADE`. **Applies to BOTH manual approval (`handleTradeApproval`) and auto-trading (`executeStagedEntry`) paths.**
 
-24. **Pre-flight Slippage Guard** — Before sending order to exchange, bot MUST fetch `getLivePrice()`. If live price has crossed SL during approval wait, setup is marked DEAD, burned, and cancelled. No order is sent.
+24. **Pre-flight Slippage Guard** — Before sending order to exchange, bot MUST fetch `getLivePrice()`. If live price has crossed SL during approval wait, setup is marked DEAD, burned, and cancelled. No order is sent. **Enforced in BOTH `handleTradeApproval()` (manual) and `executeStagedEntry()` (auto-trading).**
 
 25. **Ghost Signal Prevention** — `isMitigated` checks ONLY timestamp (1m candle timestamps are unique). Direction is NOT checked (may be lost during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
 
 26. **PnL Summation (Adaptive Fractioning)** — PnL calculated via `.filter().reduce()` on `closedPnl` records where `symbol` matches AND `createdTime >= trade.openedAt`. This correctly sums all partial closes.
 
 27. **Limit Order Awareness** — ReconciliationLoop MUST NOT reset `IN_TRADE` → `SCANNING` if active Limit orders exist (`status === 'New' | 'PartiallyFilled'`). Checked via `getOpenOrders()` before force-reset.
+
+28. **Position Size Zero-Check** — WebSocket position closure detection MUST parse `item.size` using `Decimal.isZero()` with fallback to handle Bybit V5 formatted strings (`"0"`, `"0.0000"`, `""`). Prevents lingering `IN_TRADE` states.
 
 ---
 
@@ -1908,6 +1944,33 @@ docker compose up -d --build
 **Fix**: Any calculated close quantity is strictly passed through `formatQuantity(qty, instrument.qtyStep)`. Added check: if qty < minOrderQty, round up to minimum lot size.
 
 **Rule**: NO trade or partial close is sent to exchange without formatting against instrument's `qtyStep` and checking `minOrderQty`.
+
+### 16.22 ❌ FORBIDDEN: Bypassing Pre-flight and burnSetup in AUTO_TRADING mode
+
+**Root Cause**: In auto-trading mode (`AUTO_TRADING=true`), `executeStagedEntry()` was executing orders without a pre-flight SL check and without calling `burnSetup()` on execution failure. This caused a rejection loop: Bybit rejected orders with error [10001] "StopLoss should be greater/lower than base_price", the bot didn't burn the setup, and on the next 1m candle the same dead setup was re-detected and re-submitted. On 2026-10-10, LINKUSDT generated 60+ rejected orders in 5 minutes.
+
+**Fix**: Added Pre-flight Check in `executeStagedEntry()` — fetches `getLivePrice()` and validates against SL before calling `executionEngine.execute()`. Wrapped execution in try/catch; on any failure (`!result.ok` or exception), `burnSetup()` is called and state transitions to `SCANNING`.
+
+**Rule**: In AUTO_TRADING mode, ALWAYS run pre-flight SL check before `executionEngine.execute()`. On ANY failure, call `burnSetup()` and transition to `SCANNING` — never retry a dead setup.
+
+### 16.23 ❌ FORBIDDEN: Native Number/Loose equality for Bybit V5 WS Position Size
+
+**Root Cause**: Bybit V5 WebSocket position updates send position sizes as strings (`"0"`, `"0.000"`, `"0.0000"`, `""`) or side `'None'`. Native `Number()` comparison can fail due to precision or string falsiness (e.g., `Number("0.0000")` is `0` but string truthiness checks may fail). This caused position closure events to be missed, leaving the engine stuck in `IN_TRADE` for up to 5 minutes until ReconciliationLoop forced a reset.
+
+**Fix**: In `parseClosedPositions()` (`src/engine/strategyEngine.ts:42-55`), position closure is detected using `Decimal.isZero()` with fallback:
+```typescript
+const sizeStr = String(item.size ?? '0');
+let isZeroSize = false;
+try {
+  isZeroSize = new Decimal(sizeStr).isZero();
+} catch {
+  isZeroSize = Number(sizeStr) === 0;
+}
+const isClosedSide = item.side === 'None' || !item.side;
+if (isZeroSize || isClosedSide) { /* position closed */ }
+```
+
+**Rule**: Never use `Number()` alone for Bybit V5 position sizes. Always parse via `Decimal.isZero()` with fallback. Treat `side === 'None'` or missing side as closed.
 
 ---
 
