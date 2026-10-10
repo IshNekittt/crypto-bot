@@ -1496,7 +1496,7 @@ CREATE TABLE symbol_state (
 **Connection Pool**: `max=5`, `idleTimeout=10s`, `keepAlive=true` (Supabase compatibility).
 **Leak Proof**: Every method uses `const client = await pool.connect(); try {...} finally { client.release() }`.
 
-### 10.1 CRUD Operations Audit — **v2026-10-05**
+### 9.1 CRUD Operations Audit — **v2026-10-05**
 
 | Operation | SQL / Code | Status |
 |-----------|------------|--------|
@@ -1583,7 +1583,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (231 tests, all green)
+npm test             # jest (240 tests, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -1631,11 +1631,17 @@ docker compose up -d
 
 28. **Position Size Zero-Check** — WebSocket position closure detection MUST parse `item.size` using `Decimal.isZero()` with fallback to handle Bybit V5 formatted strings (`"0"`, `"0.0000"`, `""`). Prevents lingering `IN_TRADE` states.
 
+29. **Live Price Fallback** — Before any pre-flight check, bot MUST fetch `getLivePrice()` with fallback to `feedLtf.getLastClosed()?.close`. If live tick unavailable, last closed candle close is used so guards NEVER silently skip validation.
+
+30. **Limit Price Precision** — Limit order prices MUST be formatted using `formatPrice(idealEntry, instrument.tickSize)` from `utils/precision.ts`. NEVER use `toFixed()` or hardcoded decimal places. Instrument's `tickSize` is the single source of truth for price precision.
+
+31. **Zero-Latency Hot Path** — In automated trading (`AUTO_TRADING=true`), no synchronous/blocking external messenger I/O is permitted prior to order submission. `notifySetupFound` must be fire-and-forget AFTER `executionEngine.execute()` succeeds, never awaited before order submission. The hot path `executeStagedEntry()` → `executionEngine.execute()` must remain zero-latency.
+
 ---
 
 ## 14. DOCKER & DEPLOYMENT
 
-### 15.1 Dockerfile (Multi-stage, Node 26)
+### 14.1 Dockerfile (Multi-stage, Node 26)
 
 ```dockerfile
 # builder: compiles TS → dist/
@@ -1667,7 +1673,7 @@ CMD ["node", "dist/index.js"]
 - `TZ=UTC` — consistent timestamps for SMC killzones
 - `EXPOSE 3000` — health check endpoint for Render/load balancer
 
-### 15.2 docker-compose.yml (Single Service for Render/Oracle Cloud)
+### 14.2 docker-compose.yml (Single Service for Render/Oracle Cloud)
 
 ```yaml
 services:
@@ -1697,7 +1703,7 @@ services:
 - **Resource limits**: 0.5 CPU / 512MB — fits Oracle Cloud Free Tier (ARM) or Render free tier
 - **Single `.env` file** with all configuration
 
-### 15.3 Render Deployment (Recommended)
+### 14.3 Render Deployment (Recommended)
 
 ```yaml
 # render.yaml
@@ -1737,7 +1743,7 @@ services:
 - **Auto-deploy** on push to main
 - **Environment variables** via Render dashboard (secrets for keys)
 
-### 15.4 Local Development Commands
+### 14.4 Local Development Commands
 
 ```bash
 # Build image
@@ -1764,7 +1770,7 @@ docker rm smc-bot
 docker compose up -d --build
 ```
 
-### 15.5 Health Checks & Monitoring
+### 14.5 Health Checks & Monitoring
 
 | Endpoint | Purpose | Expected Response |
 |----------|---------|-------------------|
@@ -1972,8 +1978,32 @@ if (isZeroSize || isClosedSide) { /* position closed */ }
 
 **Rule**: Never use `Number()` alone for Bybit V5 position sizes. Always parse via `Decimal.isZero()` with fallback. Treat `side === 'None'` or missing side as closed.
 
+### 16.24 ❌ FORBIDDEN: Bypassing Pre-flight, TP proximity, or burnSetup in AUTO_TRADING mode
+
+**Root Cause**: In auto-trading mode (`AUTO_TRADING=true`), `executeStagedEntry()` was executing orders without a pre-flight SL check, TP proximity guard, slippage guard, or dynamic Market/Limit re-evaluation at the live tick. This caused a rejection loop: Bybit rejected orders with error [10001] "StopLoss should be greater/lower than base_price", the bot didn't burn the setup, and on the next 1m candle the same dead setup was re-detected and re-submitted. On 2026-10-10, LINKUSDT generated 60+ rejected orders in 5 minutes.
+
+**Fix**: Added full pre-execution validation suite in `executeStagedEntry()` (`src/engine/strategyEngine.ts`):
+1. Pre-flight SL breach check — abort if live price already breached SL
+2. Pre-flight TP reached check — abort if live price already reached TP  
+3. Slippage Guard (>0.2% toward TP) — abort if price moved too far toward TP
+4. Dynamic Market vs Limit re-evaluation at live tick using `smartEntryThresholdPct`
+5. Fail-fast `burnSetup()` on any execution rejection or exception
+
+**Rule**: In AUTO_TRADING mode, ALWAYS run full pre-flight validation suite before `executionEngine.execute()`. On ANY failure, call `burnSetup()` and transition to `SCANNING` — never retry a dead setup.
+
+### 16.25 ❌ FORBIDDEN: Hardcoding decimal precision (toFixed) for Limit order prices
+
+**Root Cause**: Limit order prices were formatted using `idealEntry.toFixed(8)`, which hardcodes 8 decimal places. This violates Bybit's per-instrument `tickSize` precision requirements (anti-pattern 16.3). For instruments with different tick sizes (e.g., 0.01, 0.001, 0.0001), hardcoded 8 decimals either truncates valid precision or produces invalid prices rejected by the exchange.
+
+**Fix**: Use `formatPrice(idealEntry, instrument.tickSize)` from `src/utils/precision.ts` which respects the instrument's `tickSize` for proper rounding:
+```typescript
+const limitPrice = useMarket
+  ? null
+  : formatPrice(idealEntry, new Decimal(instrument.tickSize));
+```
+
+**Rule**: NEVER hardcode decimal precision with `toFixed()` for prices. ALWAYS use `formatPrice(value, tickSize)` from `utils/precision.ts` which respects the instrument's `tickSize`.
+
 ---
 
-_Last updated: 2026-10-09. All 240 tests green. Build passes. Enterprise-ready._
-
-_Last updated: 2026-10-09. All 240 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-10. All 240 tests green. Build passes. Enterprise-ready._

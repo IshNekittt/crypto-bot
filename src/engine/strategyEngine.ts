@@ -12,6 +12,7 @@ import { InstrumentInfo, StrategyState, Timeframe, BotConfig, MitigatedZone, Mit
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { evaluateTradeManagement } from '../risk/tradeManager';
+import { formatPrice } from '../utils/precision';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
 
@@ -549,14 +550,14 @@ export class StrategyEngine {
       }
       logger.info(`${this.symbol}: IN_TRADE → SCANNING (position close event)`);
 
-      // Set cooldown after SL hit (cooldownCandles * ltfTimeframe minutes)
-      if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-        const ltfMinutes = Number(this.deps.config.ltfTimeframe);
-        const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
-        this.cooldownUntil = Date.now() + cooldownMs;
-        const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
-        logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h (${this.deps.config.cooldownCandles} candles × ${ltfMinutes}m).`);
-      }
+      // Set cooldown after SL hit (cooldownCandles * executionTimeframe minutes)
+      // In Sniper mode, execution timeframe is 1m; in Classic mode, it's LTF (15m/5m/etc.)
+      const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
+      const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
+      this.cooldownUntil = Date.now() + cooldownMs;
+      const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+      const tfLabel = this.deps.config.enableSniperMode ? '1m (Sniper)' : `${tradeTfMinutes}m`;
+      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h (${this.deps.config.cooldownCandles} candles × ${tfLabel}).`);
     } catch (error) {
       logger.error(`[${this.symbol}] Failed to process closed position: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -778,24 +779,23 @@ export class StrategyEngine {
         `${this.symbol}: ENTRY_STAGED plan qty=${riskResult.plan.qty} entry≈${riskResult.plan.entryPrice} sl=${riskResult.plan.stopLoss} tp=${riskResult.plan.takeProfit} [${result.scenario?.name}]`,
       );
 
-      // Send setup found notification (always)
-      await this.deps.notifier.notifySetupFound(
-        this.symbol,
-        result.levels.entry,
-        result.levels.stopLoss,
-        result.levels.takeProfit,
-        result.scenario?.id ?? 0,
-        result.reason,
-      );
-
       this.transition(StrategyState.ENTRY_STAGED);
 
       // Handle AUTO_TRADING logic
       if (this.deps.autoTrading) {
-        // Auto mode: execute immediately
+        // ZERO-LATENCY AUTO PATH: Do NOT call or await Telegram before execution!
+        // Immediately execute on exchange
         await this.executeStagedEntry();
       } else {
         // Manual mode: queue for approval
+        await this.deps.notifier.notifySetupFound(
+          this.symbol,
+          result.levels.entry,
+          result.levels.stopLoss,
+          result.levels.takeProfit,
+          result.scenario?.id ?? 0,
+          result.reason,
+        );
         await this.queueForApproval(result);
       }
       return;
@@ -812,26 +812,65 @@ export class StrategyEngine {
   private async executeStagedEntry(): Promise<void> {
     if (!this.plan) return;
 
-    // Pre-flight check: validate live price against SL
-    const livePriceStr = this.getLivePrice();
+    // Full pre-execution validation suite using live tick price
+    const livePriceStr = this.getLivePrice() ?? this.feedLtf.getLastClosed()?.close;
     if (livePriceStr) {
-      const currentPriceDecimal = new Decimal(livePriceStr);
-      const slDecimal = new Decimal(this.plan.stopLoss);
+      const livePrice = new Decimal(livePriceStr);
+      const sl = new Decimal(this.plan.stopLoss);
+      const tp = new Decimal(this.plan.takeProfit);
+      const entry = new Decimal(this.plan.entryPrice);
       const isLong = this.plan.side === 'Buy';
 
-      const isDead = isLong
-        ? currentPriceDecimal.lte(slDecimal)
-        : currentPriceDecimal.gte(slDecimal);
-
-      if (isDead) {
-        logger.warn(
-          `[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already breached SL (${this.plan.stopLoss}) for ${this.plan.side}. Aborting & burning.`
-        );
+      // 1. Pre-flight SL breach check
+      const slBreached = isLong ? livePrice.lte(sl) : livePrice.gte(sl);
+      if (slBreached) {
+        logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
         this.burnSetup(this.plan);
         this.plan = null;
         this.transition(StrategyState.SCANNING);
         return;
       }
+
+      // 2. Pre-flight TP reached check
+      const tpReached = isLong ? livePrice.gte(tp) : livePrice.lte(tp);
+      if (tpReached) {
+        logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already reached TP (${this.plan.takeProfit}). Aborting & burning.`);
+        this.burnSetup(this.plan);
+        this.plan = null;
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
+
+      // 3. Slippage Guard toward TP (0.2% max acceptable deviation toward target)
+      const priceMovedTowardTp = isLong ? livePrice.minus(entry) : entry.minus(livePrice);
+      if (priceMovedTowardTp.gt(0)) {
+        const deviationPct = priceMovedTowardTp.div(entry);
+        if (deviationPct.gt(0.002)) { // > 0.2%
+          logger.warn(`[${this.symbol}] Slippage Guard (Auto): Live price moved ${deviationPct.mul(100).toFixed(3)}% toward TP. R:R degraded. Aborting & burning.`);
+          this.burnSetup(this.plan);
+          this.plan = null;
+          this.transition(StrategyState.SCANNING);
+          return;
+        }
+      }
+
+      // 4. Dynamic Market vs Limit Re-evaluation at Live Tick
+      const idealEntry = new Decimal(this.plan.entryPrice);
+      const threshold = new Decimal(this.deps.config.smartEntryThresholdPct || 0.0015);
+      const priceDiffPct = idealEntry.minus(livePrice).div(idealEntry).abs();
+      const useMarket = priceDiffPct.lte(threshold);
+
+      // Create new PositionPlan with updated orderType and limitPrice (both are readonly)
+      // Use instrument's tickSize for proper price formatting (anti-pattern 16.3)
+      const limitPrice = useMarket
+        ? null
+        : formatPrice(idealEntry, new Decimal(this.deps.instrument.tickSize));
+
+      this.plan = {
+        ...this.plan,
+        orderType: useMarket ? 'Market' : 'Limit',
+        limitPrice,
+      };
     }
 
     logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry`);
@@ -868,6 +907,16 @@ export class StrategyEngine {
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
       this.transition(StrategyState.IN_TRADE);
+
+      // Fire-and-forget Telegram notification AFTER successful execution (non-blocking)
+      this.deps.notifier.notifySetupFound(
+        this.symbol,
+        this.plan.entryPrice,
+        this.plan.stopLoss,
+        this.plan.takeProfit,
+        this.plan.scenarioId ?? 0,
+        this.plan.scenarioId ? String(this.plan.scenarioId) : 'Auto',
+      ).catch(err => logger.error(`[${this.symbol}] Failed to send setup notification: ${err}`));
     } catch (error) {
       logger.error(`[${this.symbol}] Exception during auto-trading execution: ${error instanceof Error ? error.message : String(error)}. Burning setup.`);
       if (this.plan) {
@@ -924,10 +973,10 @@ export class StrategyEngine {
       const exitPriceStr = this.getLivePrice() ?? trade.entryPrice;
       await this.deps.db.closeTrade(trade.id, pnlString, exitPriceStr, Date.now(), 'RECONCILIATION');
 
-      // Cooldown after SL hit via reconciliation
+      // Cooldown after SL hit via reconciliation (uses execution timeframe: 1m for Sniper, LTF for Classic)
       if (new Decimal(pnlString).lt(0)) {
-        const ltfMinutes = Number(this.deps.config.ltfTimeframe);
-        const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
+        const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
         this.cooldownUntil = Date.now() + cooldownMs;
         const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
         logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);
@@ -1064,10 +1113,10 @@ export class StrategyEngine {
       const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
       await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
 
-      // Cooldown after SL hit via reconciliation
+      // Cooldown after SL hit via reconciliation (uses execution timeframe: 1m for Sniper, LTF for Classic)
       if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-        const ltfMinutes = Number(this.deps.config.ltfTimeframe);
-        const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
+        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
+        const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
         this.cooldownUntil = Date.now() + cooldownMs;
         const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
         logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);

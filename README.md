@@ -33,7 +33,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ---
 
-## 📊 Backtest Results (180 days, 3 symbols, all 11 scenarios)
+## 📊 Backtest Results (180 days, 3 symbols, Scenarios 1–11 Classic / Scenario 12 Sniper)
 
 | Symbol      | Final Balance | Net Profit   | Trades | Win Rate   | Max DD |
 | ----------- | ------------- | ------------ | ------ | ---------- | ------ |
@@ -86,15 +86,26 @@ const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 
 **Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
 
-### Pre-flight SL Check (Manual & Auto-Trading) — v2026-10-03 (Hardened v2026-10-10)
+### Pre-flight SL & TP Checks (Manual & Auto-Trading) — Hardened v2026-10-10
 
 **Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price). The same risk exists in auto-trading mode (`AUTO_TRADING=true`) where `executeStagedEntry()` fires immediately after signal detection.
 
-**Solution**: **Pre-flight SL validation** at two points:
+**Solution**: **Pre-flight SL & TP validation** at two points:
 1. **At approval time** (manual mode): Before sending order to ExecutionEngine (in `StrategyEngine.handleTradeApproval`)
 2. **At auto-execution time** (auto mode): Inside `executeStagedEntry()` before calling `executionEngine.execute()`
 
-Both paths fetch `getLivePrice()` and validate against the calculated SL. If live price has crossed the SL, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next minute.
+Both paths fetch `getLivePrice()` (with fallback to last closed candle) and validate against the calculated SL/TP:
+
+1. **Pre-flight SL breach check** — abort if live price already breached SL
+2. **Pre-flight TP reached check** — abort if live price already reached TP  
+3. **Slippage Guard (0.2% toward TP)** — abort if price moved >0.2% toward TP (R:R degraded)
+4. **Dynamic Market vs Limit Re-evaluation** — re-evaluate at live tick using `smartEntryThresholdPct` (0.15%)
+
+If any check fails, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next minute.
+
+**Fail-Fast on Execution Failure** (auto-trading path): If `executionEngine.execute()` returns `{ ok: false }` or throws, `burnSetup()` is **guaranteed** to be called before transitioning to `SCANNING`. This prevents rejection loops (e.g., Bybit error [10001] spam) by immediately burning the zone/structure so the bot doesn't re-detect the dead setup on the next candle.
+
+Both paths fetch `getLivePrice()` (with fallback to last closed candle) and validate against the calculated SL/TP.
 
 ```typescript
 const currentPrice = this.feedLtf.getCurrentLivePrice();
@@ -756,7 +767,6 @@ docker compose up -d
 | **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                                 |
 | **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                                    |
 | **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                                            |
-| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups (required for `/backup` command)                                                           |
 | **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance.              |
 | **USE_LOCAL_CACHE_ONLY**           |          |          `false`          | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys. |
 | **ENABLE_HEALTHCHECK_SERVER**      |          |          `false`          | Enable Express health check server for cloud platforms (e.g., Render.com). Default `false` for security (Secure Mode). **Required `true` on Render.com.** |
@@ -1405,7 +1415,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (231)
+# All tests (240)
 npm test
 
 # Watch mode
@@ -1428,19 +1438,7 @@ npm test -- --coverage
 - **Stage 2 (runner)**: `node:26-alpine` → `npm ci --omit=dev` → copy `dist/` → `CMD ["node", "dist/index.js"]`
 - **Final image**: **~85 MB**, no dev deps, no source code
 
-**docker-compose.yml**:
-
-```yaml
-services:
-  smc-bot:
-    build: .
-    container_name: smc-bot
-    restart: unless-stopped
-    env_file: .env
-    ports:
-      - "3000:3000" # Health check for Render
-    stop_grace_period: 30s
-```
+**docker-compose.yml**: See [🐳 Docker Management Commands](#-docker-management-commands) for the full configuration with resource limits and log rotation.
 
 - **No volumes** — fully stateless
 - **Port 3000** — Render health check endpoint
@@ -1456,7 +1454,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full 180-day backtest (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (231 tests)
+npm test             # Jest (240 tests)
 npm run test:watch   # Watch mode
 ```
 
