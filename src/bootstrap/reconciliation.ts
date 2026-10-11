@@ -121,7 +121,7 @@ export class ReconciliationLoop {
 
         try {
           const positions = await this.source.getOpenPositions(trade.symbol);
-          const hasPosition = positions.some((p) => Number(p.size) > 0);
+          const hasPosition = positions.some((p) => new Decimal(p.size).gt(0));
 
           // Check for active limit orders before force-reset
           const openOrders = await this.source.getOpenOrders(trade.symbol);

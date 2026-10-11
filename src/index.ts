@@ -339,11 +339,17 @@ async function main(): Promise<void> {
 
   ws.onKline((update) => {
     const engine = engines.find((candidate) => candidate.symbol === update.symbol);
-    if (engine) void engine.handleKline(update);
+    if (engine) {
+      void engine.handleKline(update).catch((error) => {
+        logger.error(`Unhandled error in handleKline for ${update.symbol}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
   });
   ws.onPosition((payload) => {
     for (const engine of engines) {
-      engine.handlePositionPayload(payload);
+      void engine.handlePositionPayload(payload).catch((error) => {
+        logger.error(`Unhandled error in handlePositionPayload for ${engine.symbol}: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
   });
   ws.onExecution((payload) => logger.info(`Private WS execution event: ${JSON.stringify(payload)?.slice(0, 300)}`));

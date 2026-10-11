@@ -371,7 +371,7 @@ maxWorkingCapital: 0,
       const manager = createManagerWithPrice('100.20');
       
       const promise = manager.queueTrade(
-        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10', undefined, undefined, '0.00000001'
       );
 
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
@@ -406,7 +406,7 @@ maxWorkingCapital: 0,
       const manager = createManagerWithPrice('99.79');
       
       const promise = manager.queueTrade(
-        'SOLUSDT', '100', '101', '97', 1, 'Test', 'Sell', '10'
+        'SOLUSDT', '100', '101', '97', 1, 'Test', 'Sell', '10', undefined, undefined, '0.00000001'
       );
 
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
@@ -423,7 +423,7 @@ maxWorkingCapital: 0,
       const manager = createManagerWithPrice('100.50'); // Far from ideal entry
       
       const promise = manager.queueTrade(
-        'BTCUSDT', '50000', '49900', '50300', 1, 'Test', 'Buy', '0.1'
+        'BTCUSDT', '50000', '49900', '50300', 1, 'Test', 'Buy', '0.1', undefined, undefined, '0.00000001'
       );
 
       const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;

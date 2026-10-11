@@ -95,12 +95,16 @@ export class TelegramNotifier {
         const slPrice = slDecimal.toFixed(2);
         const tpPrice = tpDecimal.toFixed(2);
 
+        // Calculate side dynamically based on Entry vs SL geometry
+        const isBuy = entryDecimal.gt(slDecimal);
+        const side = isBuy ? 'Buy' : 'Sell';
+
         // Calculate qty using RiskManager (uses real balance, applies precision)
         const instrument = engine.getInstrument();
 
         const qtyResult = await this.riskManager.calculatePosition({
           symbol,
-          side: "Buy",
+          side,
           entryPrice: entryDecimal,
           stopLossRaw: slDecimal,
           takeProfitRaw: tpDecimal,
@@ -132,7 +136,7 @@ export class TelegramNotifier {
           tp: tpPrice,
           scenarioId: 999,
           reason: "⚡ LIVE DEMO TEST - End-to-end order execution test",
-          side: "Buy",
+          side,
           qty,
           resolve: () => {},
           timeoutHandle,
@@ -220,7 +224,12 @@ export class TelegramNotifier {
         return;
       }
 
-      // Create a fake trade for testing
+      // Create a fake trade for testing - calculate side dynamically
+      const entryDecimal = new Decimal("45000");
+      const slDecimal = new Decimal("44000");
+      const isBuy = entryDecimal.gt(slDecimal);
+      const side: 'Buy' | 'Sell' = isBuy ? 'Buy' : 'Sell';
+
       const fakeTrade = {
         symbol: "BTCUSDT",
         entry: "45000",
@@ -228,7 +237,7 @@ export class TelegramNotifier {
         tp: "48000",
         scenarioId: 1,
         reason: "TEST SIGNAL - Dry run for approval flow",
-        side: "Buy" as const,
+        side,
         qty: "0.01",
       };
 

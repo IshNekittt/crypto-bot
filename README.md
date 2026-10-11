@@ -1257,7 +1257,7 @@ services:
         ▼                       ▼                       ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      ScenarioRouter                             │
-│  Evaluates 11 scenarios → filters mitigatedZones → returns      │
+│  Evaluates 12 scenarios → filters mitigatedZones → returns      │
 │  PositionPlan (entry, SL, TP, qty, zoneDetails)                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -1283,7 +1283,7 @@ services:
 ### Data Flow (Live Trade)
 
 1. **WS Kline** → `CandleFeed` → `StrategyEngine.process()`
-2. **ScenarioRouter** evaluates 11 scenarios against `PatternRecognizer` patterns
+2. **ScenarioRouter** evaluates 12 scenarios against `PatternRecognizer` patterns
 3. **RiskManager** calculates position size with Drawdown Guard
 4. **Smart Entry Decision** — compares `idealEntry` (zone equilibrium) vs `lastCandle.close`:
    - If `|idealEntry - currentPrice| / idealEntry ≤ 0.15%` → **Market** (IOC)
@@ -1470,9 +1470,9 @@ src/
 │   └── wsClient.ts             # WS + 3-min Watchdog + custom logger
 ├── engine/
 │   ├── strategyEngine.ts       # State machine per symbol
-│   ├── scenarioRouter.ts       # 11 scenarios + mitigatedZones filter
+│   ├── scenarioRouter.ts       # 12 scenarios + mitigatedZones filter
 │   ├── pendingTradeManager.ts  # Approval queue + Slippage Guard
-│   └── scenarios/              # S1–S11 implementations
+│   └── scenarios/              # S1–S12 implementations
 ├── smc/
 │   └── patternRecognizer.ts    # Core SMC: swings, OB, FVG, SMS, ranges, macro
 ├── risk/

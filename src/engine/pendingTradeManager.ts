@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { Markup } from 'telegraf';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../config/env';
+import { formatPrice } from '../utils/precision';
 
 export interface PendingTrade {
   id: string;
@@ -20,6 +21,7 @@ export interface PendingTrade {
   messageId?: number; // Telegram message ID for timeout editing
   originalText?: string; // Original message text for timeout editing
   idealEntry?: string; // Ideal entry price from scenario (for dynamic Market/Limit decision)
+  tickSize?: string;   // Instrument tickSize for proper limit price formatting
   isTest?: boolean;           // Flag for dry-run test trades
   isLiveDemoTest?: boolean;   // Flag for live demo test trades (real order on Demo)
   structureDetails?: any;     // Structure details for ghost signal mitigation (type, timestamp, price, direction)
@@ -58,7 +60,8 @@ export class PendingTradeManager {
     side: 'Buy' | 'Sell',
     qty: string,
     idealEntry?: string,
-    structureDetails?: any
+    structureDetails?: any,
+    tickSize?: string
   ): Promise<boolean> {
     const tradeId = this.generateTradeId(symbol);
 
@@ -116,6 +119,7 @@ export class PendingTradeManager {
         originalText: text,
         idealEntry: idealEntry ?? entry,
         structureDetails: structureDetails,
+        tickSize,
       };
 
       this.pendingTrades.set(tradeId, pending);
@@ -191,7 +195,8 @@ export class PendingTradeManager {
           clearTimeout(pending.timeoutHandle);
           this.pendingTrades.delete(tradeId);
           pending.resolve(true);
-          return { approved: true, orderType: 'Limit', limitPrice: idealEntry.toFixed(8), structureDetails: pending.structureDetails };
+          const tickSize = pending.tickSize ? new Decimal(pending.tickSize) : new Decimal('0.01');
+          return { approved: true, orderType: 'Limit', limitPrice: formatPrice(idealEntry, tickSize), structureDetails: pending.structureDetails };
         }
         // Use Market order - fall through to normal approval
       }

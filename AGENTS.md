@@ -249,6 +249,37 @@ try {
 
 This eliminates dependency on ReconciliationLoop for recovery and ensures the bot can immediately scan for new setups after any position close.
 
+### 3.7 Unhandled Promise Rejection Guards — `src/index.ts` + `src/engine/strategyEngine.ts` — **NEW v2026-10-11**
+
+**Problem**: High-frequency WebSocket streams (klines, positions, executions) can generate thousands of async callbacks per minute. If any async handler (`onKline`, `onPosition`, `onExecution`) throws an unhandled rejection, Node.js will crash the entire process — catastrophic for a 14-day Burn-In.
+
+**Solution**: Every WebSocket callback and event handler is strictly wrapped:
+
+1. **In `src/index.ts` (WS registration)**:
+   ```typescript
+   ws.onKline((update) => {
+     const engine = engines.find((candidate) => candidate.symbol === update.symbol);
+     if (engine) {
+       void engine.handleKline(update).catch((error) => {
+         logger.error(`Unhandled error in handleKline for ${update.symbol}: ${error instanceof Error ? error.message : String(error)}`);
+       });
+     }
+   });
+   ws.onPosition((payload) => {
+     for (const engine of engines) {
+       void engine.handlePositionPayload(payload).catch((error) => {
+         logger.error(`Unhandled error in handlePositionPayload for ${engine.symbol}: ${error instanceof Error ? error.message : String(error)}`);
+       });
+     }
+   });
+   ```
+
+2. **In `src/engine/strategyEngine.ts` (handler implementations)**:
+   - `handleKline()`: Individual `try/catch` for `checkAndManagePosition()` and `process('1')` on 1m candles.
+   - `handlePositionPayload()`: `try/catch` for `parseClosedPositions()` before `onExchangePositionClosed()`.
+
+**Invariant**: No async WS callback is ever left without a `.catch()` or `try/catch`. Any error is logged, never crashes the process.
+
 ---
 
 ## 4. TELEGRAM UI & SECURITY
@@ -404,6 +435,46 @@ async setTradingStop(request: { symbol: string; stopLoss?: string; takeProfit?: 
 **Usage in Live** (`src/engine/strategyEngine.ts:271-308`): All SL updates (breakeven, trailing, post-partial-close) now use `client.setTradingStop()`.
 
 **Invariant**: `amendOrder` is **never** called for `IN_TRADE` positions. Only `setTradingStop` with `positionIdx: 0`.
+
+### 5.2.1 Bybit V5 Order Placement with TP/SL — **positionIdx: 0 Mandatory** — **v2026-10-11**
+
+**Critical Rule**: When placing orders with attached TP/SL via `submitOrder()` in Bybit V5 (One-Way Mode), you **MUST** explicitly include `positionIdx: 0` in the request payload. This applies to BOTH Market and Limit orders. Without it, the exchange may reject the order or fail to attach the TP/SL correctly.
+
+**Implementation** (`src/api/bybitClient.ts:366-378`, `396-409`):
+```typescript
+// placeMarketOrderWithTpsl
+const response = await this.rest.submitOrder({
+  category: 'linear',
+  symbol: request.symbol,
+  side: request.side,
+  orderType: 'Market',
+  qty: request.qty,
+  timeInForce: 'IOC',
+  tpslMode: 'Full',
+  stopLoss: request.stopLoss,
+  takeProfit: request.takeProfit,
+  orderLinkId: request.orderLinkId,
+  positionIdx: 0,  // ← MANDATORY for One-Way Mode with TP/SL
+});
+
+// placeLimitOrderWithTpsl
+const response = await this.rest.submitOrder({
+  category: 'linear',
+  symbol: request.symbol,
+  side: request.side,
+  orderType: 'Limit',
+  qty: request.qty,
+  price: request.price,
+  timeInForce: request.timeInForce,
+  tpslMode: 'Full',
+  stopLoss: request.stopLoss,
+  takeProfit: request.takeProfit,
+  orderLinkId: request.orderLinkId,
+  positionIdx: 0,  // ← MANDATORY for One-Way Mode with TP/SL
+});
+```
+
+**Invariant**: Every `submitOrder()` call with `tpslMode: 'Full'` MUST include `positionIdx: 0`.
 
 ### 5.3 Pre-flight SL Check at Approval & Auto-Execution — **NEW v2026-10-03** (Hardened v2026-10-10)
 
@@ -1637,6 +1708,10 @@ docker compose up -d
 
 31. **Zero-Latency Hot Path** — In automated trading (`AUTO_TRADING=true`), no synchronous/blocking external messenger I/O is permitted prior to order submission. `notifySetupFound` must be fire-and-forget AFTER `executionEngine.execute()` succeeds, never awaited before order submission. The hot path `executeStagedEntry()` → `executionEngine.execute()` must remain zero-latency.
 
+32. **No Unhandled Promises in WS Callbacks** — All WebSocket callbacks (`onKline`, `onPosition`, `onExecution`) and internal async handlers (`handleKline`, `handlePositionPayload`) MUST be wrapped in `.catch()` or `try/catch`. Unhandled rejections in high-frequency WS streams will crash the Node.js process.
+
+33. **`positionIdx: 0` Mandatory for TP/SL Orders** — Every `submitOrder()` call with `tpslMode: 'Full'` MUST explicitly include `positionIdx: 0` for One-Way Mode. Omission causes order rejection or TP/SL attachment failure on Bybit V5.
+
 ---
 
 ## 14. DOCKER & DEPLOYMENT
@@ -2004,6 +2079,24 @@ const limitPrice = useMarket
 
 **Rule**: NEVER hardcode decimal precision with `toFixed()` for prices. ALWAYS use `formatPrice(value, tickSize)` from `utils/precision.ts` which respects the instrument's `tickSize`.
 
+### 16.26 ❌ FORBIDDEN: Omitting `.catch()` or `try/catch` in WebSocket event handlers (Causes fatal Node.js crashes)
+
+**Root Cause**: High-frequency WebSocket streams (klines, positions, executions) generate thousands of async callbacks per minute. If any async handler (`onKline`, `onPosition`, `onExecution`) throws an unhandled rejection, Node.js will crash the entire process — catastrophic for a 14-day Burn-In.
+
+**Fix**: Every WebSocket callback and event handler is strictly wrapped:
+- In `src/index.ts`: `ws.onKline(...).catch(...)`, `ws.onPosition(...).catch(...)`
+- In `src/engine/strategyEngine.ts`: `handleKline()` has `try/catch` for `checkAndManagePosition()` and `process('1')`; `handlePositionPayload()` has `try/catch` for `parseClosedPositions()`
+
+**Rule**: No async WS callback is ever left without a `.catch()` or `try/catch`. Any error is logged, never crashes the process.
+
+### 16.27 ❌ FORBIDDEN: Omitting `positionIdx: 0` when placing orders with TP/SL on Bybit V5
+
+**Root Cause**: Bybit V5 requires `positionIdx: 0` in the `submitOrder()` payload for One-Way Mode when attaching TP/SL via `tpslMode: 'Full'`. Without it, the exchange may reject the order or fail to attach the TP/SL correctly.
+
+**Fix**: Both `placeMarketOrderWithTpsl()` and `placeLimitOrderWithTpsl()` in `src/api/bybitClient.ts` explicitly include `positionIdx: 0` in the `submitOrder()` payload.
+
+**Rule**: Every `submitOrder()` call with `tpslMode: 'Full'` MUST include `positionIdx: 0`.
+
 ---
 
-_Last updated: 2026-10-10. All 240 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-11. All 240 tests green. Build passes. Enterprise-ready._

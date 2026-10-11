@@ -203,7 +203,7 @@ export class StrategyEngine {
     const saved = await this.deps.db.getSymbolState(this.symbol);
     const openTrade = await this.deps.db.getOpenTrade(this.symbol);
     if (saved?.state === StrategyState.IN_TRADE && openTrade) {
-      this.state = StrategyState.IN_TRADE;
+      this.transition(StrategyState.IN_TRADE);
       logger.warn(
         `${this.symbol}: restored IN_TRADE after restart (orderId=${openTrade.orderId ?? 'n/a'}), reconciliation will verify`,
       );
@@ -229,12 +229,20 @@ export class StrategyEngine {
       this.feed1m.applyKline(update);
       // Check trade management on every 1m candle if we have an open position
       if (this.state === StrategyState.IN_TRADE) {
-        await this.checkAndManagePosition(update.candle.close);
+        try {
+          await this.checkAndManagePosition(update.candle.close);
+        } catch (error) {
+          logger.error(`${this.symbol}: checkAndManagePosition error: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       
       // CRITICAL: If Sniper Mode enabled and we're scanning, evaluate on every 1m close
       if (this.deps.config.enableSniperMode && this.state === StrategyState.SCANNING) {
-        await this.process('1' as Timeframe);
+        try {
+          await this.process('1' as Timeframe);
+        } catch (error) {
+          logger.error(`${this.symbol}: process(1m) error: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       return;
     }
@@ -347,7 +355,13 @@ export class StrategyEngine {
 
   async handlePositionPayload(payload: unknown): Promise<void> {
     if (this.state !== StrategyState.IN_TRADE) return;
-    const closedEvents = parseClosedPositions(payload, this.symbol);
+    let closedEvents;
+    try {
+      closedEvents = parseClosedPositions(payload, this.symbol);
+    } catch (error) {
+      logger.error(`${this.symbol}: parseClosedPositions error: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     if (closedEvents.length === 0) return;
     try {
       await this.onExchangePositionClosed(closedEvents[0].pnl);
@@ -737,7 +751,9 @@ export class StrategyEngine {
       const useMarketOrder = priceDiffPct.lte(smartThreshold);
       
       const orderType = useMarketOrder ? 'Market' : 'Limit';
-      const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
+      const limitPrice = useMarketOrder
+        ? null
+        : formatPrice(idealEntry, new Decimal(this.deps.instrument.tickSize));
       
       logger.info(
         `[${this.symbol}] Smart Entry: idealEntry=${idealEntry.toFixed(4)} currentPrice=${currentPrice.toFixed(4)} diff=${priceDiffPct.mul(100).toFixed(4)}% threshold=${smartThreshold.mul(100).toFixed(2)}% -> ${orderType}${orderType === 'Limit' ? ` @ ${limitPrice}` : ''}`
@@ -772,6 +788,7 @@ export class StrategyEngine {
       const newPlan: PositionPlan = {
         ...riskResult.plan,
         scenarioId: result.scenario?.id ?? null,
+        structureDetails: result.structureDetails ?? undefined,
       };
       this.plan = newPlan;
 
@@ -812,66 +829,75 @@ export class StrategyEngine {
   private async executeStagedEntry(): Promise<void> {
     if (!this.plan) return;
 
-    // Full pre-execution validation suite using live tick price
-    const livePriceStr = this.getLivePrice() ?? this.feedLtf.getLastClosed()?.close;
-    if (livePriceStr) {
-      const livePrice = new Decimal(livePriceStr);
-      const sl = new Decimal(this.plan.stopLoss);
-      const tp = new Decimal(this.plan.takeProfit);
-      const entry = new Decimal(this.plan.entryPrice);
-      const isLong = this.plan.side === 'Buy';
+    // Strict Guard Clause: Must have live price for pre-flight checks
+    // Attempt to get live price safely, handling potential naming variations in CandleFeed
+    const livePriceStr = this.getLivePrice() ?? (this.feedLtf as any).getLastClosedCandle?.()?.close ?? (this.feedLtf as any).getLastClosed?.()?.close;
 
-      // 1. Pre-flight SL breach check
-      const slBreached = isLong ? livePrice.lte(sl) : livePrice.gte(sl);
-      if (slBreached) {
-        logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
-        this.burnSetup(this.plan);
-        this.plan = null;
-        this.transition(StrategyState.SCANNING);
-        return;
-      }
-
-      // 2. Pre-flight TP reached check
-      const tpReached = isLong ? livePrice.gte(tp) : livePrice.lte(tp);
-      if (tpReached) {
-        logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already reached TP (${this.plan.takeProfit}). Aborting & burning.`);
-        this.burnSetup(this.plan);
-        this.plan = null;
-        this.transition(StrategyState.SCANNING);
-        return;
-      }
-
-      // 3. Slippage Guard toward TP (0.2% max acceptable deviation toward target)
-      const priceMovedTowardTp = isLong ? livePrice.minus(entry) : entry.minus(livePrice);
-      if (priceMovedTowardTp.gt(0)) {
-        const deviationPct = priceMovedTowardTp.div(entry);
-        if (deviationPct.gt(0.002)) { // > 0.2%
-          logger.warn(`[${this.symbol}] Slippage Guard (Auto): Live price moved ${deviationPct.mul(100).toFixed(3)}% toward TP. R:R degraded. Aborting & burning.`);
-          this.burnSetup(this.plan);
-          this.plan = null;
-          this.transition(StrategyState.SCANNING);
-          return;
-        }
-      }
-
-      // 4. Dynamic Market vs Limit Re-evaluation at Live Tick
-      const idealEntry = new Decimal(this.plan.entryPrice);
-      const threshold = new Decimal(this.deps.config.smartEntryThresholdPct || 0.0015);
-      const priceDiffPct = idealEntry.minus(livePrice).div(idealEntry).abs();
-      const useMarket = priceDiffPct.lte(threshold);
-
-      // Create new PositionPlan with updated orderType and limitPrice (both are readonly)
-      // Use instrument's tickSize for proper price formatting (anti-pattern 16.3)
-      const limitPrice = useMarket
-        ? null
-        : formatPrice(idealEntry, new Decimal(this.deps.instrument.tickSize));
-
-      this.plan = {
-        ...this.plan,
-        orderType: useMarket ? 'Market' : 'Limit',
-        limitPrice,
-      };
+    if (!livePriceStr) {
+      logger.error(`[${this.symbol}] CRITICAL: Cannot determine live price for pre-flight check. Aborting execution to prevent blind firing.`);
+      this.burnSetup(this.plan);
+      this.plan = null;
+      this.transition(StrategyState.SCANNING);
+      return;
     }
+
+    // Proceed with normal checks WITHOUT the 'if (livePriceStr)' wrapper
+    const livePrice = new Decimal(livePriceStr);
+    const sl = new Decimal(this.plan.stopLoss);
+    const tp = new Decimal(this.plan.takeProfit);
+    const entry = new Decimal(this.plan.entryPrice);
+    const isLong = this.plan.side === 'Buy';
+
+    // 1. Pre-flight SL breach check
+    const slBreached = isLong ? livePrice.lte(sl) : livePrice.gte(sl);
+    if (slBreached) {
+      logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
+      this.burnSetup(this.plan);
+      this.plan = null;
+      this.transition(StrategyState.SCANNING);
+      return;
+    }
+
+    // 2. Pre-flight TP reached check
+    const tpReached = isLong ? livePrice.gte(tp) : livePrice.lte(tp);
+    if (tpReached) {
+      logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already reached TP (${this.plan.takeProfit}). Aborting & burning.`);
+      this.burnSetup(this.plan);
+      this.plan = null;
+      this.transition(StrategyState.SCANNING);
+      return;
+    }
+
+    // 3. Slippage Guard toward TP (0.2% max acceptable deviation toward target)
+    const priceMovedTowardTp = isLong ? livePrice.minus(entry) : entry.minus(livePrice);
+    if (priceMovedTowardTp.gt(0)) {
+      const deviationPct = priceMovedTowardTp.div(entry);
+      if (deviationPct.gt(0.002)) { // > 0.2%
+        logger.warn(`[${this.symbol}] Slippage Guard (Auto): Live price moved ${deviationPct.mul(100).toFixed(3)}% toward TP. R:R degraded. Aborting & burning.`);
+        this.burnSetup(this.plan);
+        this.plan = null;
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
+    }
+
+    // 4. Dynamic Market vs Limit Re-evaluation at Live Tick
+    const idealEntry = new Decimal(this.plan.entryPrice);
+    const threshold = new Decimal(this.deps.config.smartEntryThresholdPct || 0.0015);
+    const priceDiffPct = idealEntry.minus(livePrice).div(idealEntry).abs();
+    const useMarket = priceDiffPct.lte(threshold);
+
+    // Create new PositionPlan with updated orderType and limitPrice (both are readonly)
+    // Use instrument's tickSize for proper price formatting (anti-pattern 16.3)
+    const limitPrice = useMarket
+      ? null
+      : formatPrice(idealEntry, new Decimal(this.deps.instrument.tickSize));
+
+    this.plan = {
+      ...this.plan,
+      orderType: useMarket ? 'Market' : 'Limit',
+      limitPrice,
+    };
 
     logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry`);
     try {
@@ -942,7 +968,8 @@ export class StrategyEngine {
       this.plan.side,
       this.plan.qty,
       result.levels.entry,  // idealEntry for dynamic Market/Limit decision at approval time
-      result.structureDetails  // structureDetails for ghost signal mitigation
+      result.structureDetails,  // structureDetails for ghost signal mitigation
+      this.deps.instrument.tickSize  // tickSize for proper limit price formatting
     );
 
     if (!queued) {
@@ -953,7 +980,7 @@ export class StrategyEngine {
 
   async reconcile(positions: readonly { size: unknown }[]): Promise<boolean> {
     if (this.state !== StrategyState.IN_TRADE) return false;
-    const hasOpenPosition = positions.some((position) => Number(position.size) > 0);
+    const hasOpenPosition = positions.some((position) => new Decimal(String(position.size)).gt(0));
     if (hasOpenPosition) return false;
     const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (trade && trade.pnl === null) {

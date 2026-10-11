@@ -374,6 +374,7 @@ export class BybitClient {
         stopLoss: request.stopLoss,
         takeProfit: request.takeProfit,
         orderLinkId: request.orderLinkId,
+        positionIdx: 0,
       });
 
       if (response.retCode !== 0 || !response.result.orderId) {
@@ -404,6 +405,7 @@ export class BybitClient {
         stopLoss: request.stopLoss,
         takeProfit: request.takeProfit,
         orderLinkId: request.orderLinkId,
+        positionIdx: 0,
       });
 
       if (response.retCode !== 0 || !response.result.orderId) {
@@ -446,7 +448,7 @@ export class BybitClient {
         throw new Error(`Position list failed for ${symbol}: [${response.retCode}] ${response.retMsg}`);
       }
       return response.result.list
-        .filter((position) => Number(position.size) > 0 && (position.side === 'Buy' || position.side === 'Sell'))
+        .filter((position) => new Decimal(position.size).gt(0) && (position.side === 'Buy' || position.side === 'Sell'))
         .map((position) => ({
           symbol: position.symbol,
           side: position.side as 'Buy' | 'Sell',
