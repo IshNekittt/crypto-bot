@@ -372,6 +372,25 @@ export class StrategyEngine {
     }
   }
 
+  async handleExecutionPayload(payload: unknown): Promise<void> {
+    if (this.state !== StrategyState.IN_TRADE) return;
+    try {
+      const items = Array.isArray(payload) ? payload : [payload];
+      for (const item of items) {
+        if (item.symbol === this.symbol && item.execType === 'Trade') {
+          const closedSize = new Decimal(item.closedSize ?? '0');
+          if (closedSize.gt(0)) {
+            logger.info(`[${this.symbol}] Execution WS: Position closed (size=${closedSize}), triggering reconciliation`);
+            await this.onExchangePositionClosed(null);
+            return;
+          }
+        }
+      }
+    } catch (error) {
+      logger.error(`${this.symbol}: handleExecutionPayload error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   async handleTradeApproval(tradeId: string, approved: boolean): Promise<void> {
     // State guard: ignore approvals if not in ENTRY_STAGED
     if (this.state !== StrategyState.ENTRY_STAGED) {
@@ -923,11 +942,27 @@ export class StrategyEngine {
         return;
       }
 
+      // Fetch actual entry price from exchange to handle slippage (Market orders) or limit fills
+      let actualEntryPrice = this.plan.entryPrice;
+      try {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const positions = await this.deps.client.getOpenPositions(this.symbol);
+        if (positions.length > 0) {
+          const pos = positions[0];
+          if (pos.avgPrice && pos.avgPrice.gt(0)) {
+            actualEntryPrice = pos.avgPrice.toString();
+            logger.info(`[${this.symbol}] Actual entry price from exchange: ${actualEntryPrice} (planned: ${this.plan.entryPrice})`);
+          }
+        }
+      } catch (e) {
+        logger.warn(`[${this.symbol}] Failed to fetch actual entry price, using planned: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
       await this.deps.db.openTrade({
         id: result.orderId,
         symbol: this.symbol,
         scenario_id: this.plan.scenarioId ?? null,
-        entry_price: this.plan.entryPrice,
+        entry_price: actualEntryPrice,
         sl_price: this.plan.stopLoss,
         tp_price: this.plan.takeProfit,
         qty: this.plan.qty,

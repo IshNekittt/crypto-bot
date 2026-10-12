@@ -280,6 +280,49 @@ This eliminates dependency on ReconciliationLoop for recovery and ensures the bo
 
 **Invariant**: No async WS callback is ever left without a `.catch()` or `try/catch`. Any error is logged, never crashes the process.
 
+### 3.8 Bybit V5 WebSocket Quirks (Execution Channel) — **NEW v2026-10-12**
+
+**Problem**: Bybit V5 frequently omits `Position` channel updates when a position is closed via Stop-Loss or Take-Profit. Instead, it sends an `Execution` event (`topic: "execution", execType: "Trade", closedSize > 0`). If the bot only listens to `ws.onPosition`, it will miss SL/TP closures entirely, leaving the engine stuck in `IN_TRADE` until the ReconciliationLoop forcibly resets it.
+
+**Solution**: The bot MUST listen to `ws.onExecution` and route payloads to `engine.handleExecutionPayload()`. This handler checks for `execType === 'Trade'` and `closedSize > 0`, then triggers `onExchangePositionClosed()` to fetch real PnL via `getClosedPnl()`.
+
+**Implementation** (`src/index.ts` + `src/engine/strategyEngine.ts`):
+
+1. **In `src/index.ts` (WS registration)**:
+   ```typescript
+   ws.onExecution((payload) => {
+     for (const engine of engines) {
+       void engine.handleExecutionPayload(payload).catch((error) => {
+         logger.error(`Unhandled error in handleExecutionPayload for ${engine.symbol}: ${error instanceof Error ? error.message : String(error)}`);
+       });
+     }
+   });
+   ```
+
+2. **In `src/engine/strategyEngine.ts` (new handler)**:
+   ```typescript
+   async handleExecutionPayload(payload: unknown): Promise<void> {
+     if (this.state !== StrategyState.IN_TRADE) return;
+     try {
+       const items = Array.isArray(payload) ? payload : [payload];
+       for (const item of items) {
+         if (item.symbol === this.symbol && item.execType === 'Trade') {
+           const closedSize = new Decimal(item.closedSize ?? '0');
+           if (closedSize.gt(0)) {
+             logger.info(`[${this.symbol}] Execution WS: Position closed (size=${closedSize}), triggering reconciliation`);
+             await this.onExchangePositionClosed(null);
+             return;
+           }
+         }
+       }
+     } catch (error) {
+       logger.error(`${this.symbol}: handleExecutionPayload error: ${error instanceof Error ? error.message : String(error)}`);
+     }
+   }
+   ```
+
+**Invariant**: The engine MUST monitor BOTH `Position` and `Execution` WS topics to reliably detect position closures. Relying solely on `Position` channel will miss SL/TP closures.
+
 ---
 
 ## 4. TELEGRAM UI & SECURITY
@@ -690,9 +733,44 @@ const marginBuffer = workingBalance.mul(0.98);
 
 **Invariant**: After any `burnSetup()` call in auto-mode, the triggering CHoCH timestamp is guaranteed in `mitigatedStructures`, and `_activeSniperZone` is cleared on next `transition(SCANNING)`. Router will filter it out on next candle.
 
----
+### 5.11 No Assumed Fill — Actual Entry Price from Exchange — **NEW v2026-10-12**
 
-## 6. ADAPTIVE FRACTIONING — `src/risk/tradeManager.ts`
+**Problem**: Market orders suffer from slippage. Writing `plan.entryPrice` (the planned price) to the database corrupts Adaptive Fractioning math — the trailing stop logic calculates distance from entry, and if the entry is wrong, the Stop-Loss can be moved into losing territory.
+
+**Solution**: After `executionEngine.execute()` succeeds, the bot MUST:
+1. Wait 500ms for the exchange to finalize the fill.
+2. Call `client.getOpenPositions(symbol)` to fetch the position's actual `avgPrice`.
+2. Use the exchange's `avgPrice` as the true entry price for `db.openTrade()`.
+3. Fallback to `plan.entryPrice` only if the fetch fails.
+
+**Implementation** (`src/engine/strategyEngine.ts:executeStagedEntry`):
+```typescript
+// After successful execution:
+let actualEntryPrice = this.plan.entryPrice;
+try {
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const positions = await this.deps.client.getOpenPositions(this.symbol);
+  if (positions.length > 0) {
+    const pos = positions[0];
+    if (pos.avgPrice && pos.avgPrice.gt(0)) {
+      actualEntryPrice = pos.avgPrice.toString();
+      logger.info(`[${this.symbol}] Actual entry price from exchange: ${actualEntryPrice} (planned: ${this.plan.entryPrice})`);
+    }
+  }
+} catch (e) {
+  logger.warn(`[${this.symbol}] Failed to fetch actual entry price, using planned: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+await this.deps.db.openTrade({
+  // ...
+  entry_price: actualEntryPrice,  // REAL entry price from exchange
+  // ...
+});
+```
+
+**Invariant**: Database `entry_price` MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. This ensures Adaptive Fractioning's trailing stop math is accurate.
+
+---
 
 **Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
 
@@ -1743,9 +1821,13 @@ docker compose up -d
 
 33. **`positionIdx: 0` Mandatory for TP/SL Orders** — Every `submitOrder()` call with `tpslMode: 'Full'` MUST explicitly include `positionIdx: 0` for One-Way Mode. Omission causes order rejection or TP/SL attachment failure on Bybit V5.
 
-34. **Router Must Receive `mitigatedStructures`** — `scenarioRouter.evaluate()` MUST be called with `this.mitigatedStructures` (not empty array) to filter already-consumed CHoCH/SMS/BOS structures. Empty array bypasses ghost signal protection.
+34. **No Assumed Fill** — Database entry price MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. After `executionEngine.execute()`, bot MUST wait 500ms, fetch `getOpenPositions()`, and use `avgPrice` for `db.openTrade()`.
 
-35. **Auto-Trading Must Clear Sniper Zone on Reset** — `transition(StrategyState.SCANNING)` MUST clear `this._activeSniperZone = null` to prevent stale macro zone reuse across state resets. Zone must be burned on `burnSetup()`, not left dangling.
+35. **Dual-Channel Closure Detection** — The engine MUST monitor BOTH `Position` and `Execution` WS topics to reliably detect position closures. Relying solely on `Position` channel will miss SL/TP closures.
+
+36. **Router Must Receive `mitigatedStructures`** — `scenarioRouter.evaluate()` MUST be called with `this.mitigatedStructures` (not empty array) to filter already-consumed CHoCH/SMS/BOS structures. Empty array bypasses ghost signal protection.
+
+37. **Auto-Trading Must Clear Sniper Zone on Reset** — `transition(StrategyState.SCANNING)` MUST clear `this._activeSniperZone = null` to prevent stale macro zone reuse across state resets. Zone must be burned on `burnSetup()`, not left dangling.
 
 ---
 
@@ -2147,6 +2229,22 @@ const limitPrice = useMarket
 **Fix**: Telegram notification is now fire-and-forget AFTER successful execution (see `executeStagedEntry()` lines 938–945): `notifySetupFound(...).catch(err => logger.error(...))`.
 
 **Rule**: In `AUTO_TRADING=true`, NO synchronous/blocking external messenger I/O is permitted prior to order submission. `notifySetupFound` MUST be fire-and-forget AFTER `executionEngine.execute()` succeeds.
+
+### 16.30 ❌ FORBIDDEN: Recording planned entry price to the database (Assumed Fill)
+
+**Root Cause**: Market orders suffer from slippage. Writing `plan.entryPrice` (the planned price) to the database corrupts Adaptive Fractioning math — the trailing stop logic calculates distance from entry, and if the entry is wrong, the Stop-Loss can be moved into losing territory.
+
+**Fix**: After `executionEngine.execute()` succeeds, the bot MUST wait 500ms, fetch `getOpenPositions()`, and use the exchange's actual `avgPrice` for `db.openTrade()`.
+
+**Rule**: Database `entry_price` MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. Never record assumed fills.
+
+### 16.31 ❌ FORBIDDEN: Relying solely on the WS Position channel for trade closures
+
+**Root Cause**: Bybit V5 frequently omits `Position` channel updates when a position is closed via Stop-Loss or Take-Profit. Instead, it sends an `Execution` event (`topic: "execution", execType: "Trade", closedSize > 0`). Relying solely on `ws.onPosition` will miss SL/TP closures, leaving the engine stuck in `IN_TRADE` until ReconciliationLoop forcibly resets it.
+
+**Fix**: The bot MUST listen to `ws.onExecution` and route payloads to `engine.handleExecutionPayload()` to trigger immediate state reset and PnL fetching.
+
+**Rule**: The engine MUST monitor BOTH `Position` and `Execution` WS topics to reliably detect position closures. Relying solely on `Position` channel will miss SL/TP closures.
 
 ---
 

@@ -352,7 +352,13 @@ async function main(): Promise<void> {
       });
     }
   });
-  ws.onExecution((payload) => logger.info(`Private WS execution event: ${JSON.stringify(payload)?.slice(0, 300)}`));
+  ws.onExecution((payload) => {
+    for (const engine of engines) {
+      void engine.handleExecutionPayload(payload).catch((error) => {
+        logger.error(`Unhandled error in handleExecutionPayload for ${engine.symbol}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  });
 
   // Subscribe to klines: 1m for Sniper Mode, 15m and 240m for regular scenarios
   const klineIntervals = config.enableSniperMode 
