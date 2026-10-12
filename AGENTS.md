@@ -361,7 +361,7 @@ this.bot.use(async (ctx, next) => {
 4. On approve: `ExecutionEngine.execute()` → `db.openTrade()` → `IN_TRADE`.
 5. **On Reject / Timeout**: Bot **MUST** call `burnSetup()` to prevent spam cycles — zone + structure added to mitigation lists, state → `SCANNING`.
 
-### 4.4 Dynamic Approval (Anti-Slippage) — **NEW v2026-09-30**
+### 4.4 Dynamic Approval (Anti-Slippage) — **NEW v2026-09-30** (Updated v2026-10-12: Slippage Guard Paradox Fix)
 
 **Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". The old logic always sent a Market order on approval, causing slippage.
 
@@ -380,7 +380,19 @@ this.bot.use(async (ctx, next) => {
 - Returns `{ approved: true, orderType: 'Market'|'Limit', limitPrice?: string }`.
 - **Slippage Guard still runs**: If live price ≥ TP → reject; if > 0.2% toward TP → reject.
 
-**Invariant**: Decision is **purely at approval moment** — no pre-commitment to order type at signal time.
+**Slippage Guard Paradox Fix (Auto-Trading Path)** — **NEW v2026-10-12**:
+In auto-trading mode (`executeStagedEntry`), the logic order was corrected to eliminate the **Slippage Guard Paradox**:
+1. **Market vs Limit determination occurs FIRST** (at live tick).
+2. **Pre-flight SL breach and TP reached checks remain UNCONDITIONAL** for all orders.
+3. The **0.2% Slippage Guard (deviation toward TP) is applied ONLY to Market orders**.
+4. **Limit orders bypass the slippage guard** — they wait for a pullback by design; a slippage check would incorrectly abort valid pullback setups.
+
+| Order Type | SL Breach Check | TP Reached Check | 0.2% Slippage Guard |
+|------------|-----------------|------------------|---------------------|
+| **Market** | ✅ Unconditional | ✅ Unconditional | ✅ Applied (>0.2% aborts) |
+| **Limit** | ✅ Unconditional | ✅ Unconditional | ❌ Bypassed (waits for pullback) |
+
+**Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
 
 ### 4.5 Breakeven Protection — **LEGACY (Removed v2026-10-03)**
 
@@ -1829,6 +1841,8 @@ docker compose up -d
 
 37. **Auto-Trading Must Clear Sniper Zone on Reset** — `transition(StrategyState.SCANNING)` MUST clear `this._activeSniperZone = null` to prevent stale macro zone reuse across state resets. Zone must be burned on `burnSetup()`, not left dangling.
 
+38. **Context-Aware Slippage Guard** — The >0.2% slippage guard must never be applied to Limit orders, as it would cause valid pullback setups to be aborted. Slippage guard is strictly for Market orders; Limit orders wait for pullback by design.
+
 ---
 
 ## 14. DOCKER & DEPLOYMENT
@@ -2245,6 +2259,14 @@ const limitPrice = useMarket
 **Fix**: The bot MUST listen to `ws.onExecution` and route payloads to `engine.handleExecutionPayload()` to trigger immediate state reset and PnL fetching.
 
 **Rule**: The engine MUST monitor BOTH `Position` and `Execution` WS topics to reliably detect position closures. Relying solely on `Position` channel will miss SL/TP closures.
+
+### 16.32 ❌ FORBIDDEN: Applying Market-style slippage constraints (>0.2% toward TP) to Limit orders (Slippage Guard Paradox)
+
+**Root Cause**: The 0.2% Slippage Guard was applied uniformly to all order types. When price deviation exceeded 0.2%, valid Limit orders (which wait for a pullback by design) were incorrectly aborted. This caused mass rejection of valid pullback setups — the very orders meant to protect against slippage.
+
+**Fix**: Slippage Guard is now **context-aware** — applied ONLY to Market orders. Limit orders bypass the slippage check because they wait for a pullback by design. Pre-flight SL/TP checks remain unconditional for all orders.
+
+**Rule**: The >0.2% slippage guard must NEVER be applied to Limit orders. It must only be applied to Market orders where slippage is a real risk. Limit orders wait for a pullback by design.
 
 ---
 

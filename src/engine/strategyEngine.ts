@@ -497,23 +497,26 @@ export class StrategyEngine {
       return;
     }
 
-    // Wait 2-3 seconds for exchange to finalize data
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    // Retry loop for PnL fetch - give Bybit up to 6 seconds (3 attempts × 2s) to finalize
+    let closedPnls: any[] = [];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      try {
+        const endTime = Date.now();
+        const startTime = trade.openedAt;
+        const result = await this.deps.client.getClosedPnl(trade.symbol, startTime, endTime);
+        closedPnls = result.filter(p => new Decimal(p.createdTime).gte(trade.openedAt));
+        if (closedPnls.length > 0) break; // Found it, exit loop
+      } catch (err) {
+        logger.debug(`[${this.symbol}] PnL fetch attempt ${attempt} failed: ${err}`);
+      }
+    }
 
     let finalPnlString = pnl;
     let finalExitPrice: string | null = null;
 
     try {
       // === ACCURATE PNL: Fetch real closed PnL from Bybit (includes fees + funding) ===
-      const endTime = Date.now();
-      const startTime = trade.openedAt;
-      const closedPnls = await this.deps.client.getClosedPnl(trade.symbol, startTime, endTime);
-
-      // Find matching closed PnL records by symbol and createdTime after trade opened
-      // Bybit closes position with a new order (different orderId), so match by symbol and createdTime
-      // For Adaptive Fractioning (partial closes), we must SUM all PnL records for this trade
-      let matchedPnl: { closedPnl: Decimal; exitPrice: Decimal } | null = null;
-
       // Filter all closedPnl records for this symbol that were created after trade opened
       const relevantPnls = closedPnls.filter(p =>
         p.symbol === trade.symbol &&
@@ -532,15 +535,8 @@ export class StrategyEngine {
           Number(current.createdTime) > Number(latest.createdTime) ? current : latest
         );
 
-        matchedPnl = {
-          closedPnl: totalClosedPnl,
-          exitPrice: lastRecord.exitPrice
-        };
-      }
-
-      if (matchedPnl) {
-        finalPnlString = matchedPnl.closedPnl.toFixed(8);
-        finalExitPrice = matchedPnl.exitPrice.toFixed(8);
+        finalPnlString = totalClosedPnl.toFixed(8);
+        finalExitPrice = lastRecord.exitPrice.toFixed(8);
         logger.info(`${this.symbol}: Using exchange closedPnl (with funding/fees): ${finalPnlString} vs WS pnl: ${pnl ?? 'null'}`);
       } else {
         logger.warn(`${this.symbol}: No matching closedPnl found, using WS PnL`);
@@ -577,7 +573,7 @@ export class StrategyEngine {
         this.addMitigatedZone(trade.zoneDetails);
       }
       if (finalPnlString !== null) {
-        await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0%');
+        await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0');
       } else {
         logger.warn(`${this.symbol}: position closed by exchange event, PnL unknown`);
       }
@@ -880,7 +876,7 @@ export class StrategyEngine {
     const entry = new Decimal(this.plan.entryPrice);
     const isLong = this.plan.side === 'Buy';
 
-    // 1. Pre-flight SL breach check
+    // 1. Pre-flight SL breach check (unconditional for ALL orders)
     const slBreached = isLong ? livePrice.lte(sl) : livePrice.gte(sl);
     if (slBreached) {
       logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
@@ -890,7 +886,7 @@ export class StrategyEngine {
       return;
     }
 
-    // 2. Pre-flight TP reached check
+    // 2. Pre-flight TP reached check (unconditional for ALL orders)
     const tpReached = isLong ? livePrice.gte(tp) : livePrice.lte(tp);
     if (tpReached) {
       logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already reached TP (${this.plan.takeProfit}). Aborting & burning.`);
@@ -900,20 +896,8 @@ export class StrategyEngine {
       return;
     }
 
-    // 3. Slippage Guard toward TP (0.2% max acceptable deviation toward target)
-    const priceMovedTowardTp = isLong ? livePrice.minus(entry) : entry.minus(livePrice);
-    if (priceMovedTowardTp.gt(0)) {
-      const deviationPct = priceMovedTowardTp.div(entry);
-      if (deviationPct.gt(0.002)) { // > 0.2%
-        logger.warn(`[${this.symbol}] Slippage Guard (Auto): Live price moved ${deviationPct.mul(100).toFixed(3)}% toward TP. R:R degraded. Aborting & burning.`);
-        this.burnSetup(this.plan);
-        this.plan = null;
-        this.transition(StrategyState.SCANNING);
-        return;
-      }
-    }
-
-    // 4. Dynamic Market vs Limit Re-evaluation at Live Tick
+    // Dynamic Market vs Limit Re-evaluation at Live Tick (BEFORE Slippage Guard)
+    // This determines order type BEFORE checking slippage
     const idealEntry = new Decimal(this.plan.entryPrice);
     const threshold = new Decimal(this.deps.config.smartEntryThresholdPct || 0.0015);
     const priceDiffPct = idealEntry.minus(livePrice).div(idealEntry).abs();
@@ -931,7 +915,23 @@ export class StrategyEngine {
       limitPrice,
     };
 
-    logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry`);
+    // Slippage Guard toward TP (0.2% max acceptable deviation toward target)
+    // ONLY for Market orders - Limit orders wait for pullback by design
+    if (useMarket) {
+      const priceMovedTowardTp = isLong ? livePrice.minus(entry) : entry.minus(livePrice);
+      if (priceMovedTowardTp.gt(0)) {
+        const deviationPct = priceMovedTowardTp.div(entry);
+        if (deviationPct.gt(0.002)) { // > 0.2%
+          logger.warn(`[${this.symbol}] Slippage Guard (Auto): Market price moved ${deviationPct.mul(100).toFixed(3)}% toward TP. R:R degraded. Aborting & burning.`);
+          this.burnSetup(this.plan);
+          this.plan = null;
+          this.transition(StrategyState.SCANNING);
+          return;
+        }
+      }
+    }
+
+    logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry (${useMarket ? 'Market' : 'Limit'})`);
     try {
       const result = await this.deps.executionEngine.execute(this.plan);
       if (!result.ok) {
@@ -982,15 +982,7 @@ export class StrategyEngine {
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
       this.transition(StrategyState.IN_TRADE);
 
-      // Fire-and-forget Telegram notification AFTER successful execution (non-blocking)
-      this.deps.notifier.notifySetupFound(
-        this.symbol,
-        this.plan.entryPrice,
-        this.plan.stopLoss,
-        this.plan.takeProfit,
-        this.plan.scenarioId ?? 0,
-        this.plan.scenarioId ? String(this.plan.scenarioId) : 'Auto',
-      ).catch(err => logger.error(`[${this.symbol}] Failed to send setup notification: ${err}`));
+      // NO notifySetupFound in auto-trading - execution notification is handled by ExecutionEngine
     } catch (error) {
       logger.error(`[${this.symbol}] Exception during auto-trading execution: ${error instanceof Error ? error.message : String(error)}. Burning setup.`);
       if (this.plan) {
@@ -1199,7 +1191,7 @@ export class StrategyEngine {
 
       // Notify Telegram
       if (finalPnlString !== null) {
-        await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0%');
+        await this.deps.notifier.notifyTradeClosed(this.symbol, finalPnlString, '0');
         logger.info(`${this.symbol}: reconciliation closed trade ${trade.id} with PnL ${finalPnlString}`);
       } else {
         logger.warn(`${this.symbol}: reconciliation closed trade ${trade.id} but PnL unknown (no closing execution found)`);

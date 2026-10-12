@@ -133,7 +133,23 @@ if (currentPrice) {
 }
 ```
 
-If price has crossed the SL during approval wait, the setup is **burned** (zone + structure added to mitigation lists) and state returns to `SCANNING`. This prevents the dead setup from being re-detected on the next minute.
+### Slippage Guard Paradox Fix (Auto-Trading) — v2026-10-12
+
+**Problem**: The 0.2% Slippage Guard was applied uniformly to all order types. When price deviation exceeded 0.2%, valid Limit orders (which wait for a pullback by design) were incorrectly aborted. This caused mass rejection of valid pullback setups — the very orders meant to protect against slippage.
+
+**Solution**: The logic order in `executeStagedEntry()` was corrected to eliminate the **Slippage Guard Paradox**:
+
+1. **Market vs Limit determination occurs FIRST** (at live tick).
+2. **Pre-flight SL breach and TP reached checks remain UNCONDITIONAL** for all orders.
+3. The **0.2% Slippage Guard (deviation toward TP) is applied ONLY to Market orders**.
+4. **Limit orders bypass the slippage guard** — they wait for a pullback by design; a slippage check would incorrectly abort valid pullback setups.
+
+| Order Type | SL Breach Check | TP Reached Check | 0.2% Slippage Guard |
+|------------|-----------------|------------------|---------------------|
+| **Market** | ✅ Unconditional | ✅ Unconditional | ✅ Applied (>0.2% aborts) |
+| **Limit** | ✅ Unconditional | ✅ Unconditional | ❌ Bypassed (waits for pullback) |
+
+**Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
 
 ### State Guard in `handleTradeApproval` — v2026-10-05
 

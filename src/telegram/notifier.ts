@@ -571,8 +571,10 @@ export class TelegramNotifier {
     pnl: string,
     pnlPercent: string,
   ): Promise<boolean> {
+    // Strip any % signs from percentage string before parsing
+    const cleanPnlPercent = pnlPercent.replace('%', '');
     const safePnl = pnl ? new Decimal(pnl) : new Decimal(0);
-    const safePnlPct = pnlPercent ? new Decimal(pnlPercent) : new Decimal(0);
+    const safePnlPct = cleanPnlPercent ? new Decimal(cleanPnlPercent) : new Decimal(0);
 
     const isWin = safePnl.gt(0);
     const icon = isWin ? "✅" : (safePnl.isNegative() ? "❌" : "➖");
