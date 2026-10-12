@@ -659,6 +659,37 @@ const marginBuffer = workingBalance.mul(0.98);
 
 **Why This Matters**: Prevents strategy degradation on large accounts by ensuring position sizes don't exceed the strategy's capacity. The Drawdown Guard (risk reduction after 3 losses) now correctly applies to the capped working balance, not the full account balance.
 
+### 5.10 Ghost Signal Loop Fix (Auto-Trading) — **NEW v2026-10-12**
+
+**Problem**: In `AUTO_TRADING=true` mode, the bot could enter an infinite "Ghost Signal Loop":
+1. Setup detected → `ENTRY_STAGED` → `executeStagedEntry()` 
+2. Slippage Guard triggers (price moved >0.2% toward TP) → `burnSetup()` called
+3. `burnSetup()` had a hard dependency on `zoneDetails` — if zone was incomplete, it silently skipped burning the structure
+4. Logged misleading "Setup burned: zone X mitigated, structure added" even when structure was NOT added
+5. State → `SCANNING` but `mitigatedStructures` unchanged + `_activeSniperZone` not cleared
+6. Next 1m candle → same CHoCH re-detected (not filtered) → loop repeats every minute
+
+**Root Causes (3 independent bugs):**
+1. **Router not receiving `mitigatedStructures`**: `process()` called `scenarioRouter.evaluate(..., [], candles1m)` with hardcoded empty array
+2. **`burnSetup()` hard dependency on `zoneDetails`**: Required complete zone to burn anything; structure burning was nested inside zone check
+3. **`transition(SCANNING)` not clearing `_activeSniperZone`**: Stale macro zone persisted across state resets
+
+**Solution — 3 Surgical Fixes in `src/engine/strategyEngine.ts`:**
+
+| Fix | Location | Change |
+|-----|----------|--------|
+| **1. Pass `mitigatedStructures` to router** | `process()` line 742 | `evaluate(..., this.mitigatedStructures, candles1m)` instead of `[]` |
+| **2. Independent burning + honest logging** | `burnSetup()` lines 584–638 | Zone and structure burned independently; logs exactly what was burned |
+| **3. Clear `_activeSniperZone` on reset** | `transition()` line 680 | `this._activeSniperZone = null` added to `SCANNING` branch |
+
+**New `burnSetup()` Behavior:**
+- Burns zone if `zoneDetails` valid (type + timestamp + all fields)
+- Burns structure if `structureDetails` has valid timestamp (>0)
+- Falls back to zoneDetails for structure ONLY if no structureDetails exist
+- Logs exactly what happened: "ONLY zone", "ONLY structure", "both", or "CRITICAL: neither"
+
+**Invariant**: After any `burnSetup()` call in auto-mode, the triggering CHoCH timestamp is guaranteed in `mitigatedStructures`, and `_activeSniperZone` is cleared on next `transition(SCANNING)`. Router will filter it out on next candle.
+
 ---
 
 ## 6. ADAPTIVE FRACTIONING — `src/risk/tradeManager.ts`
@@ -1712,6 +1743,10 @@ docker compose up -d
 
 33. **`positionIdx: 0` Mandatory for TP/SL Orders** — Every `submitOrder()` call with `tpslMode: 'Full'` MUST explicitly include `positionIdx: 0` for One-Way Mode. Omission causes order rejection or TP/SL attachment failure on Bybit V5.
 
+34. **Router Must Receive `mitigatedStructures`** — `scenarioRouter.evaluate()` MUST be called with `this.mitigatedStructures` (not empty array) to filter already-consumed CHoCH/SMS/BOS structures. Empty array bypasses ghost signal protection.
+
+35. **Auto-Trading Must Clear Sniper Zone on Reset** — `transition(StrategyState.SCANNING)` MUST clear `this._activeSniperZone = null` to prevent stale macro zone reuse across state resets. Zone must be burned on `burnSetup()`, not left dangling.
+
 ---
 
 ## 14. DOCKER & DEPLOYMENT
@@ -2026,13 +2061,18 @@ docker compose up -d --build
 
 **Rule**: NO trade or partial close is sent to exchange without formatting against instrument's `qtyStep` and checking `minOrderQty`.
 
-### 16.22 ❌ FORBIDDEN: Bypassing Pre-flight and burnSetup in AUTO_TRADING mode
+### 16.22 ❌ FORBIDDEN: Bypassing Pre-flight, TP proximity, or burnSetup in AUTO_TRADING mode
 
-**Root Cause**: In auto-trading mode (`AUTO_TRADING=true`), `executeStagedEntry()` was executing orders without a pre-flight SL check and without calling `burnSetup()` on execution failure. This caused a rejection loop: Bybit rejected orders with error [10001] "StopLoss should be greater/lower than base_price", the bot didn't burn the setup, and on the next 1m candle the same dead setup was re-detected and re-submitted. On 2026-10-10, LINKUSDT generated 60+ rejected orders in 5 minutes.
+**Root Cause**: In auto-trading mode (`AUTO_TRADING=true`), `executeStagedEntry()` was executing orders without a pre-flight SL check, TP proximity guard, slippage guard, or dynamic Market/Limit re-evaluation at the live tick. This caused a rejection loop: Bybit rejected orders with error [10001] "StopLoss should be greater/lower than base_price", the bot didn't burn the setup, and on the next 1m candle the same dead setup was re-detected and re-submitted. On 2026-10-10, LINKUSDT generated 60+ rejected orders in 5 minutes.
 
-**Fix**: Added Pre-flight Check in `executeStagedEntry()` — fetches `getLivePrice()` and validates against SL before calling `executionEngine.execute()`. Wrapped execution in try/catch; on any failure (`!result.ok` or exception), `burnSetup()` is called and state transitions to `SCANNING`.
+**Fix**: Added full pre-execution validation suite in `executeStagedEntry()` (`src/engine/strategyEngine.ts`):
+1. Pre-flight SL breach check — abort if live price already breached SL
+2. Pre-flight TP reached check — abort if live price already reached TP  
+3. Slippage Guard (>0.2% toward TP) — abort if price moved too far toward TP
+4. Dynamic Market vs Limit re-evaluation at live tick using `smartEntryThresholdPct`
+5. Fail-fast `burnSetup()` on any execution rejection or exception
 
-**Rule**: In AUTO_TRADING mode, ALWAYS run pre-flight SL check before `executionEngine.execute()`. On ANY failure, call `burnSetup()` and transition to `SCANNING` — never retry a dead setup.
+**Rule**: In AUTO_TRADING mode, ALWAYS run full pre-flight validation suite before `executionEngine.execute()`. On ANY failure, call `burnSetup()` and transition to `SCANNING` — never retry a dead setup.
 
 ### 16.23 ❌ FORBIDDEN: Native Number/Loose equality for Bybit V5 WS Position Size
 
@@ -2053,20 +2093,7 @@ if (isZeroSize || isClosedSide) { /* position closed */ }
 
 **Rule**: Never use `Number()` alone for Bybit V5 position sizes. Always parse via `Decimal.isZero()` with fallback. Treat `side === 'None'` or missing side as closed.
 
-### 16.24 ❌ FORBIDDEN: Bypassing Pre-flight, TP proximity, or burnSetup in AUTO_TRADING mode
-
-**Root Cause**: In auto-trading mode (`AUTO_TRADING=true`), `executeStagedEntry()` was executing orders without a pre-flight SL check, TP proximity guard, slippage guard, or dynamic Market/Limit re-evaluation at the live tick. This caused a rejection loop: Bybit rejected orders with error [10001] "StopLoss should be greater/lower than base_price", the bot didn't burn the setup, and on the next 1m candle the same dead setup was re-detected and re-submitted. On 2026-10-10, LINKUSDT generated 60+ rejected orders in 5 minutes.
-
-**Fix**: Added full pre-execution validation suite in `executeStagedEntry()` (`src/engine/strategyEngine.ts`):
-1. Pre-flight SL breach check — abort if live price already breached SL
-2. Pre-flight TP reached check — abort if live price already reached TP  
-3. Slippage Guard (>0.2% toward TP) — abort if price moved too far toward TP
-4. Dynamic Market vs Limit re-evaluation at live tick using `smartEntryThresholdPct`
-5. Fail-fast `burnSetup()` on any execution rejection or exception
-
-**Rule**: In AUTO_TRADING mode, ALWAYS run full pre-flight validation suite before `executionEngine.execute()`. On ANY failure, call `burnSetup()` and transition to `SCANNING` — never retry a dead setup.
-
-### 16.25 ❌ FORBIDDEN: Hardcoding decimal precision (toFixed) for Limit order prices
+### 16.24 ❌ FORBIDDEN: Hardcoding decimal precision (toFixed) for Limit order prices
 
 **Root Cause**: Limit order prices were formatted using `idealEntry.toFixed(8)`, which hardcodes 8 decimal places. This violates Bybit's per-instrument `tickSize` precision requirements (anti-pattern 16.3). For instruments with different tick sizes (e.g., 0.01, 0.001, 0.0001), hardcoded 8 decimals either truncates valid precision or produces invalid prices rejected by the exchange.
 
@@ -2079,7 +2106,7 @@ const limitPrice = useMarket
 
 **Rule**: NEVER hardcode decimal precision with `toFixed()` for prices. ALWAYS use `formatPrice(value, tickSize)` from `utils/precision.ts` which respects the instrument's `tickSize`.
 
-### 16.26 ❌ FORBIDDEN: Omitting `.catch()` or `try/catch` in WebSocket event handlers (Causes fatal Node.js crashes)
+### 16.25 ❌ FORBIDDEN: Omitting `.catch()` or `try/catch` in WebSocket event handlers (Causes fatal Node.js crashes)
 
 **Root Cause**: High-frequency WebSocket streams (klines, positions, executions) generate thousands of async callbacks per minute. If any async handler (`onKline`, `onPosition`, `onExecution`) throws an unhandled rejection, Node.js will crash the entire process — catastrophic for a 14-day Burn-In.
 
@@ -2089,7 +2116,7 @@ const limitPrice = useMarket
 
 **Rule**: No async WS callback is ever left without a `.catch()` or `try/catch`. Any error is logged, never crashes the process.
 
-### 16.27 ❌ FORBIDDEN: Omitting `positionIdx: 0` when placing orders with TP/SL on Bybit V5
+### 16.26 ❌ FORBIDDEN: Omitting `positionIdx: 0` when placing orders with TP/SL on Bybit V5
 
 **Root Cause**: Bybit V5 requires `positionIdx: 0` in the `submitOrder()` payload for One-Way Mode when attaching TP/SL via `tpslMode: 'Full'`. Without it, the exchange may reject the order or fail to attach the TP/SL correctly.
 
@@ -2097,6 +2124,30 @@ const limitPrice = useMarket
 
 **Rule**: Every `submitOrder()` call with `tpslMode: 'Full'` MUST include `positionIdx: 0`.
 
+### 16.27 ❌ FORBIDDEN: Passing empty `mitigatedStructures` to ScenarioRouter
+
+**Root Cause**: `process()` called `scenarioRouter.evaluate(..., [], candles1m)` with hardcoded empty array, bypassing the ghost signal protection that tracks already-consumed CHoCH/SMS/BOS structures. This allowed rapid-fire re-entries on the same 1m CHoCH structure.
+
+**Fix**: Pass `this.mitigatedStructures` to `scenarioRouter.evaluate()` so the router filters out already-mitigated structures by timestamp.
+
+**Rule**: `scenarioRouter.evaluate()` MUST receive the engine's `mitigatedStructures` array. Never pass an empty array or hardcoded `[]`.
+
+### 16.28 ❌ FORBIDDEN: `burnSetup()` dependency on `zoneDetails` for structure burning
+
+**Root Cause**: `burnSetup()` had a hard dependency on complete `zoneDetails` — structure burning was nested inside the zone validation check. If zone was incomplete (missing type/timestamp), the structure was NOT added to `mitigatedStructures`, but the log misleadingly claimed "Setup burned: zone X mitigated, structure added". This allowed ghost re-entries on the same CHoCH.
+
+**Fix**: Split burning into independent zone and structure paths. Structure burns from `structureDetails` first, falls back to `zoneDetails` only if no structure details exist. Log exactly what was burned: "ONLY zone", "ONLY structure", "both", or "CRITICAL: neither".
+
+**Rule**: `burnSetup()` MUST burn structure independently of zone validity. Log must truthfully report what was actually burned.
+
+### 16.29 ❌ FORBIDDEN: Blocking hot path with Telegram I/O in auto-trading mode
+
+**Root Cause**: In `AUTO_TRADING=true` mode, calling `await notifier.notifySetupFound()` BEFORE `executionEngine.execute()` adds latency and risks order rejection if Telegram API is slow/unavailable. The hot path must be zero-latency.
+
+**Fix**: Telegram notification is now fire-and-forget AFTER successful execution (see `executeStagedEntry()` lines 938–945): `notifySetupFound(...).catch(err => logger.error(...))`.
+
+**Rule**: In `AUTO_TRADING=true`, NO synchronous/blocking external messenger I/O is permitted prior to order submission. `notifySetupFound` MUST be fire-and-forget AFTER `executionEngine.execute()` succeeds.
+
 ---
 
-_Last updated: 2026-10-11. All 240 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-12. All 240 tests green. Build passes. Enterprise-ready._

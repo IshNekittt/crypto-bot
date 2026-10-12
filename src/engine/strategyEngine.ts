@@ -582,53 +582,65 @@ export class StrategyEngine {
   }
 
   private burnSetup(plan: PositionPlan): void {
-    if (!plan || !plan.zoneDetails) {
-      logger.warn(`[${this.symbol}] burnSetup called with invalid plan, skipping`);
-      return;
-    }
-    const zd = plan.zoneDetails;
-    // Add zone to mitigatedZones to prevent re-entry
-    if (zd.type && zd.top && zd.bottom && zd.timeframe && zd.direction && zd.timestamp != null) {
-      this.addMitigatedZone({
-        type: zd.type,
-        top: zd.top.toString(),
-        bottom: zd.bottom.toString(),
-        timeframe: zd.timeframe,
-        direction: zd.direction,
-        timestamp: zd.timestamp,
-      });
-
-      // Add structure to mitigatedStructures if available
-      // Prefer structureDetails from plan if available (more accurate)
-      if (plan.structureDetails) {
-        const sd = plan.structureDetails;
-        if (sd.timestamp != null && sd.timestamp > 0) {
-          this.mitigatedStructures.push({
-            type: (sd.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
-            timestamp: sd.timestamp,
-            price: sd.price?.toString() || plan.entryPrice.toString(),
-            direction: sd.direction || 'BULLISH',
-          });
-        }
-      } else if (zd.timestamp > 0 && (zd.direction === 'BULLISH' || zd.direction === 'BEARISH')) {
-        // Fallback to zoneDetails if structureDetails not available
-        this.mitigatedStructures.push({
-          type: 'CHoCH',
-          timestamp: zd.timestamp,
-          price: plan.entryPrice.toString(),
-          direction: zd.direction,
-        });
-      }
-      // Keep only last 100 to prevent memory leak
-      if (this.mitigatedStructures.length > 100) {
-        this.mitigatedStructures = this.mitigatedStructures.slice(-100);
-      }
-      
-      logger.warn(`[${this.symbol}] Setup burned: zone ${zd.type} mitigated, structure added to mitigatedStructures`);
-    } else {
-      logger.warn(`[${this.symbol}] burnSetup skipped: zoneDetails incomplete`);
-    }
+  if (!plan) {
+    logger.warn(`[${this.symbol}] burnSetup called with null plan, skipping`);
+    return;
   }
+  
+  let burnedZone = false;
+  let burnedStructure = false;
+
+  // 1. Burn Zone - use the actual types from PositionPlan (strings, not Decimals)
+  const zd = plan.zoneDetails;
+  if (zd && zd.type && zd.timestamp != null && zd.top != null && zd.bottom != null && zd.timeframe != null && zd.direction != null) {
+    this.addMitigatedZone({
+      type: zd.type,
+      top: zd.top,
+      bottom: zd.bottom,
+      timeframe: zd.timeframe,
+      direction: zd.direction,
+      timestamp: zd.timestamp,
+    });
+    burnedZone = true;
+  }
+
+  // 2. Burn Structure
+  const sd = plan.structureDetails;
+  if (sd && sd.timestamp != null && sd.timestamp > 0) {
+    this.mitigatedStructures.push({
+      type: (sd.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+      timestamp: sd.timestamp,
+      price: sd.price?.toString() || plan.entryPrice.toString(),
+      direction: sd.direction || 'BULLISH',
+    });
+    burnedStructure = true;
+  } else if (zd && zd.timestamp != null && zd.timestamp > 0 && zd.direction && (zd.direction === 'BULLISH' || zd.direction === 'BEARISH')) {
+    // Fallback ONLY if no structure details
+    this.mitigatedStructures.push({
+      type: 'CHoCH',
+      timestamp: zd.timestamp,
+      price: plan.entryPrice.toString(),
+      direction: zd.direction,
+    });
+    burnedStructure = true;
+  }
+
+  // Prevent memory leak
+  if (this.mitigatedStructures.length > 100) {
+    this.mitigatedStructures = this.mitigatedStructures.slice(-100);
+  }
+
+  // Honest logging
+  if (burnedZone && burnedStructure) {
+    logger.warn(`[${this.symbol}] Setup burned: zone ${zd?.type} mitigated, structure added to mitigatedStructures`);
+  } else if (burnedZone) {
+    logger.warn(`[${this.symbol}] Setup burned: ONLY zone ${zd?.type} mitigated (no structure)`);
+  } else if (burnedStructure) {
+    logger.warn(`[${this.symbol}] Setup burned: ONLY structure added to mitigatedStructures (no zone)`);
+  } else {
+    logger.error(`[${this.symbol}] CRITICAL: burnSetup called but found neither valid zoneDetails nor structureDetails! Ghost signals may occur.`);
+  }
+}
 
   private addMitigatedZone(zoneDetails: any): void {
     const zone: MitigatedZone = {
@@ -667,6 +679,7 @@ export class StrategyEngine {
     this.state = state;
     if (state === StrategyState.SCANNING) {
       this.plan = null;
+      this._activeSniperZone = null;
     }
     this.deps.db.setSymbolState(this.symbol, state).catch((err) =>
       logger.error(`Failed to update symbol state in DB: ${err}`),
@@ -739,7 +752,7 @@ export class StrategyEngine {
     // Pass 1m candles to router if Sniper Mode is enabled
     const candles1m = this.deps.config.enableSniperMode ? [...this.feed1m.getCandles()] : [];
 
-    const result = await this.scenarioRouter.evaluate(candlesLtf, candlesHtf, candleTimestamp, this.mitigatedZones, [], candles1m);
+    const result = await this.scenarioRouter.evaluate(candlesLtf, candlesHtf, candleTimestamp, this.mitigatedZones, this.mitigatedStructures, candles1m);
 
     if (result.triggered && result.levels) {
       // Smart Pullback Entry: Determine order type based on price deviation from ideal entry
