@@ -87,10 +87,33 @@ export class ReconciliationLoop {
           
           // Check for active limit orders before force-reset
           const openOrders = await this.source.getOpenOrders(engine.symbol);
-          const hasActiveLimitOrder = openOrders.some(
+          
+          // Calculate dynamic expiration based on Sniper Mode (1m) vs Classic (LTF)
+          const executionTfMinutes = this.config.enableSniperMode ? 1 : Number(this.config.ltfTimeframe);
+          const expirationMs = this.config.limitExpirationCandles * executionTfMinutes * 60 * 1000;
+          const now = Date.now();
+          
+          const activeLimits = openOrders.filter(
             (o) => o.orderType === 'Limit' && (o.status === 'New' || o.status === 'PartiallyFilled')
           );
-          if (hasActiveLimitOrder) {
+          
+          let hasValidLimit = false;
+          
+          for (const order of activeLimits) {
+            const orderAgeMs = now - order.createdAt;
+            if (orderAgeMs > expirationMs) {
+              logger.info(`[${engine.symbol}] Cancelling expired LIMIT order ${order.orderId} (age: ${Math.round(orderAgeMs/60000)}m, limit: ${this.config.limitExpirationCandles} candles)`);
+              try {
+                await this.source.cancelOrder(engine.symbol, order.orderId);
+              } catch (err) {
+                logger.error(`[${engine.symbol}] Failed to cancel expired limit order: ${err}`);
+              }
+            } else {
+              hasValidLimit = true;
+            }
+          }
+          
+          if (hasValidLimit) {
             logger.info(`[${engine.symbol}] Reconciliation: Keeping IN_TRADE state due to active Limit order`);
             continue; // Skip force-reset, limit order is still active
           }
@@ -126,11 +149,11 @@ export class ReconciliationLoop {
           // Check for active limit orders before force-reset
           const openOrders = await this.source.getOpenOrders(trade.symbol);
           const hasActiveLimitOrder = openOrders.some(
-            (o) => o.orderType === 'Limit' && (o.status === 'New' || o.status === 'PartiallyFilled')
+            (o: { orderType: string; status: string }) => o.orderType === 'Limit' && (o.status === 'New' || o.status === 'PartiallyFilled')
           );
           if (hasActiveLimitOrder) {
-            logger.info(`[${trade.symbol}] Reconciliation: Keeping IN_TRADE state due to active Limit order`);
-            continue; // Skip force-reset, limit order is still active
+            // SILENT CONTINUE to avoid duplicate logs (already logged in Step 1)
+            continue;
           }
 
           if (!hasPosition) {
@@ -164,7 +187,9 @@ export class ReconciliationLoop {
   }
 
   private async cancelExpiredLimitOrders(): Promise<void> {
-    const limitExpirationMs = this.config.limitExpirationCandles * Number(this.config.ltfTimeframe) * 60 * 1000;
+    // Use execution timeframe: 1m for Sniper Mode, LTF for Classic
+    const executionTfMinutes = this.config.enableSniperMode ? 1 : Number(this.config.ltfTimeframe);
+    const limitExpirationMs = this.config.limitExpirationCandles * executionTfMinutes * 60 * 1000;
     const now = Date.now();
 
     for (const engine of this.engines) {
