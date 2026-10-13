@@ -163,8 +163,8 @@ export class TelegramNotifier {
         ].join("\n");
 
         const keyboard = Markup.inlineKeyboard([
-          Markup.button.callback("✅ Войти (LIVE DEMO)", `approve_${tradeId}`),
-          Markup.button.callback("❌ Отменить", `reject_${tradeId}`),
+          Markup.button.callback("✅ Enter (LIVE DEMO)", `approve_${tradeId}`),
+          Markup.button.callback("❌ Cancel", `reject_${tradeId}`),
         ]);
 
         await this.sendMessageWithKeyboard(text, keyboard);
@@ -264,8 +264,8 @@ export class TelegramNotifier {
       ].join("\n");
 
       const keyboard = Markup.inlineKeyboard([
-        Markup.button.callback("✅ Войти (Test)", `approve_${tradeId}`),
-        Markup.button.callback("❌ Отменить (Test)", `reject_${tradeId}`),
+        Markup.button.callback("✅ Enter (Test)", `approve_${tradeId}`),
+        Markup.button.callback("❌ Cancel (Test)", `reject_${tradeId}`),
       ]);
 
       // Store the fake trade in pendingTradeManager
@@ -329,7 +329,7 @@ export class TelegramNotifier {
           this.chatId,
           statusMsg.message_id,
           undefined,
-          "❌ Ошибка создания бэкапа БД!",
+          "❌ Database backup creation error!",
         );
       }
     });
@@ -542,10 +542,10 @@ export class TelegramNotifier {
     reason: string,
   ): Promise<boolean> {
     const text = [
-      "👀 <b>Найден сетап</b>",
+      "👀 <b>Setup Found</b>",
       "",
-      `📊 ${symbol} | Сценарий #${scenarioId}`,
-      `💰 Вход: ${entry} | SL: ${sl} | TP: ${tp}`,
+      `📊 ${symbol} | Scenario #${scenarioId}`,
+      `💰 Entry: ${entry} | SL: ${sl} | TP: ${tp}`,
       `📝 ${reason}`,
     ].join("\n");
     return this.sendMessage(text);
@@ -558,10 +558,10 @@ export class TelegramNotifier {
     tp: string,
   ): Promise<boolean> {
     const text = [
-      "🚀 <b>Ордер открыт</b>",
+      "🚀 <b>Order Opened</b>",
       "",
       `📊 ${symbol}`,
-      `💰 Вход: ${entry} | SL: ${sl} | TP: ${tp}`,
+      `💰 Entry: ${entry} | SL: ${sl} | TP: ${tp}`,
     ].join("\n");
     return this.sendMessage(text);
   }
@@ -570,11 +570,17 @@ export class TelegramNotifier {
     symbol: string,
     pnl: string,
     pnlPercent: string,
+    reason?: string,
   ): Promise<boolean> {
+    // Skip notification for cancelled limit orders
+    if (reason === 'CANCELLED') {
+      return true;
+    }
+    
     // Strip any % signs from percentage string before parsing
     const cleanPnlPercent = pnlPercent.replace('%', '');
     const safePnl = pnl ? new Decimal(pnl) : new Decimal(0);
-    const safePnlPct = cleanPnlPercent ? new Decimal(cleanPnlPercent) : new Decimal(0);
+    const safePnlPct = pnlPercent ? new Decimal(cleanPnlPercent) : new Decimal(0);
 
     const isWin = safePnl.gt(0);
     const icon = isWin ? "✅" : (safePnl.isNegative() ? "❌" : "➖");
@@ -583,7 +589,7 @@ export class TelegramNotifier {
     const pnlText = `${icon} <b>PnL:</b> ${sign}${safePnl.toFixed(2)} USDT (${sign}${safePnlPct.toFixed(2)}%)`;
 
     const text = [
-      `${icon} <b>Позиция закрыта</b>`,
+      `${icon} <b>Position Closed</b>`,
       "",
       `📊 ${symbol}`,
       pnlText,
@@ -592,11 +598,11 @@ export class TelegramNotifier {
   }
 
   async notifyCriticalError(message: string): Promise<boolean> {
-    return this.sendMessage(`⚠️ <b>Критическая ошибка</b>\n\n${message}`);
+    return this.sendMessage(`⚠️ <b>Critical Error</b>\n\n${message}`);
   }
 
   async notifyInfo(message: string): Promise<boolean> {
-    return this.sendMessage(`ℹ️ <b>Инфо</b>\n\n${message}`);
+    return this.sendMessage(`ℹ️ <b>Info</b>\n\n${message}`);
   }
 
   get enabled(): boolean {

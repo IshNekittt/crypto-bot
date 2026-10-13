@@ -428,6 +428,8 @@ async openTrade(input: {
     closedAt: number | null;
     orderId: string | null;
     side: string | null;
+    order_type: string | null;
+    limit_price: string | null;
     zoneDetails: {
       type: string | null;
       top: Decimal | null;
@@ -441,7 +443,7 @@ async openTrade(input: {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, management_state
+        `SELECT id, symbol, scenario_id, entry_price as "entryPrice", sl_price as "stopLoss", tp_price as "takeProfit", qty, pnl, exit_price as "exitPrice", status, reason, opened_at as "openedAt", closed_at as "closedAt", order_id as "orderId", side, order_type, limit_price, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, management_state
          FROM trades WHERE status = 'OPEN' ORDER BY id DESC`,
       );
       return result.rows.map(row => ({
@@ -460,6 +462,8 @@ async openTrade(input: {
         closedAt: row.closedAt,
         orderId: row.orderId,
         side: row.side as 'Buy' | 'Sell' | null,
+        order_type: row.order_type,
+        limit_price: row.limit_price,
         zoneDetails: row.zone_type ? {
           type: row.zone_type,
           top: new Decimal(row.zone_top),

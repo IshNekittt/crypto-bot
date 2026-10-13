@@ -1062,6 +1062,7 @@ export class StrategyEngine {
     side: 'Buy' | 'Sell';
     openedAt: number;
     orderId: string | null;
+    order_type: string | null;
     zoneDetails: {
       type: string | null;
       top: Decimal | null;
@@ -1149,6 +1150,15 @@ export class StrategyEngine {
           finalExitPrice = matchedPnl.exitPrice.toFixed(8);
           logger.info(`${this.symbol}: Using exchange closedPnl (with funding/fees): ${finalPnlString} vs calculated: ${calculatedPnlString}`);
         } else {
+          // NO PNL FOUND ON EXCHANGE
+          // Check if this was a Limit order that was cancelled (no executions)
+          if (trade.order_type === 'Limit') {
+            logger.warn(`[${this.symbol}] Limit order ${trade.id} has no closed PnL. Assuming CANCELLED unfilled.`);
+            await this.deps.db.closeTrade(trade.id, '0', trade.entryPrice, Date.now(), 'CANCELLED');
+            this.transition(StrategyState.SCANNING);
+            return true; // Reconciled
+          }
+          
           logger.warn(`${this.symbol}: No matching closedPnl found, using calculated PnL`);
         }
       } catch (pnlError) {

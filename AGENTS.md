@@ -179,7 +179,10 @@ All REST calls wrapped in `executeWithRetry()`:
 - Runs every **10 minutes**.
 - **Step 1**: For each `IN_TRADE` engine → `getOpenPositions()` → if gone, force `SCANNING`.
   - **Limit Order Awareness** (`v2026-10-06`): Before force-reset `IN_TRADE → SCANNING`, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`) via `getActiveOrders()`. If active Limit orders exist, **skips force-reset** to prevent Race Condition and signal duplication.
+  - **Limit Order Expiration & Cancellation** (`v2026-10-13`): Checks for expired Limit orders using dynamic timeframe (1m for Sniper Mode, LTF for Classic). Expired orders are **cancelled via API** and immediately closed in DB with `closeTrade(orderId, '0', price, now, 'CANCELLED')`. This prevents Step 2 from hallucinating PnL.
 - **Step 2**: `db.getAllOpenTrades()` → for each, check exchange position → if missing, `reconcileWithTrade()` with zoneDetails for mitigatedZones tracking.
+  - **Limit Order Silent Skip**: If active Limit order found, silently skips force-reset (already logged in Step 1 to prevent duplicate logs).
+- **Limit Fallback Prevention** (`v2026-10-13`): In `reconcileWithTrade()`, if `getClosedPnl` returns empty and `trade.order_type === 'Limit'`, the system **MUST assume it was cancelled unfilled** and record `0` PnL with `CANCELLED` reason. Mathematical PnL fallback is **strictly reserved for Market orders**.
 - Idempotent, safe to run concurrently with WS events.
 
 ### 3.5 Accurate PnL with Funding — `src/engine/strategyEngine.ts` + `src/api/bybitClient.ts`
@@ -394,7 +397,29 @@ In auto-trading mode (`executeStagedEntry`), the logic order was corrected to el
 
 **Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
 
-### 4.5 Breakeven Protection — **LEGACY (Removed v2026-10-03)**
+**Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
+
+### 4.6 Telegram Localization & Spam Guard — **NEW v2026-10-13**
+
+**English-Only Localization Rule**: All user-facing strings, logs, and Telegram messages MUST be strictly in **English**. No Cyrillic/Russian strings are allowed in the codebase. All user-facing text in `src/telegram/notifier.ts` has been translated to English (e.g., "Position Closed", "Setup Found", "Critical Error").
+
+**Spam Guard for Cancelled Limit Orders**: `notifyTradeClosed()` in `src/telegram/notifier.ts` has a guard clause that silently returns if `reason === 'CANCELLED'`. This prevents Telegram spam for cancelled limit orders (which have 0 PnL and should not trigger trade-closed notifications).
+
+**Implementation** (`src/telegram/notifier.ts:570`):
+```typescript
+async notifyTradeClosed(
+  symbol: string,
+  pnl: string,
+  pnlPercent: string,
+  reason?: string,
+): Promise<boolean> {
+  // Skip notification for cancelled limit orders
+  if (reason === 'CANCELLED') {
+    return true; // Do not spam TG for cancelled limits
+  }
+  // ... rest of notification logic
+}
+```
 
 Breakeven logic (SL → entry at fixed R-multiple) has been **replaced by Adaptive Fractioning** (`src/risk/tradeManager.ts`). 
 
@@ -2268,6 +2293,22 @@ const limitPrice = useMarket
 
 **Rule**: The >0.2% slippage guard must NEVER be applied to Limit orders. It must only be applied to Market orders where slippage is a real risk. Limit orders wait for a pullback by design.
 
+### 16.33 ❌ FORBIDDEN: Using mathematical PnL fallback for Limit orders when exchange PnL is missing
+
+**Root Cause**: When `getClosedPnl` returns empty for a Limit order, the system was falling back to mathematical PnL calculation, creating hallucinated PnL (e.g., fake $67 profit) for a cancelled limit order that was never filled. Limit orders without exchange PnL must be treated as CANCELLED (0 PnL).
+
+**Fix**: In `reconcileWithTrade()`, if `closedPnls.length === 0` and `trade.order_type === 'Limit'`, the system MUST assume it was cancelled unfilled and record `0` PnL with `CANCELLED` reason. Mathematical PnL fallback is strictly reserved for Market orders.
+
+**Rule**: Limit orders without exchange PnL must be treated as CANCELLED (0 PnL). Mathematical PnL fallback is strictly reserved for Market orders.
+
+### 16.34 ❌ FORBIDDEN: Hardcoding non-English (Cyrillic/Russian) strings for logs or Telegram notifications
+
+**Root Cause**: Telegram notifications contained Russian strings (e.g., "Позиция закрыта", "Найден сетап", "Критическая ошибка"). This violates the English-Only policy for all user-facing text and creates inconsistency in production logs.
+
+**Fix**: All user-facing strings in `src/telegram/notifier.ts` have been translated to English (e.g., "Position Closed", "Setup Found", "Critical Error"). Code reviews must reject any non-English strings.
+
+**Rule**: All user-facing strings, logs, and Telegram messages MUST be strictly in English. No Cyrillic/Russian strings are allowed in the codebase.
+
 ---
 
-_Last updated: 2026-10-12. All 240 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-13. All 240 tests green. Build passes. Enterprise-ready._

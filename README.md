@@ -439,8 +439,8 @@ _Full implementation details: [AGENTS.md §7.8](AGENTS.md#78-news-filter-news-em
 | **Alert Threshold**           | `FUNDING_ALERT_THRESHOLD=0.0` — rate ≤ 0 triggers alert                                                     |
 | **Restore Threshold**         | `FUNDING_RESTORE_THRESHOLD=0.0001` — rate ≥ +0.01% triggers restore                                         |
 | **State Tracking**            | Per-symbol `isAlerted` boolean to prevent spam                                                              |
-| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nМонета: {symbol}\nСтавка: {rate}%\nРекомендуется закрыть арбитраж!`                    |
-| **Telegram Alert (Restore)**  | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate}% (APY: ~{apy}%)\nМожно снова открывать арбитраж!` |
+| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nCoin: {symbol}\nRate: {rate}%\nRecommend closing arbitrage!`                    |
+| **Telegram Alert (Restore)**  | `🟢 [FUNDING RESTORED]\nCoin: {symbol}\nRate: +{rate}% (APY: ~{apy}%)\nArbitrage can be reopened!` |
 | **Public API**                | `getCurrentRates(): Map<string, Decimal>` for `/status` command                                             |
 
 **Integration**: Conditionally created if `ENABLE_FUNDING_MONITOR=true`, started via `fundingMonitor.start()`, graceful shutdown via `fundingMonitor.stop()`. `/status` shows funding rates.

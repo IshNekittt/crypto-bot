@@ -19,6 +19,7 @@ export interface ReconcilableEngine {
     side: 'Buy' | 'Sell';
     openedAt: number;
     orderId: string | null;
+    order_type: string | null;
     zoneDetails: {
       type: string | null;
       top: Decimal | null;
@@ -166,6 +167,7 @@ export class ReconciliationLoop {
               side: trade.side as 'Buy' | 'Sell',
               openedAt: trade.openedAt,
               orderId: trade.orderId,
+              order_type: trade.order_type,
               zoneDetails: trade.zoneDetails,
             });
             if (changed) resets += 1;
@@ -207,7 +209,16 @@ export class ReconciliationLoop {
             // Cancel the expired limit order
             try {
               await this.source.cancelOrder(order.symbol, order.orderId);
-              logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${this.config.limitExpirationCandles} candles)`);
+              
+              // Explicitly close in DB with 0 PnL and CANCELLED reason
+              // This prevents Step 2 from hallucinating PnL
+              try {
+                await this.db.closeTrade(order.orderId, '0', order.price || '0', Date.now(), 'CANCELLED');
+                logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${this.config.limitExpirationCandles} candles)`);
+                logger.info(`[${symbol}] Cancelled order closed in DB safely.`);
+              } catch (dbError) {
+                logger.error(`[${symbol}] Failed to close cancelled order in DB: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
+              }
             } catch (cancelError) {
               logger.warn(`[${symbol}] Failed to cancel expired limit order ${order.orderId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`);
             }
