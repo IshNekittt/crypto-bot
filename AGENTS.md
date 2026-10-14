@@ -200,6 +200,8 @@ All REST calls wrapped in `executeWithRetry()`:
 
 > **Important**: Uses `filter().reduce()` instead of `find()` to correctly sum PnL across multiple partial closes (Adaptive Fractioning).
 
+> **Critical — Fallback PnL Uses WS Execution Price** (`v2026-10-14`): If `getClosedPnl` from the REST API is delayed or empty for a Market/SL close, the mathematical fallback MUST use the `execPrice` extracted directly from the WebSocket `Execution` payload (passed down via `onExchangePositionClosed(null, execPrice)`). Using the current market price (`getLivePrice()`) is strictly prohibited as it causes inaccurate PnL due to network delay/volatility.
+
 ### 3.6 Robust Bybit V5 Position Parsing — `src/engine/strategyEngine.ts:42-55`
 
 **Problem**: Bybit V5 WebSocket position updates send position sizes as strings (`"0"`, `"0.000"`, `"0.0000"`, `""`) or side `'None'`. Native `Number()` comparison can fail due to precision or string falsiness; `new Decimal(sizeStr).isZero()` with fallback is required.
@@ -2309,6 +2311,14 @@ const limitPrice = useMarket
 
 **Rule**: All user-facing strings, logs, and Telegram messages MUST be strictly in English. No Cyrillic/Russian strings are allowed in the codebase.
 
+### 16.35 ❌ FORBIDDEN: Using getLivePrice() as the exit price for PnL fallback calculations
+
+**Root Cause**: When `getClosedPnl` from the REST API is delayed or empty for a Market/SL close, the mathematical fallback used `getLivePrice()` (current market price) as the exit price. After a network delay of several seconds, the live price has moved significantly away from the actual Stop-Loss execution price, causing hallucinated PnL that corrupts database integrity and Adaptive Fractioning calculations.
+
+**Fix**: Extract `item.execPrice` from the Bybit Execution WebSocket payload in `handleExecutionPayload()`, pass it through `onExchangePositionClosed(null, execPrice)`, and use it as the authoritative exit price for mathematical fallback PnL calculations.
+
+**Rule**: You MUST extract `item.execPrice` from the Bybit Execution WebSocket payload. Using `getLivePrice()` after a network delay results in hallucinated PnL that destroys database integrity.
+
 ---
 
-_Last updated: 2026-10-13. All 240 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-14. All 240 tests green. Build passes. Enterprise-ready._

@@ -380,8 +380,9 @@ export class StrategyEngine {
         if (item.symbol === this.symbol && item.execType === 'Trade') {
           const closedSize = new Decimal(item.closedSize ?? '0');
           if (closedSize.gt(0)) {
-            logger.info(`[${this.symbol}] Execution WS: Position closed (size=${closedSize}), triggering reconciliation`);
-            await this.onExchangePositionClosed(null);
+            const execPrice = item.execPrice ? item.execPrice.toString() : undefined;
+            logger.info(`[${this.symbol}] Execution WS: Position closed (size=${closedSize}, execPrice=${execPrice ?? 'unknown'}), triggering reconciliation`);
+            await this.onExchangePositionClosed(null, execPrice);
             return;
           }
         }
@@ -489,7 +490,7 @@ export class StrategyEngine {
     }
   }
 
-  private async onExchangePositionClosed(pnl: string | null): Promise<void> {
+  private async onExchangePositionClosed(pnl: string | null, wsExitPrice?: string): Promise<void> {
     const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (!trade) {
       logger.warn(`${this.symbol}: position close event but no open trade found`);
@@ -546,7 +547,8 @@ export class StrategyEngine {
       if (finalPnlString === null) {
         // Calculate PnL from trade data if exchange data unavailable
         const entryPrice = new Decimal(trade.entryPrice);
-        const exitPrice = finalExitPrice ? new Decimal(finalExitPrice) : new Decimal(this.getLivePrice() ?? trade.entryPrice);
+        const exitPriceStr = wsExitPrice ?? this.getLivePrice() ?? trade.entryPrice; // USE WS PRICE FIRST
+        const exitPrice = new Decimal(exitPriceStr);
         const qty = new Decimal(trade.qty);
         const isLong = trade.side === 'Buy';
 
@@ -555,13 +557,14 @@ export class StrategyEngine {
         } else {
           finalPnlString = entryPrice.minus(exitPrice).mul(qty).toFixed(8);
         }
-        logger.warn(`${this.symbol}: Calculated fallback PnL from trade data: ${finalPnlString}`);
+        logger.warn(`[${this.symbol}] Calculated fallback PnL from trade data: ${finalPnlString}`);
+        logger.warn(`[${this.symbol}] Using fallback exit price: ${exitPriceStr}`);
       }
 
       if (finalExitPrice === null) {
         // Use live price as fallback for exit price
-        finalExitPrice = this.getLivePrice() ?? trade.entryPrice;
-        logger.warn(`${this.symbol}: Using fallback exit price: ${finalExitPrice}`);
+        finalExitPrice = wsExitPrice ?? this.getLivePrice() ?? trade.entryPrice;
+        logger.warn(`[${this.symbol}] Using fallback exit price: ${finalExitPrice}`);
       }
 
       // Determine close reason from PnL sign

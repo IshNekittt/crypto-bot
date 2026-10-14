@@ -8,12 +8,12 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Tests](https://img.shields.io/badge/Tests-240%20passing-brightgreen?logo=jest)](https://jestjs.io/)
-[![Version](https://img.shields.io/badge/Version-v2026--10--10-blue)](https://github.com/)
+[![Version](https://img.shields.io/badge/Version-v2026--10--14-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
 
-**v2026-10-10**: Hardened auto-trading pre-flight checks, robust Bybit V5 position parsing, reconciliation cooldown, and fail-fast burnSetup guarantees.
+**v2026-10-14**: Added WS `execPrice` PnL fallback fix, Limit order expiration fix for Sniper mode, duplicate log cleanup, and dual-channel closure fixes.
 
 </div>
 
@@ -781,6 +781,7 @@ docker compose up -d
 | **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                                         |
 | **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                                  |
 | **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                                 |
+| **BACKTEST_CSV_PATH**              |          |             —             | Path to local CSV file for offline backtesting                                                                                         |
 | **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                                    |
 | **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                                            |
 | **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance.              |
