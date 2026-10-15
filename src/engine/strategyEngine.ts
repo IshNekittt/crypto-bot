@@ -882,7 +882,7 @@ export class StrategyEngine {
     const isLong = this.plan.side === 'Buy';
 
     // 1. Pre-flight SL breach check (unconditional for ALL orders) WITH spread buffer
-    const slBuffer = livePrice.mul(this.deps.config.preflightBufferPct);
+    const slBuffer = livePrice.mul(new Decimal(this.deps.config.preflightBufferPct));
     const slBreached = isLong ? livePrice.lte(sl.plus(slBuffer)) : livePrice.gte(sl.minus(slBuffer));
     if (slBreached) {
       logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
