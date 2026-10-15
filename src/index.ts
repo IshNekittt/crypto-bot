@@ -378,8 +378,8 @@ async function main(): Promise<void> {
       client,
       notifier,
       config.fundingMonitorSymbols,
-      config.fundingAlertThreshold,
-      config.fundingRestoreThreshold
+      config.fundingAlertThresholdPct,
+      config.fundingRestoreThresholdPct
     );
     fundingMonitor.start();
     notifier.setFundingMonitor(fundingMonitor);

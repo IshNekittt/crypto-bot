@@ -38,8 +38,8 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
     enableFundingMonitor: false,
     fundingMonitorSymbols: [],
-    fundingAlertThreshold: '0.0',
-    fundingRestoreThreshold: '0.0001',
+    fundingAlertThresholdPct: '0.0',
+    fundingRestoreThresholdPct: '0.0001',
     symbolScenarios: new Map(),
     backtestCsvPath: null,
     cooldownCandles: 16,
@@ -51,6 +51,7 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
+    preflightBufferPct: "0.05",
     enableHealthcheckServer: false,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };

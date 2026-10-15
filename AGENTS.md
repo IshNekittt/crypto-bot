@@ -401,6 +401,44 @@ In auto-trading mode (`executeStagedEntry`), the logic order was corrected to el
 
 **Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
 
+### 4.4.1 Discount Trap Fix — **NEW v2026-10-14**
+
+**Problem**: When the live price is BETTER than the ideal entry (a "discount"), the old logic could still place a Limit order at the ideal entry price. This caused the Limit order to be immediately filled at the current market price (which is better than the limit price), but the attached Stop-Loss was calculated based on the ideal entry price, not the actual fill price. This violated Stop-Loss geometry and caused Bybit Error `[10001]` (StopLoss set for Buy position should be lower than base_price).
+
+**Solution**: In `executeStagedEntry()`, the Market vs Limit decision now checks for a discount FIRST, before the 0.15% threshold check:
+
+1. **Discount Check (FIRST)**: If live price is BETTER than ideal entry (discount), ALWAYS use **Market** order — never Limit.
+2. **Threshold Check (SECOND)**: If no discount, apply the 0.15% threshold — Market if within threshold, Limit if beyond.
+4. **Pre-flight SL/TP checks**: Remain UNCONDITIONAL for all orders.
+
+```typescript
+// Check if current price is BETTER than ideal entry (discount)
+const isDiscount = isLong ? livePrice.lte(idealEntry) : livePrice.gte(idealEntry);
+
+// ALWAYS use Market if discount exists, OR if within threshold
+const useMarket = isDiscount || priceDiffPct.lte(threshold);
+```
+
+**Result**: Limit orders are ONLY placed when price has moved AWAY from ideal entry (premium). At a discount, Market orders execute immediately at the favorable price with correct SL/TP geometry.
+
+### 4.4.2 Pre-flight Spread Buffer — **NEW v2026-10-14**
+
+**Problem**: When placing Market orders with attached TP/SL, Bybit validates that the SL is properly positioned relative to the execution price. During volatile moments, the order book spread can cause the live price to be within the spread of the SL, causing Bybit to reject the order with error `[10001]` (StopLoss should be greater/lower than base_price).
+
+**Solution**: Added configurable `PREFLIGHT_BUFFER_PCT` (default 0.05%) that adds a safety margin to the Pre-flight SL check:
+
+```typescript
+// 0.05% spread buffer (configurable via PREFLIGHT_BUFFER_PCT)
+const slBuffer = livePrice.mul(this.deps.config.preflightBufferPct);
+const slBreached = isLong 
+  ? livePrice.lte(sl.plus(slBuffer))   // Long: SL + buffer
+  : livePrice.gte(sl.minus(slBuffer)); // Short: SL - buffer
+```
+
+The buffer creates a safety margin between the live price and the SL, preventing rejections due to order book spread. The default 0.05% is conservative for liquid pairs; adjust via `PREFLIGHT_BUFFER_PCT` in `.env` for less liquid markets.
+
+---
+
 ### 4.6 Telegram Localization & Spam Guard — **NEW v2026-10-13**
 
 **English-Only Localization Rule**: All user-facing strings, logs, and Telegram messages MUST be strictly in **English**. No Cyrillic/Russian strings are allowed in the codebase. All user-facing text in `src/telegram/notifier.ts` has been translated to English (e.g., "Position Closed", "Setup Found", "Critical Error").
@@ -412,7 +450,7 @@ In auto-trading mode (`executeStagedEntry`), the logic order was corrected to el
 async notifyTradeClosed(
   symbol: string,
   pnl: string,
-  pnlPercent: string,
+  _pnlPercent: string,
   reason?: string,
 ): Promise<boolean> {
   // Skip notification for cancelled limit orders
@@ -422,6 +460,8 @@ async notifyTradeClosed(
   // ... rest of notification logic
 }
 ```
+
+**Minimalist Trade Closure Notifications**: Trade closure notifications are kept strictly minimalist, displaying only the exact USDT PnL formatted to 2 decimal places (e.g., `✅ PnL: +60.70 USDT`). PnL percentage metrics have been removed from Telegram alerts to prevent `DecimalError` parsing bugs and UI clutter.
 
 Breakeven logic (SL → entry at fixed R-multiple) has been **replaced by Adaptive Fractioning** (`src/risk/tradeManager.ts`). 
 
@@ -2318,6 +2358,29 @@ const limitPrice = useMarket
 **Fix**: Extract `item.execPrice` from the Bybit Execution WebSocket payload in `handleExecutionPayload()`, pass it through `onExchangePositionClosed(null, execPrice)`, and use it as the authoritative exit price for mathematical fallback PnL calculations.
 
 **Rule**: You MUST extract `item.execPrice` from the Bybit Execution WebSocket payload. Using `getLivePrice()` after a network delay results in hallucinated PnL that destroys database integrity.
+
+### 16.36 ❌ FORBIDDEN: Hardcoding percentage buffers for spread/slippage
+
+**Root Cause**: The Pre-flight SL check used a hardcoded `0.0005` (0.05%) spread buffer. Different trading pairs have vastly different liquidity profiles — BTCUSDT might have 0.01% spread while a low-cap altcoin could have 0.5% spread. A hardcoded value either rejects valid trades on liquid pairs or fails to protect against spread on illiquid ones.
+
+**Fix**: Added configurable `PREFLIGHT_BUFFER_PCT` (default `0.05` = 0.05%) in `.env`. The buffer is now read from config: `livePrice.mul(this.deps.config.preflightBufferPct)`.
+
+**Rule**: NEVER hardcode percentage buffers for spread/slippage. Always use configurable variables (like `PREFLIGHT_BUFFER_PCT`) because different assets have different liquidity profiles.
+
+### 16.37 ❌ FORBIDDEN: Placing Limit orders when live price is better than ideal entry (Discount Trap)
+
+**Root Cause**: When the live price was BETTER than the ideal entry (a "discount"), the bot would still place a Limit order at the ideal entry price. This caused the Limit order to be immediately filled at the current market price (which is better than the limit price), but the attached Stop-Loss was calculated based on the ideal entry price, not the actual fill price. This violated Stop-Loss geometry and caused Bybit Error `[10001]` (StopLoss set for Buy position should be lower than base_price).
+
+**Fix**: In `executeStagedEntry()`, the Market vs Limit decision now checks for a discount FIRST:
+1. **Discount Check (FIRST)**: If live price is BETTER than ideal entry (discount), ALWAYS use Market order.
+2. **Threshold Check (SECOND)**: If no discount, apply 0.15% threshold.
+
+```typescript
+const isDiscount = isLong ? livePrice.lte(idealEntry) : livePrice.gte(idealEntry);
+const useMarket = isDiscount || priceDiffPct.lte(threshold);
+```
+
+**Rule**: NEVER place Limit orders when live price is better than ideal entry (a discount). Market orders MUST be used to capture the favorable price with correct SL/TP geometry.
 
 ---
 

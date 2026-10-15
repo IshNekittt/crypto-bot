@@ -436,8 +436,8 @@ _Full implementation details: [AGENTS.md §7.8](AGENTS.md#78-news-filter-news-em
 | **Source**                    | Bybit V5 `getTickers({ category: 'linear' })`                                                               |
 | **Poll Interval**             | 30 minutes                                                                                                  |
 | **Tracked Symbols**           | `FUNDING_MONITOR_SYMBOLS` (default: `BTCUSDT,ETHUSDT,SOLUSDT`)                                              |
-| **Alert Threshold**           | `FUNDING_ALERT_THRESHOLD=0.0` — rate ≤ 0 triggers alert                                                     |
-| **Restore Threshold**         | `FUNDING_RESTORE_THRESHOLD=0.0001` — rate ≥ +0.01% triggers restore                                         |
+| **Alert Threshold**           | `FUNDING_ALERT_THRESHOLD_PCT=0.0` — rate ≤ 0% triggers alert                                                     |
+| **Restore Threshold**         | `FUNDING_RESTORE_THRESHOLD_PCT=0.015` — rate ≥ +0.015% triggers restore                                         |
 | **State Tracking**            | Per-symbol `isAlerted` boolean to prevent spam                                                              |
 | **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nCoin: {symbol}\nRate: {rate}%\nRecommend closing arbitrage!`                    |
 | **Telegram Alert (Restore)**  | `🟢 [FUNDING RESTORED]\nCoin: {symbol}\nRate: +{rate}% (APY: ~{apy}%)\nArbitrage can be reopened!` |
@@ -651,7 +651,7 @@ Full details with exact UTC timestamps:
 ↳ ETHUSDT | Scenario 6 (SMS) | WIN
    Entry: 2026-05-23 06:30:00 UTC | Exit: 2026-05-23 06:45:00 UTC
    Entry: 2128.21 | SL: 2135.81 | TP: 2105.42 | Qty: 2.63
-   PnL: +$53.83 (+0.96%) | Fees: $6.12
+   PnL: +$53.83 | Fees: $6.12
 ```
 
 ### ⏳ DRY SPELLS
@@ -771,14 +771,15 @@ docker compose up -d
 | **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups                                                                                            |
 | **ENABLE_FUNDING_MONITOR**         |          |          `false`          | Enable funding rate monitoring                                                                                                         |
 | **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates                                                                                                   |
-| **FUNDING_ALERT_THRESHOLD**        |          |           `0.0`           | Alert when funding rate ≤ this value                                                                                                   |
-| **FUNDING_RESTORE_THRESHOLD**      |          |         `0.0001`          | Restore alert when funding rate ≥ this value                                                                                           |
+| **FUNDING_ALERT_THRESHOLD_PCT**        |          |           `0.0`           | Alert when funding rate ≤ this value (%)                                                                                                   |
+| **FUNDING_RESTORE_THRESHOLD_PCT**      |          |         `0.015`          | Restore alert when funding rate ≥ this value (%)                                                                                           |
 | **SCENARIOS\_<SYMBOL>**            |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol.                           |
 | **COOLDOWN_CANDLES**               |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m.                  |
 | **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5)                                                                                             |
 | **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                                            |
 | **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                                  |
 | **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                                         |
+| **PREFLIGHT_BUFFER_PCT**           |          |          `0.05`           | Pre-flight spread buffer in % (default 0.05 = 0.05%)                                                                                   |
 | **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                                  |
 | **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                                 |
 | **BACKTEST_CSV_PATH**              |          |             —             | Path to local CSV file for offline backtesting                                                                                         |
@@ -870,8 +871,8 @@ SCENARIOS_NEARUSDT=1
 # Funding Monitor
 ENABLE_FUNDING_MONITOR=true
 FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,AVAXUSDT,SUIUSDT,NEARUSDT
-FUNDING_ALERT_THRESHOLD=0.0
-FUNDING_RESTORE_THRESHOLD=0.00015
+FUNDING_ALERT_THRESHOLD_PCT=0.0
+FUNDING_RESTORE_THRESHOLD_PCT=0.015
 
 # Trading Settings
 RISK_PERCENT=2

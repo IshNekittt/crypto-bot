@@ -18,6 +18,7 @@ export interface RiskManagerOptions {
   readonly reducedRiskPercent: string;
   readonly leverage: string;
   readonly maxWorkingCapital?: number;
+  readonly preflightBufferPct?: string;
 }
 
 export const DRAWDOWN_LOSING_TRADES_COUNT = 3;

@@ -23,6 +23,7 @@ describe('RiskManager', () => {
       reducedRiskPercent: '1',
       leverage: '10',
       maxWorkingCapital: 0,
+    preflightBufferPct: "0.05",
     });
   });
 

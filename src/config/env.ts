@@ -29,8 +29,8 @@ export interface BotConfig {
   readonly activeScenarios: number[];
   readonly enableFundingMonitor: boolean;
   readonly fundingMonitorSymbols: string[];
-  readonly fundingAlertThreshold: string;
-  readonly fundingRestoreThreshold: string;
+  readonly fundingAlertThresholdPct: string;
+  readonly fundingRestoreThresholdPct: string;
   readonly symbolScenarios: Map<string, number[]>;
   readonly backtestCsvPath: string | null;
   readonly cooldownCandles: number;
@@ -38,6 +38,7 @@ export interface BotConfig {
   readonly smcDisplacementMultiplier: string;
   readonly limitExpirationCandles: number;
   readonly smartEntryThresholdPct: string;
+  readonly preflightBufferPct: string;
   readonly enableSniperMode: boolean;
   readonly sniperDisplacementMultiplier?: string;
   readonly backtestDays: number;
@@ -264,16 +265,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const fundingMonitorSymbols = parseFundingSymbols(
     optionalEnv(env, "FUNDING_MONITOR_SYMBOLS"),
   );
-  const fundingAlertThreshold = parseDecimalOrDefault(
-    optionalEnv(env, "FUNDING_ALERT_THRESHOLD"),
+  const fundingAlertThresholdPctRaw = parseDecimalOrDefault(
+    optionalEnv(env, "FUNDING_ALERT_THRESHOLD_PCT"),
     "0.0",
-    "FUNDING_ALERT_THRESHOLD",
+    "FUNDING_ALERT_THRESHOLD_PCT",
   );
-  const fundingRestoreThreshold = parseDecimalOrDefault(
-    optionalEnv(env, "FUNDING_RESTORE_THRESHOLD"),
-    "0.0001",
-    "FUNDING_RESTORE_THRESHOLD",
+  const fundingAlertThresholdPct = new Decimal(fundingAlertThresholdPctRaw)
+    .div(100)
+    .toFixed(10);
+
+  const fundingRestoreThresholdPctRaw = parseDecimalOrDefault(
+    optionalEnv(env, "FUNDING_RESTORE_THRESHOLD_PCT"),
+    "0.015", // 0.015%
+    "FUNDING_RESTORE_THRESHOLD_PCT",
   );
+  const fundingRestoreThresholdPct = new Decimal(fundingRestoreThresholdPctRaw)
+    .div(100)
+    .toFixed(10);
 
   const symbols = parseSymbols(requireEnv(env, "SYMBOLS"));
   const symbolScenarios = parseSymbolScenarios(env, symbols);
@@ -311,6 +319,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
       `LIMIT_EXPIRATION_CANDLES must be an integer, got: ${limitExpirationCandles}`,
     );
   }
+
+  const preflightBufferPctRaw = parseDecimalOrDefault(
+    optionalEnv(env, "PREFLIGHT_BUFFER_PCT"),
+    "0.05", // 0.05%
+    "PREFLIGHT_BUFFER_PCT",
+  );
+  const preflightBufferPct = new Decimal(preflightBufferPctRaw)
+    .div(100)
+    .toFixed(10);
 
   const smartEntryThresholdPctRaw = parseDecimalOrDefault(
     optionalEnv(env, "SMART_ENTRY_THRESHOLD_PCT"),
@@ -377,14 +394,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     activeScenarios: parseActiveScenarios(optionalEnv(env, "ACTIVE_SCENARIOS")),
     enableFundingMonitor,
     fundingMonitorSymbols,
-    fundingAlertThreshold,
-    fundingRestoreThreshold,
+    fundingAlertThresholdPct,
+    fundingRestoreThresholdPct,
     symbolScenarios,
     backtestCsvPath,
     smcSlAtrOffset,
     smcDisplacementMultiplier,
     limitExpirationCandles,
     smartEntryThresholdPct,
+    preflightBufferPct,
     enableSniperMode,
     sniperDisplacementMultiplier,
     backtestDays,

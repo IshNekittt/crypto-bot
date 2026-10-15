@@ -569,7 +569,7 @@ export class TelegramNotifier {
   async notifyTradeClosed(
     symbol: string,
     pnl: string,
-    pnlPercent: string,
+    _pnlPercent: string,
     reason?: string,
   ): Promise<boolean> {
     // Skip notification for cancelled limit orders
@@ -577,16 +577,13 @@ export class TelegramNotifier {
       return true;
     }
     
-    // Strip any % signs from percentage string before parsing
-    const cleanPnlPercent = pnlPercent.replace('%', '');
     const safePnl = pnl ? new Decimal(pnl) : new Decimal(0);
-    const safePnlPct = pnlPercent ? new Decimal(cleanPnlPercent) : new Decimal(0);
 
     const isWin = safePnl.gt(0);
     const icon = isWin ? "✅" : (safePnl.isNegative() ? "❌" : "➖");
     const sign = isWin ? "+" : "";
 
-    const pnlText = `${icon} <b>PnL:</b> ${sign}${safePnl.toFixed(2)} USDT (${sign}${safePnlPct.toFixed(2)}%)`;
+    const pnlText = `${icon} <b>PnL:</b> ${sign}${safePnl.toFixed(2)} USDT`;
 
     const text = [
       `${icon} <b>Position Closed</b>`,

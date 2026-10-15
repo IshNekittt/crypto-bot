@@ -568,7 +568,8 @@ export class StrategyEngine {
       }
 
       // Determine close reason from PnL sign
-      const closeReason = finalPnlString !== null && new Decimal(finalPnlString).lt(0) ? 'SL' : 'TP';
+      const pnlValue = new Decimal(finalPnlString || '0');
+      const closeReason = pnlValue.lt(0) ? 'SL' : 'TP';
       await this.deps.db.closeTrade(trade.id, finalPnlString, finalExitPrice, Date.now(), closeReason);
 
       // Add the zone used for entry to mitigated zones
@@ -582,14 +583,15 @@ export class StrategyEngine {
       }
       logger.info(`${this.symbol}: IN_TRADE → SCANNING (position close event)`);
 
-      // Set cooldown after SL hit (cooldownCandles * executionTimeframe minutes)
-      // In Sniper mode, execution timeframe is 1m; in Classic mode, it's LTF (15m/5m/etc.)
-      const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
-      const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
-      this.cooldownUntil = Date.now() + cooldownMs;
-      const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
-      const tfLabel = this.deps.config.enableSniperMode ? '1m (Sniper)' : `${tradeTfMinutes}m`;
-      logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h (${this.deps.config.cooldownCandles} candles × ${tfLabel}).`);
+      // Set cooldown ONLY after stop-loss (negative PnL)
+      if (pnlValue.lt(0)) {
+        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
+        const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
+        this.cooldownUntil = Date.now() + cooldownMs;
+        const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
+        const tfLabel = this.deps.config.enableSniperMode ? '1m (Sniper)' : `${tradeTfMinutes}m`;
+        logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h (${this.deps.config.cooldownCandles} candles × ${tfLabel}).`);
+      }
     } catch (error) {
       logger.error(`[${this.symbol}] Failed to process closed position: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -879,8 +881,9 @@ export class StrategyEngine {
     const entry = new Decimal(this.plan.entryPrice);
     const isLong = this.plan.side === 'Buy';
 
-    // 1. Pre-flight SL breach check (unconditional for ALL orders)
-    const slBreached = isLong ? livePrice.lte(sl) : livePrice.gte(sl);
+    // 1. Pre-flight SL breach check (unconditional for ALL orders) WITH spread buffer
+    const slBuffer = livePrice.mul(this.deps.config.preflightBufferPct);
+    const slBreached = isLong ? livePrice.lte(sl.plus(slBuffer)) : livePrice.gte(sl.minus(slBuffer));
     if (slBreached) {
       logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
       this.burnSetup(this.plan);
@@ -904,7 +907,12 @@ export class StrategyEngine {
     const idealEntry = new Decimal(this.plan.entryPrice);
     const threshold = new Decimal(this.deps.config.smartEntryThresholdPct || 0.0015);
     const priceDiffPct = idealEntry.minus(livePrice).div(idealEntry).abs();
-    const useMarket = priceDiffPct.lte(threshold);
+    
+    // Check if current price is actually BETTER than ideal entry (a discount)
+    const isDiscount = isLong ? livePrice.lte(idealEntry) : livePrice.gte(idealEntry);
+    
+    // ALWAYS use Market if we have a discount (prevents Limit [10001] trap) OR if diff <= threshold
+    const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
     // Create new PositionPlan with updated orderType and limitPrice (both are readonly)
     // Use instrument's tickSize for proper price formatting (anti-pattern 16.3)
