@@ -572,9 +572,10 @@ export class TelegramNotifier {
     _pnlPercent: string,
     reason?: string,
   ): Promise<boolean> {
-    // Skip notification for cancelled limit orders
+    // Cancelled limit orders: send a distinct message so the "Order Opened" loop gets closed
     if (reason === 'CANCELLED') {
-      return true;
+      const text = `🗑️ <b>Limit Order Cancelled</b>\n\n📊 ${symbol}\n⏳ Reason: Expired / Timeout`;
+      return this.sendMessage(text);
     }
     
     const safePnl = pnl ? new Decimal(pnl) : new Decimal(0);

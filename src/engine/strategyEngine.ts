@@ -372,6 +372,8 @@ export class StrategyEngine {
       }
     } catch (error) {
       logger.error(`[${this.symbol}] Trade management error: ${error instanceof Error ? error.message : String(error)}`);
+      // Apply a 5-second penalty backoff if the exchange API throws an error
+      this.noPositionRecheckAt = Date.now() + 5000;
     } finally {
       this.isManaging = false;
     }
