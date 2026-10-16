@@ -379,7 +379,25 @@ describe('StrategyEngine', () => {
 
       expect(manageSpy).toHaveBeenCalledTimes(1);
       // Proof the real management logic executed (call-through), not just a mocked spy
-      expect(mockClient.getOpenPositions).toHaveBeenCalledWith('BTCUSDT');
+      expect(mockDb.getOpenTrade).toHaveBeenCalledWith('BTCUSDT');
+
+      manageSpy.mockRestore();
+    });
+
+    it('should invoke checkAndManagePosition on an UNCONFIRMED tick while IN_TRADE (15-minute blindness fix)', async () => {
+      (engine as any).deps.config.enableSniperMode = false;
+      (engine as any).transition(StrategyState.IN_TRADE);
+
+      const manageSpy = jest.spyOn(engine as any, 'checkAndManagePosition');
+
+      await engine.handleKline({
+        symbol: 'BTCUSDT',
+        interval: '15',
+        confirmed: false,
+        candle: { timestamp: Date.now(), open: '50000', high: '50100', low: '49900', close: '50050', volume: '100' },
+      });
+
+      expect(manageSpy).toHaveBeenCalledTimes(1);
 
       manageSpy.mockRestore();
     });
@@ -411,6 +429,64 @@ describe('StrategyEngine', () => {
 
       // No exchange calls must be made without a live price
       expect(mockClient.getOpenPositions).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Lazy API Evaluation (per-tick management)', () => {
+    const tradeAtEntry = () => ({
+      id: 'trade-lazy-1',
+      symbol: 'BTCUSDT',
+      side: 'Buy',
+      entryPrice: '100',
+      stopLoss: '99',
+      takeProfit: '110',
+      qty: '1',
+      managementState: {
+        milestone1Triggered: false,
+        milestone2Triggered: false,
+        initialTotalR: '10',
+        initialQty: '1',
+      },
+    });
+
+    it('should make zero exchange API calls when no milestone action is required', async () => {
+      (engine as any).transition(StrategyState.IN_TRADE);
+      (engine as any).latestTickPrice = '100';
+      mockDb.getOpenTrade.mockResolvedValue(tradeAtEntry() as any);
+
+      await (engine as any).checkAndManagePosition();
+
+      expect(mockDb.getOpenTrade).toHaveBeenCalledWith('BTCUSDT');
+      expect(mockClient.getOpenPositions).not.toHaveBeenCalled();
+      expect(mockClient.setTradingStop).not.toHaveBeenCalled();
+      expect(mockExecutionEngine.executePartialClose).not.toHaveBeenCalled();
+    });
+
+    it('should call getOpenPositions only when an action is required', async () => {
+      (engine as any).transition(StrategyState.IN_TRADE);
+      (engine as any).latestTickPrice = '104';
+      mockDb.getOpenTrade.mockResolvedValue(tradeAtEntry() as any);
+      mockClient.getOpenPositions.mockResolvedValue([{ symbol: 'BTCUSDT', size: new Decimal('1') }] as any);
+
+      await (engine as any).checkAndManagePosition();
+
+      expect(mockClient.getOpenPositions).toHaveBeenCalledWith('BTCUSDT');
+      expect(mockExecutionEngine.executePartialClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('should back off from position checks after a miss (unfilled Limit order)', async () => {
+      (engine as any).transition(StrategyState.IN_TRADE);
+      (engine as any).latestTickPrice = '104';
+      mockDb.getOpenTrade.mockResolvedValue(tradeAtEntry() as any);
+      mockClient.getOpenPositions.mockResolvedValue([]);
+
+      await (engine as any).checkAndManagePosition();
+      await (engine as any).checkAndManagePosition();
+      await (engine as any).checkAndManagePosition();
+
+      expect(mockClient.getOpenPositions).toHaveBeenCalledTimes(1);
+      expect(mockExecutionEngine.executePartialClose).not.toHaveBeenCalled();
+      expect(mockDb.updateTradeManagementState).not.toHaveBeenCalled();
     });
   });
 

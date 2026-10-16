@@ -732,6 +732,8 @@ pendingTradeManager.setPriceProvider((symbol: string) => {
 
 **Result**: Ghost signals in Scenario 12 are now permanently burned — the CHoCH timestamp is preserved end-to-end.
 
+> **Addendum v2026-10-16 — Burn Trigger Structure on Trade Open (Live)**: Previously, live structures were burned ONLY via `burnSetup()` (abort paths) and after position close — a successful entry left the trigger CHoCH unburned until the trade closed. Fixed: BOTH live entry paths (`executeStagedEntry()` auto and `handleTradeApproval()` manual) push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (standard 100-entry cap). This mirrors backtester burn-on-entry (Invariant 15).
+
 ### 5.8 Zero-NULL Database Guarantee for Closed Trades — **NEW v2026-10-06**
 
 **Problem**: `closeTrade` was called with NULL `pnl`/`exit_price` when exchange data was unavailable, polluting the database.
@@ -899,14 +901,18 @@ export function evaluateTradeManagement(context: TradeContext): TradeManagementS
 
 ### 6.5 Live Execution (`StrategyEngine.checkAndManagePosition`)
 
-**Tick-Agnostic Management (v2026-10-16)**: Adaptive Fractioning evaluates progress on **EVERY confirmed incoming tick** (1m for Sniper, 15m for Classic, 4H macro) — completely independent of the scenario evaluation intervals. `checkAndManagePosition()` is invoked from `handleKline()` for ANY confirmed timeframe while `state === IN_TRADE`, guaranteeing SL→BE and partial closes trigger promptly in **both** modes. Previously the call was trapped inside the 1m branch, leaving V4 Classic silently unmanaged.
+**Tick-Agnostic Management (v2026-10-16)**: Adaptive Fractioning evaluates progress on **EVERY incoming tick** (confirmed or unconfirmed — 1m for Sniper, 15m for Classic, 4H macro) — completely independent of the scenario evaluation intervals. `checkAndManagePosition()` is invoked from `handleKline()` on every tick **before** the `confirmed` guard, guaranteeing SL→BE and partial closes trigger promptly in **both** modes (a 15m trade can no longer hit a milestone and reverse to full SL inside one candle). Previously the call was trapped inside the 1m branch, leaving V4 Classic silently unmanaged.
 
-Called on **every confirmed incoming tick** when `state === IN_TRADE`:
+**Lazy API Evaluation (v2026-10-16)**: Per-tick management reads the trade from DB and runs `evaluateTradeManagement()` locally first; exchange REST calls happen **only when a milestone action is actually required**. A re-entrancy guard (`isManaging`) prevents overlapping runs, and a 30s backoff (`NO_POSITION_RECHECK_MS`) prevents API spam while a Limit order is unfilled.
+
+Called on **every incoming tick** when `state === IN_TRADE`:
 1. **Live price guard** — reads `getLivePrice()` (global tick memory); if null, returns early (never manages blind)
-2. **Verify actual position exists on exchange** — calls `client.getOpenPositions()` to confirm position size > 0; if position is 0 (unfilled limit order), returns early without management
+2. **Re-entrancy / backoff guard** — skips if a previous management run is in flight (`isManaging`), or if the last position check found no live position (`noPositionRecheckAt`, 30s backoff)
 3. Fetch open trade + `management_state` from DB
-4. Call `evaluateTradeManagement()` with the live tick price
-5. Execute signal:
+4. Call `evaluateTradeManagement()` locally with the live tick price
+5. **If `signal.action === 'none'` → return immediately — zero exchange REST calls**
+6. **Only when an action is required** — call `client.getOpenPositions()` to confirm position size > 0; if position is 0 (unfilled Limit order), back off for 30s without management
+7. Execute signal:
    - `move_sl_to_entry` / `trail_sl_to_profit` → `client.setTradingStop()` (position-level SL update via `setTradingStop`)
    - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order, `qty` rounded to `qtyStep` via `formatQuantity`, min `minOrderQty` enforced)
    - Update `management_state` in DB via `updateTradeManagementState()` **only after successful API response**
@@ -1306,7 +1312,13 @@ interface MitigatedStructure {
 
 4. **ScenarioRouter** (`scenarioRouter.ts`):
    - New `evaluate()` param: `mitigatedStructures: MitigatedStructure[] = []`
-   - New `filterMitigatedStructures()` — filters `patternData.structures` by timestamp+type+direction
+   - `filterMitigatedStructures()` — filters `patternData.structures` by **timestamp ONLY** (updated v2026-10-16; direction/type matching removed to comply with Invariant 16.16 — those fields may be lost or defaulted during mapping):
+   ```typescript
+   private filterMitigatedStructures(structures: any[], mitigatedStructures: MitigatedStructure[]): any[] {
+     if (!mitigatedStructures.length) return structures;
+     return structures.filter(s => !mitigatedStructures.some(ms => ms.timestamp === s.timestamp));
+   }
+   ```
    - Applied in `evaluate()`: `patternData.structures = this.filterMitigatedStructures(patternData.structures, mitigatedStructures)`
 
 5. **`RouterResult`** includes `structureDetails: StructureDetails | null`
@@ -1365,12 +1377,28 @@ interface MitigatedStructure {
    });
    ```
 
-4. **Engine auto-mitigates on trade close** (`executionSimulator.ts:626-631`, `strategyEngine.ts:363-365`):
+4. **Engine burns structure on trade OPEN (Live) — v2026-10-16**: BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)`, with the standard 100-entry cap:
+   ```typescript
+   if (this.plan.structureDetails && this.plan.structureDetails.timestamp) {
+     this.mitigatedStructures.push({
+       type: (this.plan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+       timestamp: this.plan.structureDetails.timestamp,
+       price: this.plan.structureDetails.price?.toString() || this.plan.entryPrice.toString(),
+       direction: this.plan.structureDetails.direction || (this.plan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
+     });
+     if (this.mitigatedStructures.length > 100) {
+       this.mitigatedStructures = this.mitigatedStructures.slice(-100);
+     }
+   }
+   ```
+   The CHoCH is consumed the moment the trade is opened — not only on abort (`burnSetup`) or close. Mirrors backtester burn-on-entry (Invariant 15).
+
+5. **Engine auto-mitigates on trade close** (`executionSimulator.ts:626-631`, `strategyEngine.ts:363-365`):
    - Trade closes → `structureDetails` passed to DB
    - Reconciliation/WS close → `addMitigatedZone` + structure added to `mitigatedStructures`
    - Next 1m candle → same CHoCH filtered out, no ghost entry
 
-**Result**: Scenario 12 on SOLUSDT — the rapid-fire 2-minute re-entries after TP are eliminated. The CHoCH is marked as "used" immediately after first trade closes.
+**Result**: Scenario 12 on SOLUSDT — the rapid-fire 2-minute re-entries after TP are eliminated. The CHoCH is marked as "used" immediately at trade open and after first trade close.
 
 ---
 
@@ -1847,7 +1875,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (248 tests, all green)
+npm test             # jest (252 tests, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -1887,7 +1915,7 @@ docker compose up -d
 
 24. **Pre-flight Slippage Guard** — Before sending order to exchange, bot MUST fetch `getLivePrice()`. If live price has crossed SL during approval wait, setup is marked DEAD, burned, and cancelled. No order is sent. **Enforced in BOTH `handleTradeApproval()` (manual) and `executeStagedEntry()` (auto-trading).**
 
-25. **Ghost Signal Prevention** — `isMitigated` checks ONLY timestamp (1m candle timestamps are unique). Direction is NOT checked (may be lost during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
+25. **Ghost Signal Prevention** — `isMitigated` (Scenario 12) AND `filterMitigatedStructures()` (ScenarioRouter) check ONLY timestamp (1m candle timestamps are unique). Direction and type are NOT checked (may be lost/defaulted during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
 
 26. **PnL Summation (Adaptive Fractioning)** — PnL calculated via `.filter().reduce()` on `closedPnl` records where `symbol` matches AND `createdTime >= trade.openedAt`. This correctly sums all partial closes.
 
@@ -1914,6 +1942,8 @@ docker compose up -d
 37. **Auto-Trading Must Clear Sniper Zone on Reset** — `transition(StrategyState.SCANNING)` MUST clear `this._activeSniperZone = null` to prevent stale macro zone reuse across state resets. Zone must be burned on `burnSetup()`, not left dangling.
 
 38. **Context-Aware Slippage Guard** — The >0.2% slippage guard must never be applied to Limit orders, as it would cause valid pullback setups to be aborted. Slippage guard is strictly for Market orders; Limit orders wait for pullback by design.
+
+39. **Burn Trigger Structure on Trade Open (Live)** — BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) MUST push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (standard 100-entry cap). This mirrors backtester burn-on-entry (Invariant 15) and closes the live ghost-signal gap — never rely solely on `burnSetup()` (abort paths) or trade-close mitigation.
 
 ---
 
@@ -2181,13 +2211,13 @@ docker compose up -d --build
 
 **Rule**: **NEVER** use `amendOrder` for `IN_TRADE` positions. Only `setTradingStop` with `positionIdx: 0` for open position SL/TP management.
 
-### 16.16 ❌ FORBIDDEN: Checking `direction` in Ghost Signal Mitigation (`isMitigated`)
+### 16.16 ❌ FORBIDDEN: Checking `direction` in Ghost Signal Mitigation (`isMitigated` / `filterMitigatedStructures`)
 
-**Root Cause**: When structures are burned via `PendingTradeManager`, the `direction` field may be undefined (lost during `PendingTrade` mapping). Checking `direction` in `isMitigated` caused valid structures to not be filtered, allowing ghost re-entries.
+**Root Cause**: When structures are burned via `PendingTradeManager`, the `direction` field may be undefined (lost during `PendingTrade` mapping). Checking `direction` in `isMitigated` caused valid structures to not be filtered, allowing ghost re-entries. The same class of bug existed at the Router level: `filterMitigatedStructures()` matched `type` + `timestamp` + `direction`, while burned structures carried defaulted fields (`type: 'CHoCH'`, `direction: 'BULLISH'`) — the match failed and the same CHoCH stayed in circulation.
 
-**Fix**: `isMitigated` checks **ONLY timestamp** — 1m candle timestamps are globally unique. Direction check removed entirely. `structureDetails` flows through Telegram pipeline end-to-end.
+**Fix**: `isMitigated` checks **ONLY timestamp** — 1m candle timestamps are globally unique. The Router's `filterMitigatedStructures()` was aligned on **v2026-10-16** — it now matches by timestamp ONLY (direction and type matching removed entirely). `structureDetails` flows through Telegram pipeline end-to-end.
 
-**Rule**: `isMitigated` checks ONLY timestamp. Direction is NOT checked (may be lost during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
+**Rule**: `isMitigated` and `filterMitigatedStructures` check ONLY timestamp. Direction is NOT checked (may be lost during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
 
 ### 16.17 ❌ FORBIDDEN: Blind Order Execution After Human Approval (Latency Slippage)
 
@@ -2403,6 +2433,14 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
 **Rule**: Updating local or DB trade management state (milestones) without validating the exchange execution result is FORBIDDEN. Ignoring execution failures causes Silent State Desync, leaving the portfolio overexposed.
 
+### 16.40 ❌ FORBIDDEN: Burning the trigger structure only on abort/close paths (Live Ghost Gap)
+
+**Root Cause**: In live trading, structures were burned ONLY inside `burnSetup()` (abort paths: pre-flight DEAD, Slippage Guard, execution failure) and on position close. On a successful entry the trigger CHoCH stayed out of `mitigatedStructures` — a subsequent scan (new killzone / next 1m candle) could re-detect the same structure and generate a ghost re-entry before the trade even closed.
+
+**Fix**: Burn-on-open enforced in the live path — mirroring the backtester (Invariant 15, zone + structure burned on entry). BOTH `executeStagedEntry()` and `handleTradeApproval()` push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (100-entry cap).
+
+**Rule**: On every successful live entry, the trigger structure MUST be burned BEFORE the state machine transitions to `IN_TRADE`. Burning only on abort/close paths is FORBIDDEN.
+
 ---
 
-_Last updated: 2026-10-16. All 248 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-16 (ghost-signal gaps closed: timestamp-only router mitigation + burn trigger structure on trade open). All 252 tests green. Build passes. Enterprise-ready._

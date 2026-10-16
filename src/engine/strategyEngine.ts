@@ -15,6 +15,7 @@ import { evaluateTradeManagement } from '../risk/tradeManager';
 import { formatPrice } from '../utils/precision';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
+const NO_POSITION_RECHECK_MS = 30_000;
 
 export interface StrategyEngineDeps {
   readonly symbol: string;
@@ -77,6 +78,8 @@ export class StrategyEngine {
   private plan: PositionPlan | null = null;
   private processing = false;
   private isProcessing = false;
+  private isManaging = false;
+  private noPositionRecheckAt = 0;
   private lastProcessedCandleTimestamp: number = 0;
   private latestTickPrice: string | null = null;
   private mitigatedZones: MitigatedZone[] = [];
@@ -223,11 +226,9 @@ export class StrategyEngine {
 
   async handleKline(update: KlineUpdate): Promise<void> {
     this.latestTickPrice = update.candle.close;
-    if (!update.confirmed) return;
-    const htfInterval = this.deps.config.htfTimeframe;
-    
-    // Trade management (Adaptive Fractioning) on every confirmed tick — timeframe-agnostic.
-    // Restores Classic (15m/4H) mode management, not just Sniper 1m.
+
+    // Trade management (Adaptive Fractioning) on every incoming tick — confirmed or not.
+    // checkAndManagePosition() is lazy: zero exchange API calls unless a milestone action fires.
     if (this.state === StrategyState.IN_TRADE) {
       try {
         await this.checkAndManagePosition();
@@ -236,6 +237,9 @@ export class StrategyEngine {
       }
     }
 
+    if (!update.confirmed) return;
+    const htfInterval = this.deps.config.htfTimeframe;
+    
     // Handle 1m candles for Sniper Mode
     if (update.interval === '1') {
       this.feed1m.applyKline(update);
@@ -272,8 +276,10 @@ export class StrategyEngine {
   }
 
   /**
-   * Check and manage open position using adaptive fractioning logic
-   * Called on every confirmed tick when in IN_TRADE state (any timeframe)
+   * Check and manage open position using adaptive fractioning logic.
+   * Called on every incoming tick when in IN_TRADE state (any timeframe).
+   * Lazy API evaluation: DB read + local signal first; exchange REST calls
+   * happen only when a milestone action is actually required.
    */
   private async checkAndManagePosition(): Promise<void> {
     if (this.state !== StrategyState.IN_TRADE) return;
@@ -281,16 +287,10 @@ export class StrategyEngine {
     const livePriceStr = this.getLivePrice();
     if (!livePriceStr) return;
 
-    try {
-      // Verify actual position exists on exchange before managing
-      // This prevents managing unfilled limit orders
-      const positions = await this.deps.client.getOpenPositions(this.symbol);
-      const position = positions.find(p => p.symbol === this.symbol);
-      if (!position || position.size.isZero()) {
-        // No actual position on exchange (limit order not filled yet)
-        return;
-      }
+    if (this.isManaging || Date.now() < this.noPositionRecheckAt) return;
+    this.isManaging = true;
 
+    try {
       const trade = await this.deps.db.getOpenTrade(this.symbol);
       if (!trade) return;
 
@@ -312,7 +312,18 @@ export class StrategyEngine {
         instrument: this.deps.instrument,
       });
 
+      // Lazy evaluation: no milestone action → zero exchange API calls
       if (signal.action === 'none') return;
+
+      // Verify the physical position exists on exchange only when an action is required
+      // This prevents managing unfilled limit orders
+      const positions = await this.deps.client.getOpenPositions(this.symbol);
+      const position = positions.find(p => p.symbol === this.symbol);
+      if (!position || position.size.isZero()) {
+        // No actual position on exchange (limit order not filled yet) — back off before re-checking
+        this.noPositionRecheckAt = Date.now() + NO_POSITION_RECHECK_MS;
+        return;
+      }
 
       logger.info(`[${this.symbol}] Trade management signal: ${signal.action} - ${signal.reason}`);
 
@@ -361,6 +372,8 @@ export class StrategyEngine {
       }
     } catch (error) {
       logger.error(`[${this.symbol}] Trade management error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.isManaging = false;
     }
   }
 
@@ -496,6 +509,18 @@ export class StrategyEngine {
         order_id: result.orderId,
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
+      if (this.plan.structureDetails && this.plan.structureDetails.timestamp) {
+        this.mitigatedStructures.push({
+          type: (this.plan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+          timestamp: this.plan.structureDetails.timestamp,
+          price: this.plan.structureDetails.price?.toString() || this.plan.entryPrice.toString(),
+          direction: this.plan.structureDetails.direction || (this.plan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
+        });
+        if (this.mitigatedStructures.length > 100) {
+          this.mitigatedStructures = this.mitigatedStructures.slice(-100);
+        }
+        logger.info(`[${this.symbol}] Trigger structure burned on entry (timestamp=${this.plan.structureDetails.timestamp})`);
+      }
       this.transition(StrategyState.IN_TRADE);
     } catch (dbError) {
       logger.error(`${this.symbol}: DB openTrade failed, burning setup: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
@@ -1009,6 +1034,18 @@ export class StrategyEngine {
         order_id: result.orderId,
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
+      if (this.plan.structureDetails && this.plan.structureDetails.timestamp) {
+        this.mitigatedStructures.push({
+          type: (this.plan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+          timestamp: this.plan.structureDetails.timestamp,
+          price: this.plan.structureDetails.price?.toString() || this.plan.entryPrice.toString(),
+          direction: this.plan.structureDetails.direction || (this.plan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
+        });
+        if (this.mitigatedStructures.length > 100) {
+          this.mitigatedStructures = this.mitigatedStructures.slice(-100);
+        }
+        logger.info(`[${this.symbol}] Trigger structure burned on entry (timestamp=${this.plan.structureDetails.timestamp})`);
+      }
       this.transition(StrategyState.IN_TRADE);
 
       // NO notifySetupFound in auto-trading - execution notification is handled by ExecutionEngine

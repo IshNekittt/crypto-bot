@@ -7,13 +7,13 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-248%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Tests](https://img.shields.io/badge/Tests-252%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 [![Version](https://img.shields.io/badge/Version-v2026--10--16-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
 
-**v2026-10-16**: Fixed Silent State Desync in Adaptive Fractioning (failed partial closes now abort milestone updates and retry next tick), tick-agnostic trade management on every confirmed tick, and global tick-memory live prices.
+**v2026-10-16**: Fixed Silent State Desync in Adaptive Fractioning (failed partial closes now abort milestone updates and retry next tick), tick-agnostic trade management on every confirmed tick, global tick-memory live prices, and closed the live ghost-signal gaps: **timestamp-only structure mitigation in the ScenarioRouter** + **trigger CHoCH burned on trade open in both live entry paths**.
 
 </div>
 
@@ -27,7 +27,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 | **🎯 V5 Sniper Mode**       | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                                 |
 | **📊 Dynamic Approval**     | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)                  |
 | **🛡 Pre-flight SL Check**  | **Validates SL at approval**: If price crossed SL during wait, setup is auto-cancelled — prevents "SL below base_price" Bybit rejection                                |
-| **👻 Ghost Signal Guard**   | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" after trade close — prevents rapid-fire re-entries on same structure                                   |
+| **👻 Ghost Signal Guard**   | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" at trade open (live) and after trade close — router filters by timestamp only — prevents rapid-fire re-entries on same structure |
 | **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R                             |
 | **🧮 Strict Math Side**     | **Side determined by geometry**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — eliminates text-based direction errors and invalid SL levels                            |
 
@@ -250,6 +250,8 @@ pendingTradeManager.setPriceProvider((symbol: string) => {
 7. **`burnSetup`** (`strategyEngine.ts:530-570`): Uses `plan.structureDetails` for guaranteed burning with fallback to `zoneDetails`
 
 **Result**: Ghost signals in Scenario 12 are now permanently burned — the CHoCH timestamp is preserved end-to-end.
+
+_Update v2026-10-16_: The trigger CHoCH is now burned **on trade open** in both live entry paths (`executeStagedEntry()` / `handleTradeApproval()`) — not only on abort (`burnSetup`) or close. See the Mitigated Structures section below.
 
 ### Zero-NULL Database Guarantee for Closed Trades — v2026-10-06
 
@@ -531,13 +533,16 @@ _Full implementation details: [AGENTS.md §7.11](AGENTS.md#711-timezone-sanity-c
 | ---------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **BacktestState**      | Added `mitigatedStructures: MitigatedStructure[]`                                                          |
 | **MitigatedStructure** | `{ type: 'SMS' \| 'CHoCH' \| 'BOS', timestamp: number, price: string, direction: 'BULLISH' \| 'BEARISH' }` |
+| **On trade open (live)** | v2026-10-16: Both `executeStagedEntry()` & `handleTradeApproval()` push trigger `structureDetails` to `mitigatedStructures` immediately after `db.openTrade()`, before `transition(IN_TRADE)` |
 | **On trade close**     | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures`                                     |
-| **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()`                                         |
+| **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()` — **timestamp-only match** (v2026-10-16) |
 | **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                                                            |
 
-**Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" after first trade.
+**Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" at entry (live) and after first trade.
 
 _Note v2026-10-05_: In Scenario 12 (Sniper Touch), the `isMitigated` check now uses only `timestamp` (not `direction`) because when structures are burned via `PendingTradeManager`, the `direction` field may be undefined. Timestamp alone is sufficient since candle timestamps are unique.
+
+_Note v2026-10-16_: `filterMitigatedStructures()` in `ScenarioRouter` now also matches **timestamp only** — direction/type checks removed entirely (Invariant 16.16). This closed the live ghost-signal gap where defaulted `'BULLISH'` direction on burned structures defeated router-level filtering. Additionally, both live entry paths now burn the trigger CHoCH **on trade open** — structures are no longer burned only via `burnSetup()` (abort paths) and trade close.
 
 _Full implementation details: [AGENTS.md §7.12, §7.13](AGENTS.md#712-mitigated-structures-ghost-signal-elimination--new-v2026-09-24)_
 
@@ -1439,7 +1444,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (248)
+# All tests (252)
 npm test
 
 # Watch mode
@@ -1478,7 +1483,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full 180-day backtest (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (248 tests)
+npm test             # Jest (252 tests)
 npm run test:watch   # Watch mode
 ```
 

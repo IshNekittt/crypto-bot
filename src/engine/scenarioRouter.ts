@@ -89,11 +89,7 @@ export class ScenarioRouter {
   private filterMitigatedStructures(structures: any[], mitigatedStructures: MitigatedStructure[]): any[] {
     if (!mitigatedStructures.length) return structures;
     return structures.filter(s => {
-      return !mitigatedStructures.some(ms => 
-        ms.type === s.type &&
-        ms.timestamp === s.timestamp &&
-        ms.direction === s.direction
-      );
+      return !mitigatedStructures.some(ms => ms.timestamp === s.timestamp);
     });
   }
 
