@@ -899,14 +899,19 @@ export function evaluateTradeManagement(context: TradeContext): TradeManagementS
 
 ### 6.5 Live Execution (`StrategyEngine.checkAndManagePosition`)
 
-Called on **every 1m candle** when `state === IN_TRADE`:
-1. **Verify actual position exists on exchange** — calls `client.getOpenPositions()` to confirm position size > 0; if position is 0 (unfilled limit order), returns early without management
-2. Fetch open trade + `management_state` from DB
-3. Call `evaluateTradeManagement()` with current 1m candle price
-4. Execute signal:
+**Tick-Agnostic Management (v2026-10-16)**: Adaptive Fractioning evaluates progress on **EVERY confirmed incoming tick** (1m for Sniper, 15m for Classic, 4H macro) — completely independent of the scenario evaluation intervals. `checkAndManagePosition()` is invoked from `handleKline()` for ANY confirmed timeframe while `state === IN_TRADE`, guaranteeing SL→BE and partial closes trigger promptly in **both** modes. Previously the call was trapped inside the 1m branch, leaving V4 Classic silently unmanaged.
+
+Called on **every confirmed incoming tick** when `state === IN_TRADE`:
+1. **Live price guard** — reads `getLivePrice()` (global tick memory); if null, returns early (never manages blind)
+2. **Verify actual position exists on exchange** — calls `client.getOpenPositions()` to confirm position size > 0; if position is 0 (unfilled limit order), returns early without management
+3. Fetch open trade + `management_state` from DB
+4. Call `evaluateTradeManagement()` with the live tick price
+5. Execute signal:
    - `move_sl_to_entry` / `trail_sl_to_profit` → `client.setTradingStop()` (position-level SL update via `setTradingStop`)
    - `close_partial_25` / `close_partial_50` → `executePartialClose()` (reduceOnly market order, `qty` rounded to `qtyStep` via `formatQuantity`, min `minOrderQty` enforced)
    - Update `management_state` in DB via `updateTradeManagementState()` **only after successful API response**
+
+**STATE SYNCHRONIZATION INVARIANT (v2026-10-16)**: `management_state` in the DB MUST ONLY be updated after a successful `ok: true` response from the execution engine. A failed partial close (`ok: false`) aborts the milestone progression immediately (`return`) — no SL update, no DB state update — so the identical management signal re-fires on the next tick (natural retry). Failed SL updates (`setTradingStop` throwing) are already aborted by the outer `try/catch` before any DB write.
 
 ### 6.6 Backtest Simulation (`executionSimulator.ts`)
 
@@ -1842,7 +1847,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (240 tests, all green)
+npm test             # jest (248 tests, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -2382,6 +2387,22 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
 **Rule**: NEVER place Limit orders when live price is better than ideal entry (a discount). Market orders MUST be used to capture the favorable price with correct SL/TP geometry.
 
+### 16.38 ❌ FORBIDDEN: Coupling `getLivePrice()` to a specific timeframe feed
+
+**Root Cause**: `getLivePrice()` relied on `this.feedLtf.getCurrentLivePrice()`. In Sniper Mode, executions happen on the 1m timeframe. If the 15m feed was slightly delayed or returned `null`, the fallback used the last closed 15m candle, which could be up to 14 minutes old. This stale price bypassed all Pre-flight SL checks and caused invalid Trade Management calculations (e.g., falsely triggering 66% progress breakeven when the trade was actually in a loss).
+
+**Fix**: Added `latestTickPrice` — global tick memory updated from every incoming WS kline tick at the very start of `handleKline()` (before the `confirmed` guard and any processing). `getLivePrice()` now strictly returns `this.latestTickPrice`. The `executeStagedEntry()` fallback uses the 1m feed in Sniper Mode and the LTF feed otherwise — never a stale 15m candle in a 1m execution context.
+
+**Rule**: Coupling live price queries (`getLivePrice`) to a specific timeframe feed (e.g., `feedLtf`) is FORBIDDEN. In multi-timeframe architectures, querying a 15m feed during a 1m execution can return prices that are 14 minutes stale. Live prices MUST be tracked globally from every incoming WS tick (`latestTickPrice`).
+
+### 16.39 ❌ FORBIDDEN: Updating trade management state (milestones) without validating the exchange execution result
+
+**Root Cause**: The partial-close branch in `checkAndManagePosition()` ignored the `{ ok: false }` result of `executePartialClose()`. On API failure (rate limit, 500, circuit breaker), the code still called `updateTradeManagementState()` and logged `Partial close executed` — marking the milestone as triggered while 100% exposure remained on the exchange. This Silent State Desync meant the failed partial close was **never retried** (milestone permanently flagged), and the DB recorded a close that never happened.
+
+**Fix**: Capture the result of `executePartialClose()`. If `!result.ok` → log a warning and `return` immediately — do NOT update the SL, do NOT call `updateTradeManagementState()`. The milestone remains untriggered in the DB, so the identical management signal re-fires on the next tick (natural retry). Failed SL updates (`setTradingStop` throwing) were already aborted by the outer `try/catch` before any DB write.
+
+**Rule**: Updating local or DB trade management state (milestones) without validating the exchange execution result is FORBIDDEN. Ignoring execution failures causes Silent State Desync, leaving the portfolio overexposed.
+
 ---
 
-_Last updated: 2026-10-14. All 240 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-16. All 248 tests green. Build passes. Enterprise-ready._

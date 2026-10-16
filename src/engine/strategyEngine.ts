@@ -78,6 +78,7 @@ export class StrategyEngine {
   private processing = false;
   private isProcessing = false;
   private lastProcessedCandleTimestamp: number = 0;
+  private latestTickPrice: string | null = null;
   private mitigatedZones: MitigatedZone[] = [];
   private mitigatedStructures: MitigatedStructure[] = [];
   // Cooldown after SL hit (4 hours = 16 * 15min candles)
@@ -119,7 +120,7 @@ export class StrategyEngine {
   }
 
   getLivePrice(): string | null {
-    return this.feedLtf.getCurrentLivePrice()?.toString() || null;
+    return this.latestTickPrice;
   }
 
   async getDiagnostics(): Promise<{
@@ -170,7 +171,7 @@ export class StrategyEngine {
     try {
       const macroContext = await this.deps.patternRecognizer['macroCache'].get(`${this.symbol}_macro`);
       if (macroContext) {
-        const livePriceStr = this.feedLtf.getCurrentLivePrice();
+        const livePriceStr = this.getLivePrice();
         if (livePriceStr) {
           const currentPrice = new Decimal(livePriceStr);
           const pdh = macroContext.dailyLevels.pdh;
@@ -189,7 +190,7 @@ export class StrategyEngine {
 
     return {
       symbol: this.symbol,
-      livePrice: this.feedLtf.getCurrentLivePrice(),
+      livePrice: this.getLivePrice(),
       lastCandleTime,
       trend4h: trendHtf, // keep key as trend4h for compatibility with Telegram /status
       zonesCount,
@@ -221,21 +222,24 @@ export class StrategyEngine {
   }
 
   async handleKline(update: KlineUpdate): Promise<void> {
+    this.latestTickPrice = update.candle.close;
     if (!update.confirmed) return;
     const htfInterval = this.deps.config.htfTimeframe;
     
+    // Trade management (Adaptive Fractioning) on every confirmed tick — timeframe-agnostic.
+    // Restores Classic (15m/4H) mode management, not just Sniper 1m.
+    if (this.state === StrategyState.IN_TRADE) {
+      try {
+        await this.checkAndManagePosition();
+      } catch (error) {
+        logger.error(`${this.symbol}: checkAndManagePosition error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     // Handle 1m candles for Sniper Mode
     if (update.interval === '1') {
       this.feed1m.applyKline(update);
-      // Check trade management on every 1m candle if we have an open position
-      if (this.state === StrategyState.IN_TRADE) {
-        try {
-          await this.checkAndManagePosition(update.candle.close);
-        } catch (error) {
-          logger.error(`${this.symbol}: checkAndManagePosition error: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      
+
       // CRITICAL: If Sniper Mode enabled and we're scanning, evaluate on every 1m close
       if (this.deps.config.enableSniperMode && this.state === StrategyState.SCANNING) {
         try {
@@ -269,10 +273,13 @@ export class StrategyEngine {
 
   /**
    * Check and manage open position using adaptive fractioning logic
-   * Called on every 1m candle when in IN_TRADE state
+   * Called on every confirmed tick when in IN_TRADE state (any timeframe)
    */
-  private async checkAndManagePosition(currentPrice: string): Promise<void> {
+  private async checkAndManagePosition(): Promise<void> {
     if (this.state !== StrategyState.IN_TRADE) return;
+
+    const livePriceStr = this.getLivePrice();
+    if (!livePriceStr) return;
 
     try {
       // Verify actual position exists on exchange before managing
@@ -298,7 +305,7 @@ export class StrategyEngine {
         entryPrice: trade.entryPrice,
         stopLoss: trade.stopLoss,
         takeProfit: trade.takeProfit,
-        currentPrice,
+        currentPrice: livePriceStr,
         side: trade.side as 'Buy' | 'Sell',
         initialQty: trade.qty,
         managementState,
@@ -326,13 +333,17 @@ export class StrategyEngine {
           // Place reduce-only market order to close partial position
           const closeSide = trade.side === 'Buy' ? 'Sell' : 'Buy';
           
-          // Place reduce-only market order to close partial position
-          await this.deps.executionEngine.executePartialClose({
+          const partialCloseResult = await this.deps.executionEngine.executePartialClose({
             symbol: this.symbol,
             side: closeSide as 'Buy' | 'Sell',
             qty: signal.closeQty,
             orderLinkId: `partial_${Date.now()}`,
           });
+
+          if (!partialCloseResult.ok) {
+            logger.warn(`[${this.symbol}] Partial close failed: ${partialCloseResult.reason}. Aborting milestone update; will retry on next tick.`);
+            return;
+          }
 
           // Update management state in DB
           await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
@@ -421,24 +432,27 @@ export class StrategyEngine {
     }
 
     // === PRE-FLIGHT CHECK: Price must not have crossed our SL during approval wait ===
-    const currentPrice = this.feedLtf.getCurrentLivePrice();
-    if (currentPrice) {
-      const currentPriceDecimal = new Decimal(currentPrice);
-      const slDecimal = new Decimal(this.plan.stopLoss);
-      const isLong = this.plan.side === 'Buy';
+    const currentPrice = this.getLivePrice() ?? this.feedLtf.getCandles().slice(-1)[0]?.close;
+    if (!currentPrice) {
+      logger.error(`[${this.symbol}] CRITICAL: Cannot determine live price for pre-flight check at approval. Aborting approval to prevent blind firing.`);
+      this.burnSetup(this.plan);
+      this.transition(StrategyState.SCANNING);
+      return;
+    }
 
-      if (isLong && currentPriceDecimal.lte(slDecimal)) {
-        logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already below SL (${this.plan.stopLoss})`);
-        this.burnSetup(this.plan);
-        this.transition(StrategyState.SCANNING);
-        return;
-      }
-      if (!isLong && currentPriceDecimal.gte(slDecimal)) {
-        logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) is already above SL (${this.plan.stopLoss})`);
-        this.burnSetup(this.plan);
-        this.transition(StrategyState.SCANNING);
-        return;
-      }
+    const currentPriceDecimal = new Decimal(currentPrice);
+    const slDecimal = new Decimal(this.plan.stopLoss);
+    const isLong = this.plan.side === 'Buy';
+    const slBuffer = currentPriceDecimal.mul(new Decimal(this.deps.config.preflightBufferPct));
+    const slBreached = isLong
+      ? currentPriceDecimal.lte(slDecimal.plus(slBuffer))
+      : currentPriceDecimal.gte(slDecimal.minus(slBuffer));
+
+    if (slBreached) {
+      logger.warn(`[${this.symbol}] Setup DEAD: Live price (${currentPrice}) breached SL (${this.plan.stopLoss}) — aborting approval.`);
+      this.burnSetup(this.plan);
+      this.transition(StrategyState.SCANNING);
+      return;
     }
 
     // Create updated plan with dynamic order type (PositionPlan is readonly)
@@ -863,8 +877,12 @@ export class StrategyEngine {
     if (!this.plan) return;
 
     // Strict Guard Clause: Must have live price for pre-flight checks
-    // Attempt to get live price safely, handling potential naming variations in CandleFeed
-    const livePriceStr = this.getLivePrice() ?? (this.feedLtf as any).getLastClosedCandle?.()?.close ?? (this.feedLtf as any).getLastClosed?.()?.close;
+    // Attempt to get the absolute latest tick price
+    // Fallback: 1m feed in Sniper Mode (max 1 min stale), otherwise LTF feed
+    const fallbackFeed = this.deps.config.enableSniperMode ? this.feed1m.getCandles() : this.feedLtf.getCandles();
+    const fallbackClose = fallbackFeed.length > 0 ? fallbackFeed[fallbackFeed.length - 1].close : undefined;
+
+    const livePriceStr = this.getLivePrice() ?? fallbackClose;
 
     if (!livePriceStr) {
       logger.error(`[${this.symbol}] CRITICAL: Cannot determine live price for pre-flight check. Aborting execution to prevent blind firing.`);

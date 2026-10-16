@@ -7,13 +7,13 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-240%20passing-brightgreen?logo=jest)](https://jestjs.io/)
-[![Version](https://img.shields.io/badge/Version-v2026--10--14-blue)](https://github.com/)
+[![Tests](https://img.shields.io/badge/Tests-248%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Version](https://img.shields.io/badge/Version-v2026--10--16-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
 
-**v2026-10-14**: Added WS `execPrice` PnL fallback fix, Limit order expiration fix for Sniper mode, duplicate log cleanup, and dual-channel closure fixes.
+**v2026-10-16**: Fixed Silent State Desync in Adaptive Fractioning (failed partial closes now abort milestone updates and retry next tick), tick-agnostic trade management on every confirmed tick, and global tick-memory live prices.
 
 </div>
 
@@ -852,6 +852,7 @@ ENABLE_SNIPER_MODE=false
 BACKTEST_DAYS=60
 SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
+PREFLIGHT_BUFFER_PCT=0.05
 SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5
@@ -894,7 +895,9 @@ COOLDOWN_CANDLES=16
 # Logging & Data
 LOG_LEVEL=info
 DATA_DIR=data
-USE_LOCAL_CACHE_ONLY=true
+
+# Offline Mode
+USE_LOCAL_CACHE_ONLY=false
 
 # Health Check
 ENABLE_HEALTHCHECK_SERVER=false
@@ -947,6 +950,7 @@ ENABLE_SNIPER_MODE=true
 BACKTEST_DAYS=60
 SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
+PREFLIGHT_BUFFER_PCT=0.05
 SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5
@@ -983,7 +987,9 @@ COOLDOWN_CANDLES=16
 # Logging & Data
 LOG_LEVEL=info
 DATA_DIR=data
-USE_LOCAL_CACHE_ONLY=true
+
+# Offline Mode
+USE_LOCAL_CACHE_ONLY=false
 
 # Health Check
 ENABLE_HEALTHCHECK_SERVER=false
@@ -1433,7 +1439,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (240)
+# All tests (248)
 npm test
 
 # Watch mode
@@ -1472,7 +1478,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full 180-day backtest (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (240 tests)
+npm test             # Jest (248 tests)
 npm run test:watch   # Watch mode
 ```
 

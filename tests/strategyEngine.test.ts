@@ -11,7 +11,7 @@ import { InstrumentInfo, StrategyState } from '../src/types';
 import { Decimal } from 'decimal.js';
 import { logger } from '../src/utils/logger';
 
-describe('StrategyEngine - News Embargo Integration', () => {
+describe('StrategyEngine', () => {
   let engine: StrategyEngine;
   let mockNewsService: jest.Mocked<NewsService>;
   let mockClient: jest.Mocked<BybitClient>;
@@ -72,6 +72,7 @@ describe('StrategyEngine - News Embargo Integration', () => {
       placeMarketOrderWithTpsl: jest.fn().mockResolvedValue('order123'),
       placeLimitOrderWithTpsl: jest.fn().mockResolvedValue('order123'),
       getOpenOrders: jest.fn().mockResolvedValue([]),
+      setTradingStop: jest.fn().mockResolvedValue(undefined),
     } as any;
 
     // Mock Database
@@ -86,6 +87,7 @@ describe('StrategyEngine - News Embargo Integration', () => {
       getRecentClosedTrades: jest.fn().mockResolvedValue([]),
       getAllTrades: jest.fn().mockResolvedValue([]),
       runIntegrationTest: jest.fn().mockResolvedValue(true),
+      updateTradeManagementState: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
     } as any;
 
@@ -114,6 +116,7 @@ describe('StrategyEngine - News Embargo Integration', () => {
     // Mock ExecutionEngine
     mockExecutionEngine = {
       execute: jest.fn().mockResolvedValue({ ok: true, orderId: 'order123' }),
+      executePartialClose: jest.fn().mockResolvedValue({ ok: true, orderId: 'pc123' }),
     } as any;
 
     // Mock TelegramNotifier
@@ -313,6 +316,156 @@ describe('StrategyEngine - News Embargo Integration', () => {
       expect(engine.getState()).toBe(StrategyState.SCANNING);
       await (engine as any).process('15');
       // State should transition to ENTRY_STAGED if setup found
+    });
+  });
+
+  describe('Global Tick Memory', () => {
+    it('should start with null live price and ignore feedLtf state', () => {
+      // Simulate a (potentially stale) price available in the LTF feed only
+      (engine as any).feedLtf.getCurrentLivePrice = () => '99999';
+
+      // Global tick memory is empty until the first WS tick arrives
+      expect(engine.getLivePrice()).toBeNull();
+    });
+
+    it('should update latestTickPrice from an UNCONFIRMED tick and return it via getLivePrice()', async () => {
+      (engine as any).feedLtf.getCurrentLivePrice = () => '99999';
+
+      await engine.handleKline({
+        symbol: 'BTCUSDT',
+        interval: '1',
+        confirmed: false,
+        candle: { timestamp: Date.now(), open: '55500', high: '55600', low: '55400', close: '55555', volume: '10' },
+      });
+
+      // Unconfirmed tick must still update the global tick memory
+      expect(engine.getLivePrice()).toBe('55555');
+      // Stale feedLtf price must be ignored entirely
+      expect(engine.getLivePrice()).not.toBe('99999');
+    });
+
+    it('should keep updating latestTickPrice on every subsequent tick', async () => {
+      await engine.handleKline({
+        symbol: 'BTCUSDT',
+        interval: '15',
+        confirmed: false,
+        candle: { timestamp: Date.now(), open: '60000', high: '60010', low: '59990', close: '60000', volume: '1' },
+      });
+      expect(engine.getLivePrice()).toBe('60000');
+
+      await engine.handleKline({
+        symbol: 'BTCUSDT',
+        interval: '15',
+        confirmed: false,
+        candle: { timestamp: Date.now(), open: '60100', high: '60120', low: '60090', close: '60123', volume: '1' },
+      });
+      expect(engine.getLivePrice()).toBe('60123');
+    });
+  });
+
+  describe('Classic Mode Trade Management (enableSniperMode=false)', () => {
+    it('should invoke checkAndManagePosition on a confirmed 15m kline in IN_TRADE state', async () => {
+      (engine as any).deps.config.enableSniperMode = false;
+      (engine as any).transition(StrategyState.IN_TRADE);
+
+      const manageSpy = jest.spyOn(engine as any, 'checkAndManagePosition');
+
+      await engine.handleKline({
+        symbol: 'BTCUSDT',
+        interval: '15',
+        confirmed: true,
+        candle: { timestamp: Date.now(), open: '50000', high: '50100', low: '49900', close: '50050', volume: '100' },
+      });
+
+      expect(manageSpy).toHaveBeenCalledTimes(1);
+      // Proof the real management logic executed (call-through), not just a mocked spy
+      expect(mockClient.getOpenPositions).toHaveBeenCalledWith('BTCUSDT');
+
+      manageSpy.mockRestore();
+    });
+
+    it('should NOT invoke checkAndManagePosition while SCANNING', async () => {
+      (engine as any).deps.config.enableSniperMode = false;
+      expect(engine.getState()).toBe(StrategyState.SCANNING);
+
+      const manageSpy = jest.spyOn(engine as any, 'checkAndManagePosition');
+
+      await engine.handleKline({
+        symbol: 'BTCUSDT',
+        interval: '15',
+        confirmed: true,
+        candle: { timestamp: Date.now(), open: '50000', high: '50100', low: '49900', close: '50050', volume: '100' },
+      });
+
+      expect(manageSpy).not.toHaveBeenCalled();
+
+      manageSpy.mockRestore();
+    });
+
+    it('should safely skip management when live price is unknown (null guard)', async () => {
+      (engine as any).transition(StrategyState.IN_TRADE);
+      // Simulate cold start: no WS tick received yet
+      (engine as any).latestTickPrice = null;
+
+      await (engine as any).checkAndManagePosition();
+
+      // No exchange calls must be made without a live price
+      expect(mockClient.getOpenPositions).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Adaptive Fractioning — Milestone State Sync (partial close)', () => {
+    const setupInTradeWithSniperSetup = () => {
+      (engine as any).transition(StrategyState.IN_TRADE);
+      // 40% progress toward TP → triggers Sniper Milestone 1 (33%): close_partial_25 + SL→entry
+      (engine as any).latestTickPrice = '104';
+      mockClient.getOpenPositions.mockResolvedValue([
+        { symbol: 'BTCUSDT', size: new Decimal('1') },
+      ] as any);
+      mockDb.getOpenTrade.mockResolvedValue({
+        id: 'trade-partial-1',
+        symbol: 'BTCUSDT',
+        side: 'Buy',
+        entryPrice: '100',
+        stopLoss: '99',
+        takeProfit: '110',
+        qty: '1',
+        managementState: {
+          milestone1Triggered: false,
+          milestone2Triggered: false,
+          initialTotalR: '10',
+          initialQty: '1',
+        },
+      } as any);
+    };
+
+    it('should NOT update milestone state when executePartialClose fails (Silent Desync guard)', async () => {
+      setupInTradeWithSniperSetup();
+      mockExecutionEngine.executePartialClose.mockResolvedValue({ ok: false, reason: 'Rate limit exceeded' });
+
+      await (engine as any).checkAndManagePosition();
+
+      // Partial close was attempted...
+      expect(mockExecutionEngine.executePartialClose).toHaveBeenCalledTimes(1);
+      // ...but the milestone must remain untriggered so it retries on the next tick
+      expect(mockDb.updateTradeManagementState).not.toHaveBeenCalled();
+      // ...and the SL must NOT be moved (entire milestone progression aborted)
+      expect(mockClient.setTradingStop).not.toHaveBeenCalled();
+    });
+
+    it('should update milestone state and move SL only after successful partial close', async () => {
+      setupInTradeWithSniperSetup();
+      mockExecutionEngine.executePartialClose.mockResolvedValue({ ok: true, orderId: 'pc123' });
+
+      await (engine as any).checkAndManagePosition();
+
+      expect(mockExecutionEngine.executePartialClose).toHaveBeenCalledTimes(1);
+      // Once after partial close, once after SL move
+      expect(mockDb.updateTradeManagementState).toHaveBeenCalledTimes(2);
+      expect(mockClient.setTradingStop).toHaveBeenCalledWith({
+        symbol: 'BTCUSDT',
+        stopLoss: '100',
+      });
     });
   });
 });

@@ -390,8 +390,10 @@ async function main(): Promise<void> {
   const startMacroContextRefresher = (): NodeJS.Timeout => {
     const now = Date.now();
     const tomorrow = new Date(now);
-    tomorrow.setUTCHours(0, 0, 0, 0);
-    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    tomorrow.setUTCHours(0, 0, 30, 0); // 00:00:30 UTC (30 seconds past midnight)
+    if (tomorrow.getTime() <= now) {
+      tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    }
     const msUntilMidnight = tomorrow.getTime() - now;
 
     logger.info(`Next macro context refresh scheduled in ${Math.round(msUntilMidnight / 60000)} minutes`);
