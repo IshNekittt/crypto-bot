@@ -9,6 +9,11 @@ export const CLOCK_DRIFT_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 export interface ReconcilableEngine {
   readonly symbol: string;
+  readonly deps?: {
+    readonly notifier: {
+      notifyTradeClosed(symbol: string, pnl: string, pnlPercent: string, reason?: string): Promise<boolean>;
+    };
+  };
   getState(): import('../types').StrategyState;
   reconcile(positions: readonly { size: unknown }[]): Promise<boolean>;
   reconcileWithTrade(trade: {
@@ -216,6 +221,11 @@ export class ReconciliationLoop {
                 await this.db.closeTrade(order.orderId, '0', order.price || '0', Date.now(), 'CANCELLED');
                 logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${this.config.limitExpirationCandles} candles)`);
                 logger.info(`[${symbol}] Cancelled order closed in DB safely.`);
+
+                // Close the "Order Opened" Telegram loop with a distinct cancellation notice (best-effort)
+                engine.deps?.notifier
+                  .notifyTradeClosed(symbol, '0', '0', 'CANCELLED')
+                  .catch((e) => logger.error(`TG Notify error: ${e}`));
               } catch (dbError) {
                 logger.error(`[${symbol}] Failed to close cancelled order in DB: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
               }

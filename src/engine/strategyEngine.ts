@@ -69,7 +69,7 @@ function parseClosedPositions(payload: unknown, ownSymbol: string): ClosedPositi
 
 export class StrategyEngine {
   readonly symbol: string;
-  private readonly deps: StrategyEngineDeps;
+  readonly deps: StrategyEngineDeps;
   private readonly feedLtf: CandleFeed;
   private readonly feedHtf: CandleFeed;
   private readonly feed1m: CandleFeed; // 1m candles for Sniper Mode
@@ -1223,6 +1223,10 @@ export class StrategyEngine {
           if (trade.order_type === 'Limit') {
             logger.warn(`[${this.symbol}] Limit order ${trade.id} has no closed PnL. Assuming CANCELLED unfilled.`);
             await this.deps.db.closeTrade(trade.id, '0', trade.entryPrice, Date.now(), 'CANCELLED');
+
+            // Close the "Order Opened" Telegram loop with a distinct cancellation notice (best-effort)
+            this.deps.notifier.notifyTradeClosed(this.symbol, '0', '0', 'CANCELLED').catch((e) => logger.error(`TG Notify error: ${e}`));
+
             this.transition(StrategyState.SCANNING);
             return true; // Reconciled
           }
