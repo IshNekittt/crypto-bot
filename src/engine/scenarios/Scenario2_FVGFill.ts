@@ -93,7 +93,7 @@ export class Scenario2_FVGFill extends BaseScenario {
     }
 
     // Get the most recent HTF FVG
-    const htfFvg = htfFvgs[0];
+    const htfFvg = htfFvgs[htfFvgs.length - 1];
     const lastCandle = patternData.candles15m[patternData.candles15m.length - 1];
     if (!lastCandle) return false;
 
@@ -145,7 +145,7 @@ export class Scenario2_FVGFill extends BaseScenario {
     }
 
     // Check for 15m CHoCH with Displacement validation (any valid CHoCH after FVG touch)
-    const choch = patternData.structures?.find((s: any) => 
+    const choch = [...(patternData.structures || [])].reverse().find((s: any) => 
       s.type === 'CHOCH' && s.direction === 'BULLISH'
     );
     if (!choch) {
@@ -196,6 +196,24 @@ export class Scenario2_FVGFill extends BaseScenario {
       entry: levels.entry,
       stopLoss: levels.stopLoss,
       takeProfit: levels.takeProfit,
+    });
+
+    // Set zone details for mitigation tracking (the HTF FVG we entered from)
+    this.setZoneDetails({
+      type: 'FVG',
+      top: htfFvg.top,
+      bottom: htfFvg.bottom,
+      timeframe: htfFvg.timeframe,
+      direction: htfFvg.direction,
+      timestamp: htfFvg.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: choch.timestamp,
+      price: choch.price,
+      direction: choch.direction,
     });
 
     this.setReason(`FVG Fill: HTF FVG 0.5 touch + Premium/Discount + liquidity context + 15m CHoCH`);

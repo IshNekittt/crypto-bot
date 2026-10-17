@@ -114,7 +114,7 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       s.timestamp >= lastCandle.timestamp - 4 * 60 * 60 * 1000 // within last 4H (16 candles on 15m)
     ) || [];
 
-    const choch = recentStructures[0];
+    const choch = recentStructures[recentStructures.length - 1];
     if (!choch) {
       this.logRejection(`No aggressive 15m CHoCH ${sweepDirection} after ${sweptPool.type} sweep`);
       Scenario5_HTFLiquiditySweep.rejectionStats.noChoch++;
@@ -138,7 +138,7 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       z.timestamp <= choch.timestamp + 4 * 60 * 60 * 1000 // within 4H after CHoCH
     ) || [];
 
-    const fvg = fvgsAfterChoch[0];
+    const fvg = fvgsAfterChoch[fvgsAfterChoch.length - 1];
     if (!fvg) {
       this.logRejection('No 15m FVG found after CHoCH following sweep');
       Scenario5_HTFLiquiditySweep.rejectionStats.noFvg++;
@@ -148,23 +148,24 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     // Entry at 0.5 (Equilibrium) of FVG
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
     const atr15m = patternData.atr15m || new Decimal('0.01');
-    const offset = atr15m.mul(0.5);
 
-    // CRITICAL: Ensure SL is on correct side of Entry regardless of FVG top/bottom convention
-    // BULLISH (Long): SL must be BELOW entry. Use min(fvg.bottom, entry) - offset
-    // BEARISH (Short): SL must be ABOVE entry. Use max(fvg.top, entry) + offset
-    const sl = sweepDirection === 'BULLISH'
-      ? Decimal.min(fvg.bottom, entry).minus(offset)
-      : Decimal.max(fvg.top, entry).plus(offset);
-
-    const tp = sweepDirection === 'BULLISH'
-      ? entry.plus(entry.minus(sl).mul(3))
-      : entry.minus(sl.minus(entry).mul(3));
+    // Use centralized calculateLevels for safe SL/TP geometry (bidirectional)
+    const levels = this.calculateLevels(
+      entry,
+      {
+        top: fvg.top,
+        bottom: fvg.bottom,
+        direction: sweepDirection,
+      },
+      sweepDirection,
+      atr15m,
+      new Decimal(3),
+    );
 
     this.setLevels({
-      entry,
-      stopLoss: sl,
-      takeProfit: tp,
+      entry: levels.entry,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
     });
 
     // Set zone details for mitigation tracking (the FVG we entered from)
@@ -175,6 +176,14 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       timeframe: '15',
       direction: sweepDirection,
       timestamp: fvg.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: choch.timestamp,
+      price: choch.price,
+      direction: sweepDirection,
     });
 
     this.setReason(`HTF Liquidity Sweep: ${sweptPool.type} swept in killzone + 15m CHoCH + FVG 0.5 entry`);

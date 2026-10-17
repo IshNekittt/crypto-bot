@@ -120,20 +120,21 @@ export class Scenario9_TurtleSoup extends BaseScenario {
       // Use helper to check rejection wick
       if (this.checkRejectionWick(lastCandle, rangeHigh, 'SHORT', wickThreshold)) {
         // Valid Bearish SFP
-        
-        // Entry first (needed for safe SL calculation)
         const entry = lastClose; // Enter on close of SFP candle
-        
-        // SL = wick tip + 0.5 * ATR (SAFE: ensure SL > entry for SHORT)
         const atr = patternData.atr15m || new Decimal('0.01');
-        const slOffset = atr.mul(new Decimal('0.5'));
-        const stopLoss = Decimal.max(lastHigh, entry).plus(slOffset);
-        // For SHORT: TP = entry - (stopLoss - entry) * 3
-        const riskAmount = stopLoss.minus(entry).abs();
-        const takeProfit = entry.minus(riskAmount.mul(3)); // 1:3 RR
+
+        // Use centralized calculateLevels for safe SL/TP geometry (SL above wick tip)
+        const levels = this.calculateLevels(
+          entry,
+          { top: lastHigh, bottom: lastLow, direction: 'BEARISH' },
+          'BEARISH',
+          atr,
+          new Decimal(3)
+        );
 
         // R:R check - must be >= 1:3
-        const rewardAmount = entry.minus(takeProfit).abs();
+        const riskAmount = levels.stopLoss.minus(levels.entry).abs();
+        const rewardAmount = levels.entry.minus(levels.takeProfit).abs();
         if (rewardAmount.div(riskAmount).lt(new Decimal('3'))) {
           this.logRejection('R:R < 1:3');
           Scenario9_TurtleSoup.rejectionStats.rr++;
@@ -141,9 +142,17 @@ export class Scenario9_TurtleSoup extends BaseScenario {
         }
 
         this.setLevels({
-          entry,
-          stopLoss,
-          takeProfit,
+          entry: levels.entry,
+          stopLoss: levels.stopLoss,
+          takeProfit: levels.takeProfit,
+        });
+
+        // Set structure details for mitigation tracking (the sweep candle is the trigger)
+        this.setStructureDetails({
+          type: 'CHoCH',
+          timestamp: lastCandle.timestamp,
+          price: lastHigh,
+          direction: 'BEARISH',
         });
 
         this.setReason(`Turtle Soup (Short): Range High SFP + Wick >= 40% + Close Inside + Bollinger Squeeze`);
@@ -166,19 +175,21 @@ export class Scenario9_TurtleSoup extends BaseScenario {
       // Use helper to check rejection wick
       if (this.checkRejectionWick(lastCandle, rangeLow, 'LONG', wickThreshold)) {
         // Valid Bullish SFP
-        
-        // Entry first (needed for safe SL calculation)
         const entry = lastClose; // Enter on close of SFP candle
-        
-        // SL = wick tip - 0.5 * ATR (SAFE: ensure SL < entry for LONG)
         const atr = patternData.atr15m || new Decimal('0.01');
-        const slOffset = atr.mul(new Decimal('0.5'));
-        const stopLoss = Decimal.min(lastLow, entry).minus(slOffset);
-        const takeProfit = entry.plus(stopLoss.minus(entry).mul(3)); // 1:3 RR
+
+        // Use centralized calculateLevels for safe SL/TP geometry (SL below wick tip)
+        const levels = this.calculateLevels(
+          entry,
+          { top: lastHigh, bottom: lastLow, direction: 'BULLISH' },
+          'BULLISH',
+          atr,
+          new Decimal(3)
+        );
 
         // R:R check - must be >= 1:3
-        const riskAmount = entry.minus(stopLoss).abs();
-        const reward = takeProfit.minus(entry).abs();
+        const riskAmount = levels.entry.minus(levels.stopLoss).abs();
+        const reward = levels.takeProfit.minus(levels.entry).abs();
         if (reward.div(riskAmount).lt(new Decimal('3'))) {
           this.logRejection('R:R < 1:3');
           Scenario9_TurtleSoup.rejectionStats.rr++;
@@ -186,9 +197,17 @@ export class Scenario9_TurtleSoup extends BaseScenario {
         }
 
         this.setLevels({
-          entry,
-          stopLoss,
-          takeProfit,
+          entry: levels.entry,
+          stopLoss: levels.stopLoss,
+          takeProfit: levels.takeProfit,
+        });
+
+        // Set structure details for mitigation tracking (the sweep candle is the trigger)
+        this.setStructureDetails({
+          type: 'CHoCH',
+          timestamp: lastCandle.timestamp,
+          price: lastLow,
+          direction: 'BULLISH',
         });
 
         this.setReason(`Turtle Soup (Long): Range Low SFP + Wick >= 40% + Close Inside + Bollinger Squeeze`);

@@ -1156,6 +1156,17 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 
 > **Security**: Only `TELEGRAM_CHAT_ID` from `.env` receives responses. All other users are **silently ignored** — no errors, no visibility, no `setMyCommands` (bot invisible to strangers).
 
+### Trade Lifecycle Notifications
+
+Micro-rejections are handled **silently** — Slippage Guard aborts and Pre-flight DEAD setups are burned server-side only and never reach Telegram, keeping the chat clean. Every meaningful lifecycle event produces a clear, minimalist notification instead:
+
+| Notification                    | When                                                                                                                              |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| **Setup Found**                 | Manual mode only (`AUTO_TRADING=false`) — inline ✅/❌ Approve/Reject buttons                                                       |
+| **🚀 Order Opened**             | Every order successfully placed on the exchange (Market & Limit, both auto and manual modes)                                       |
+| **✅/❌ Position Closed**       | TP / SL / Reconciliation close — accurate exchange PnL (fees + funding included)                                                   |
+| **🗑️ Limit Order Cancelled**   | Limit order expired unfilled (`LIMIT_EXPIRATION_CANDLES`) or cancelled by Reconciliation — formally closes the loop on the earlier `🚀 Order Opened` alert (0 PnL, no PnL line) |
+
 ### `/status` Output Example
 
 ```

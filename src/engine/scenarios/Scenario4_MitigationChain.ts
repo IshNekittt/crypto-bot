@@ -46,7 +46,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
     if (!structures?.length) return false;
 
     // Look for BOS in trend direction (BULLISH for long) that occurred AFTER the OB timestamp
-    const bosAfterOb = structures.find((s: any) => 
+    const bosAfterOb = [...structures].reverse().find((s: any) => 
       s.type === 'BOS' && 
       s.direction === 'BULLISH' &&
       s.timestamp > ob.timestamp &&
@@ -83,7 +83,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
     }
 
     // Get the most recent OB
-    const latestOb = trendObs[0];
+    const latestOb = trendObs[trendObs.length - 1];
     
     // PREMIUM/DISCOUNT FILTER (Fibonacci 0.5)
     // For BULLISH OB (Long): OB must be in DISCOUNT zone (below 0.5)
@@ -127,7 +127,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
     }
 
     // Verify trend structure - need CHoCH in direction of trend (any valid CHoCH)
-    const choch = patternData.structures?.find((s: any) => 
+    const choch = [...(patternData.structures || [])].reverse().find((s: any) => 
       s.type === 'CHOCH' && s.direction === 'BULLISH'
     );
     
@@ -162,14 +162,14 @@ export class Scenario4_MitigationChain extends BaseScenario {
 
     // Entry at 0.5 of OB
     const entry = patternData.tradingRange?.equilibrium || 
-      trendObs[0].top.plus(trendObs[0].bottom).dividedBy(2);
+      latestOb.top.plus(latestOb.bottom).dividedBy(2);
 
     // Use base class calculateLevels with BULLISH direction (Long only)
     const levels = this.calculateLevels(
       entry,
       {
-        top: trendObs[0].top,
-        bottom: trendObs[0].bottom,
+        top: latestOb.top,
+        bottom: latestOb.bottom,
         direction: 'BULLISH',
       },
       'BULLISH',
@@ -180,6 +180,24 @@ export class Scenario4_MitigationChain extends BaseScenario {
       entry: levels.entry,
       stopLoss: levels.stopLoss,
       takeProfit: levels.takeProfit,
+    });
+
+    // Set zone details for mitigation tracking (the OB we entered from)
+    this.setZoneDetails({
+      type: 'OB',
+      top: latestOb.top,
+      bottom: latestOb.bottom,
+      timeframe: latestOb.timeframe || '15',
+      direction: latestOb.direction,
+      timestamp: latestOb.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: choch.timestamp,
+      price: choch.price,
+      direction: choch.direction,
     });
 
     this.setReason(`Mitigation Chain: OB 0.5 mitigation + BOS validated + Premium/Discount`);

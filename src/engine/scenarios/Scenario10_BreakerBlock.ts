@@ -159,7 +159,9 @@ export class Scenario10_BreakerBlock extends BaseScenario {
       const brokenObs = zones.filter((z: any) => 
         z.type === 'OB' && 
         z.direction === (s.direction === 'BULLISH' ? 'BEARISH' : 'BULLISH') && // opposite direction OB
-        s.price.gt(z.top) && s.price.gt(z.bottom) // for bullish break, price broke above bearish OB
+        (s.direction === 'BULLISH'
+          ? s.price.gt(z.top) && s.price.gt(z.bottom) // bullish break: closed above bearish OB
+          : s.price.lt(z.bottom) && s.price.lt(z.top)) // bearish break: closed below bullish OB
       );
       return brokenObs.length > 0;
     });
@@ -170,14 +172,16 @@ export class Scenario10_BreakerBlock extends BaseScenario {
       return false;
     }
 
-    const breakEvent = breaksThroughOb[0];
+    const breakEvent = breaksThroughOb[breaksThroughOb.length - 1];
     const brokenObDirection = breakEvent.direction === 'BULLISH' ? 'BEARISH' : 'BULLISH';
     
     // Find the OB that was broken
-    const brokenOb = zones.find((z: any) => 
+    const brokenOb = [...zones].reverse().find((z: any) => 
       z.type === 'OB' && 
       z.direction === brokenObDirection &&
-      breakEvent.price.gt(z.top) // for bullish break, broke above bearish OB top
+      (breakEvent.direction === 'BULLISH'
+        ? breakEvent.price.gt(z.top) // bullish break: broke above bearish OB top
+        : breakEvent.price.lt(z.bottom)) // bearish break: broke below bullish OB bottom
     );
 
     if (!brokenOb) {
@@ -290,6 +294,24 @@ export class Scenario10_BreakerBlock extends BaseScenario {
       entry: levels.entry,
       stopLoss: levels.stopLoss,
       takeProfit: levels.takeProfit,
+    });
+
+    // Set zone details for mitigation tracking (the broken OB / Breaker Block we entered from)
+    this.setZoneDetails({
+      type: 'OB',
+      top: breakerTop,
+      bottom: breakerBottom,
+      timeframe: brokenOb.timeframe || '15',
+      direction: brokenObDirection,
+      timestamp: brokenOb.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the BOS is the trigger structure)
+    this.setStructureDetails({
+      type: 'BOS',
+      timestamp: breakEvent.timestamp,
+      price: breakEvent.price,
+      direction: breakEvent.direction,
     });
 
     this.setReason(`Breaker Block: ${brokenObDirection} OB (liquidity swept, fresh) broken by ${breakEvent.direction} BOS + FVG + mirror test at 0.5, target 2R`);

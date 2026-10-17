@@ -9,13 +9,7 @@ export class Scenario6_SMS extends BaseScenario {
 
   override evaluate(patternData: any): boolean {
     // SMS can happen in any session, but CHoCH confirmation needs killzone
-    // Check explicit killzone override first
-    if (patternData.currentKillzone === 'NONE') {
-      this.logRejection('Not in active killzone for CHoCH confirmation');
-      return false;
-    }
-    const candleTimestamp = patternData.candles15m?.[patternData.candles15m.length - 1]?.timestamp ?? Date.now();
-    if (!this.isInKillzone(candleTimestamp)) {
+    if (!this.isInKillzone(patternData)) {
       this.logRejection('Not in active killzone for CHoCH confirmation');
       return false;
     }
@@ -24,7 +18,7 @@ export class Scenario6_SMS extends BaseScenario {
     if (!candles15m?.length || !structures?.length || !zones?.length) return false;
 
     // Find SMS (Smart Money Shift) - failure to make new high/low
-    const sms = structures.find((s: any) => s.type === 'SMS');
+    const sms = [...structures].reverse().find((s: any) => s.type === 'SMS');
     if (!sms) {
       this.logRejection('No SMS (Smart Money Shift) detected');
       return false;
@@ -36,7 +30,7 @@ export class Scenario6_SMS extends BaseScenario {
     const expectedDirection = sms.direction;
 
     // CRITICAL: Verify aggressive CHoCH in SMS direction
-    const choch = structures.find((s: any) => 
+    const choch = [...structures].reverse().find((s: any) => 
       s.type === 'CHOCH' && 
       s.direction === expectedDirection &&
       s.timestamp > sms.timestamp
@@ -68,7 +62,7 @@ export class Scenario6_SMS extends BaseScenario {
       return false;
     }
 
-    const smsOb = smsObs[0];
+    const smsOb = smsObs[smsObs.length - 1];
 
     // Entry at 0.5 (Equilibrium) of the SMS Order Block
     const entry = smsOb.top.plus(smsOb.bottom).dividedBy(2);
@@ -93,11 +87,22 @@ export class Scenario6_SMS extends BaseScenario {
 
     this.setReason(`SMS: ${sms.direction} failure swing + ${expectedDirection} CHoCH + SMS OB 0.5 entry`);
     
+    // Set zone details for mitigation tracking (the SMS-forming OB we entered from)
+    this.setZoneDetails({
+      type: 'OB',
+      top: smsOb.top,
+      bottom: smsOb.bottom,
+      timeframe: smsOb.timeframe || '15',
+      direction: smsOb.direction,
+      timestamp: smsOb.timestamp,
+    });
+    
     // Set structure details for mitigation tracking (CHoCH is the trigger structure)
     this.setStructureDetails({
       type: 'CHoCH',
       timestamp: choch.timestamp,
       price: choch.price,
+      direction: expectedDirection,
     });
     
     return true;

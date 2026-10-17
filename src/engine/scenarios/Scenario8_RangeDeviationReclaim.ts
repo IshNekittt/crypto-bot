@@ -120,7 +120,7 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     // Look for bearish structure break (CHoCH down) after reclaim
     // CHoCH can form within 8H window after reclaim
     const reclaimTime = reclaimCandle.timestamp;
-    const bearishChoch = structures?.find((s: any) => 
+    const bearishChoch = [...(structures || [])].reverse().find((s: any) => 
       s.type === 'CHOCH' && s.direction === 'BEARISH' &&
       s.timestamp >= reclaimTime &&
       s.timestamp <= reclaimTime + 8 * 60 * 60 * 1000 // 8 hours
@@ -152,7 +152,7 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     }
 
     // Entry at FVG 0.5 or equilibrium
-    const fvg = fvgs[0];
+    const fvg = fvgs[fvgs.length - 1];
     const entry = fvg.top.plus(fvg.bottom).dividedBy(2);
     const atr = patternData.atr15m || new Decimal('0.01');
 
@@ -174,6 +174,24 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     }
 
     this.setLevels(levels);
+
+    // Set zone details for mitigation tracking (the bearish FVG we entered from)
+    this.setZoneDetails({
+      type: 'FVG',
+      top: fvg.top,
+      bottom: fvg.bottom,
+      timeframe: fvg.timeframe || '15',
+      direction: 'BEARISH',
+      timestamp: fvg.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the bearish CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: bearishChoch.timestamp,
+      price: bearishChoch.price,
+      direction: 'BEARISH',
+    });
 
     this.setReason(`Range Deviation: Deviation + Reclaim + Bearish CHoCH + Bollinger Squeeze`);
     return true;

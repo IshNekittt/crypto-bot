@@ -20,7 +20,7 @@ export class Scenario3_IDM extends BaseScenario {
     if (!lastCandle) return false;
 
     // Check for bearish IDM (local low swept, then bounce to test OB)
-    const recentLowSweep = patternData.structures?.find((s: any) => 
+    const recentLowSweep = [...(patternData.structures || [])].reverse().find((s: any) => 
       s.direction === 'BULLISH' && s.type === 'CHOCH' && 
       s.brokenSwing && s.brokenSwing.type === 'LOW'
     );
@@ -43,7 +43,7 @@ export class Scenario3_IDM extends BaseScenario {
     }
 
     // Check if price is now testing the real OB
-    const realOb = realObs[0];
+    const realOb = realObs[realObs.length - 1];
     const lastHigh = new Decimal(lastCandle.high);
     const lastLow = new Decimal(lastCandle.low);
     const testingOb = lastHigh.gte(realOb.bottom) && lastLow.lte(realOb.top);
@@ -54,14 +54,14 @@ export class Scenario3_IDM extends BaseScenario {
     }
 
     // Entry at 0.5 of the real OB
-    const entry = realObs[0].top.plus(realObs[0].bottom).dividedBy(2);
+    const entry = realOb.top.plus(realOb.bottom).dividedBy(2);
 
     // Use base class calculateLevels with BULLISH direction (Long only)
     const levels = this.calculateLevels(
       entry,
       {
-        top: realObs[0].top,
-        bottom: realObs[0].bottom,
+        top: realOb.top,
+        bottom: realOb.bottom,
         direction: 'BULLISH',
       },
       'BULLISH',
@@ -82,6 +82,14 @@ export class Scenario3_IDM extends BaseScenario {
       timeframe: '15',
       direction: 'BULLISH',
       timestamp: realOb.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the sweep CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: recentLowSweep.timestamp ?? recentLowSweep.brokenSwing?.timestamp ?? 0,
+      price: recentLowSweep.price ?? recentLowSweep.brokenSwing?.price ?? entry,
+      direction: 'BULLISH',
     });
 
     this.setReason(`IDM: Local low swept + Real OB test at 0.5`);

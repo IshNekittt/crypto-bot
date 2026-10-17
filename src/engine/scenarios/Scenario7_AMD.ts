@@ -53,7 +53,7 @@ export class Scenario7_AMD extends BaseScenario {
     if (!candles15m?.length || !sessionRanges?.length) return false;
 
     // Find Asian Range (most recent)
-    const asianRange = sessionRanges.find((r: any) => r.name === 'ASIAN');
+    const asianRange = [...sessionRanges].reverse().find((r: any) => r.name === 'ASIAN');
     if (!asianRange) {
       this.logRejection('No Asian Range detected');
       Scenario7_AMD.rejectionStats.noAsianRange++;
@@ -107,7 +107,7 @@ export class Scenario7_AMD extends BaseScenario {
     // CRITICAL: Verify aggressive CHoCH UP after the sweep candle
     // CHoCH can form within 8H window after sweep (price reaction time)
     const sweepTime = sweepCandle.timestamp;
-    const recentChoch = structures?.find((s: any) => 
+    const recentChoch = [...(structures || [])].reverse().find((s: any) => 
       s.type === 'CHOCH' && 
       s.direction === 'BULLISH' &&
       s.timestamp > sweepTime && // CHoCH MUST be AFTER sweep
@@ -137,7 +137,7 @@ export class Scenario7_AMD extends BaseScenario {
       z.timestamp <= recentChoch.timestamp + 8 * 60 * 60 * 1000 // within 8H after CHoCH
     ) || [];
 
-    const fvg = fvgsAfterChoch[0];
+    const fvg = fvgsAfterChoch[fvgsAfterChoch.length - 1];
     if (!fvg) {
       this.logRejection('No 15m bullish FVG after CHoCH');
       Scenario7_AMD.rejectionStats.noFvg++;
@@ -181,6 +181,14 @@ export class Scenario7_AMD extends BaseScenario {
       timeframe: '15',
       direction: 'BULLISH',
       timestamp: fvg.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: recentChoch.timestamp,
+      price: recentChoch.price,
+      direction: 'BULLISH',
     });
 
     this.setReason(`AMD: Asian Low swept in ${currentKillzone} killzone (Asian Range height ${asianRangeHeight.toFixed(2)} < 3.0*ATR4H) + CHoCH + FVG 0.5 entry, target Asian High`);

@@ -439,13 +439,13 @@ The buffer creates a safety margin between the live price and the SL, preventing
 
 ---
 
-### 4.6 Telegram Localization & Spam Guard — **NEW v2026-10-13**
+### 4.6 Telegram Localization & Notification Hygiene — **NEW v2026-10-13** (Updated v2026-10-16)
 
 **English-Only Localization Rule**: All user-facing strings, logs, and Telegram messages MUST be strictly in **English**. No Cyrillic/Russian strings are allowed in the codebase. All user-facing text in `src/telegram/notifier.ts` has been translated to English (e.g., "Position Closed", "Setup Found", "Critical Error").
 
-**Spam Guard for Cancelled Limit Orders**: `notifyTradeClosed()` in `src/telegram/notifier.ts` has a guard clause that silently returns if `reason === 'CANCELLED'`. This prevents Telegram spam for cancelled limit orders (which have 0 PnL and should not trigger trade-closed notifications).
+**Cancelled Limit Order Notification**: Expired/Cancelled Limit orders trigger a dedicated, distinct Telegram notification (`🗑️ Limit Order Cancelled`) to formally close the loop on previously broadcasted `🚀 Order Opened` alerts, ensuring the user is never left guessing the status of an unfilled limit. This replaced the former silent suppression — it is a distinct, minimalist message with no PnL line (cancelled limits have 0 PnL by definition).
 
-**Implementation** (`src/telegram/notifier.ts:570`):
+**Implementation** (`src/telegram/notifier.ts:575-579`):
 ```typescript
 async notifyTradeClosed(
   symbol: string,
@@ -453,13 +453,16 @@ async notifyTradeClosed(
   _pnlPercent: string,
   reason?: string,
 ): Promise<boolean> {
-  // Skip notification for cancelled limit orders
+  // Cancelled limit orders: send a distinct message so the "Order Opened" loop gets closed
   if (reason === 'CANCELLED') {
-    return true; // Do not spam TG for cancelled limits
+    const text = `🗑️ <b>Limit Order Cancelled</b>\n\n📊 ${symbol}\n⏳ Reason: Expired / Timeout`;
+    return this.sendMessage(text);
   }
   // ... rest of notification logic
 }
 ```
+
+**Silent Micro-Rejections**: Setups that never reach the exchange (Slippage Guard aborts, Pre-flight DEAD setups, ghost-setup burns) are logged server-side ONLY — they intentionally produce no Telegram message to keep the chat clean.
 
 **Minimalist Trade Closure Notifications**: Trade closure notifications are kept strictly minimalist, displaying only the exact USDT PnL formatted to 2 decimal places (e.g., `✅ PnL: +60.70 USDT`). PnL percentage metrics have been removed from Telegram alerts to prevent `DecimalError` parsing bugs and UI clutter.
 
@@ -1748,6 +1751,27 @@ The table above lists all 12 scenarios implemented in `src/engine/scenarios/`. S
 
 ---
 
+### 8.5 V4 Classic Refactoring Standards (v2026-10-16)
+
+All Scenarios 1–11 were overhauled to eliminate array access hazards, enforce single-source-of-truth SL/TP math, and mandate mitigation tagging. Three rules are now mandatory for every classic scenario:
+
+#### 1. Freshness Guarantee (No `array[0]`)
+Scenarios MUST NEVER access the 0-th index or use a forward `.find()` when looking for OBs, FVGs, or CHoCHs — this fetches the oldest, stale structures. They MUST use `array[array.length - 1]` or `[...array].reverse().find(...)` to guarantee trading on the most recent market data.
+
+> **Why**: `structures`, `zones`, `fvgs`, and `sessionRanges` arrays are timestamp-ascending (oldest first). Trading `array[0]` means trading a days-old zone. This hazard was present in 10 of 11 scenarios and eliminated in the v2026-10-16 pass (see 16.41).
+
+#### 2. SL/TP Single Source of Truth
+Inline math for stop-loss or take-profit (e.g., `zone.bottom - offset`) is strictly forbidden. Every scenario must call `this.calculateLevels(...)` — the single source of truth for level geometry in `BaseScenario` — to ensure protection against inverted zones (`Decimal.min/max` of top, bottom, and entry) and to enforce the 0.1% minimum spread offset floor.
+
+> **Why**: Naive inline SL formulas broke whenever a zone had arbitrary `top`/`bottom` ordering, producing `invalid SL level` exchange errors. Scenarios 5 and 9 were the last inline violators, refactored to `calculateLevels` in v2026-10-16.
+
+#### 3. Mandatory Mitigation Tagging
+Every scenario MUST populate `structureDetails` in its `RouterResult` — the trigger structure (`CHoCH`/`BOS`/`SMS` with `{ type, timestamp, price, direction }`). This allows `burnSetup()` and the live execution engine to instantly burn the trigger structure upon entry or abort, preventing Ghost Signal loops across all 11 classic patterns.
+
+> **Why**: Structures without `structureDetails` are never added to `mitigatedStructures` — the same trigger CHoCH can be re-detected on the next scan, producing infinite ghost re-entries. Zones are additionally tagged via `zoneDetails` (Scenarios 1–8, 10, 11). Scenario 9 intentionally omits `zoneDetails`: its `structureDetails` carries the sweep candle timestamp as the burn anchor.
+
+---
+
 ## 9. DATABASE SCHEMA — `src/db/database.ts`
 
 ```sql
@@ -2440,6 +2464,14 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 **Fix**: Burn-on-open enforced in the live path — mirroring the backtester (Invariant 15, zone + structure burned on entry). BOTH `executeStagedEntry()` and `handleTradeApproval()` push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (100-entry cap).
 
 **Rule**: On every successful live entry, the trigger structure MUST be burned BEFORE the state machine transitions to `IN_TRADE`. Burning only on abort/close paths is FORBIDDEN.
+
+### 16.41 ❌ FORBIDDEN: Accessing the oldest elements in pattern arrays (e.g., `array[0]` or unreversed `.find()`)
+
+**Root Cause**: `structures`, `zones`, `fvgs`, and `sessionRanges` arrays are timestamp-ascending (oldest first). Scenarios accessed `array[0]` and used forward `.find(...)` when searching for OBs, FVGs, and CHoCHs — selecting the OLDEST, potentially days-old structures instead of the freshest market context. This bug class was present in 10 of 11 classic scenarios.
+
+**Fix**: The v2026-10-16 V4 Classic refactoring replaced every `array[0]` with `array[array.length - 1]` and every forward `.find(...)` with `[...array].reverse().find(...)` across Scenarios 1–11. Full standards documented in §8.5.
+
+**Rule**: Always access the freshest structures using `array[length-1]` or reversed iteration to prevent trading stale, days-old setups.
 
 ---
 

@@ -120,8 +120,8 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     const low = Decimal.min(smsPrice, chochPrice);
     const equilibrium = low.plus(high.minus(low).div(2));
 
-    if (tradeDirection === "BULLISH") return entry.lt(equilibrium); // Лонг строго в Discount
-    return entry.gt(equilibrium); // Шорт строго в Premium
+    if (tradeDirection === "BULLISH") return entry.lt(equilibrium); // Long strictly in Discount
+    return entry.gt(equilibrium); // Short strictly in Premium
   }
 
   override evaluate(patternData: any): boolean {
@@ -133,14 +133,7 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       return false;
     }
 
-    if (patternData.currentKillzone === "NONE") {
-      this.logRejection("Not in active killzone");
-      Scenario11_MitigationBlock.rejectionStats.killzone++;
-      return false;
-    }
-
-    const candleTimestamp = candles15m[candles15m.length - 1].timestamp;
-    if (!this.isInKillzone(candleTimestamp)) {
+    if (!this.isInKillzone(patternData)) {
       this.logRejection("Not in active killzone");
       Scenario11_MitigationBlock.rejectionStats.killzone++;
       return false;
@@ -153,7 +146,7 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       Scenario11_MitigationBlock.rejectionStats.noSms++;
       return false;
     }
-    const sms = smsList[smsList.length - 1]; // Самый свежий SMS!
+    const sms = smsList[smsList.length - 1]; // Newest SMS!
 
     const validation = this.validateSmsPattern(sms, structures, zones);
     if (!validation.isValid) {
@@ -173,10 +166,10 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     const tradeDirection = chochAfterSms.direction;
     const atr = patternData.atr15m || new Decimal("0.01");
 
-    // Ретест должен происходить на ТЕКУЩЕЙ свече (той, что только закрылась)
+    // The retest must happen on the CURRENT candle (the one that just closed)
     const currentCandle = candles15m[candles15m.length - 1];
 
-    // Свеча должна быть ПОСЛЕ CHoCH, но не позднее 12 часов после слома
+    // The candle must be AFTER CHoCH, but no later than 12 hours after the break
     const timeSinceChoch = currentCandle.timestamp - chochAfterSms.timestamp;
     if (timeSinceChoch <= 0) {
       Scenario11_MitigationBlock.rejectionStats.noRetest++;
@@ -195,13 +188,13 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     const mbTop = new Decimal(mitigationBlock.top);
     const mbBottom = new Decimal(mitigationBlock.bottom);
 
-    // Ретест — касание зоны блока тенями ТЕКУЩЕЙ свечи
+    // Retest — current candle wicks must touch the block zone
     const touchedMb =
       tradeDirection === "BULLISH"
         ? currentLow.lte(mbTop) && currentHigh.gte(mbBottom)
         : currentHigh.gte(mbBottom) && currentLow.lte(mbTop);
 
-    // Свеча должна закрыться в направлении сделки И внутри зоны блока
+    // The candle must close in the trade direction AND inside the block zone
     const closedInDirectionAndZone =
       tradeDirection === "BULLISH"
         ? currentClose.gt(currentOpen) &&
@@ -216,7 +209,7 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       return false;
     }
 
-    // Entry на закрытии ТЕКУЩЕЙ свечи
+    // Entry at the CURRENT candle close
     const entry = new Decimal(currentCandle.close);
 
     // Premium/Discount check at the entry point
@@ -251,11 +244,22 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       `Mitigation Block: ${sms.direction} SMS + ${tradeDirection} CHoCH + MB Retest | P/D Valid`,
     );
     
+    // Set zone details for mitigation tracking (the Mitigation Block OB we entered from)
+    this.setZoneDetails({
+      type: 'OB',
+      top: mbTop,
+      bottom: mbBottom,
+      timeframe: mitigationBlock.timeframe || '15',
+      direction: mitigationBlock.direction,
+      timestamp: mitigationBlock.timestamp,
+    });
+    
     // Set structure details for mitigation tracking (CHoCH after SMS is the trigger structure)
     this.setStructureDetails({
       type: 'CHoCH',
       timestamp: chochAfterSms.timestamp,
       price: chochAfterSms.price,
+      direction: tradeDirection,
     });
     
     return true;

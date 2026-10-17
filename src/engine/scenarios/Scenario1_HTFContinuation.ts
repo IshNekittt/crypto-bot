@@ -28,7 +28,7 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       return false;
     }
 
-    const latestOb = latestObs[0];
+    const latestOb = latestObs[latestObs.length - 1];
     const lastCandle = patternData.candles15m[patternData.candles15m.length - 1];
     if (!lastCandle) {
       this.logRejection('No 15m candle available');
@@ -46,7 +46,7 @@ export class Scenario1_HTFContinuation extends BaseScenario {
 
     // Check for 15m CHoCH with Displacement validation
     const structures15m = patternData.structures?.filter((s: any) => s.direction === 'BULLISH') || [];
-    const choch = structures15m.find((s: any) => s.type === 'CHOCH');
+    const choch = [...structures15m].reverse().find((s: any) => s.type === 'CHOCH');
     if (!choch) {
       this.logRejection('No 15m CHoCH found after OB touch');
       return false;
@@ -63,7 +63,7 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       z.type === 'FVG' && z.direction === 'BULLISH' && z.timeframe === '15' && z.timestamp >= choch.timestamp
     ) || [];
     
-    const fvg = fvgsAfterChoch[0];
+    const fvg = fvgsAfterChoch[fvgsAfterChoch.length - 1];
     if (!fvg) {
       this.logRejection('No 15m FVG found after CHoCH');
       return false;
@@ -98,6 +98,14 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       timeframe: '15',
       direction: 'BULLISH',
       timestamp: fvg.timestamp,
+    });
+
+    // Set structure details for mitigation tracking (the CHoCH is the trigger structure)
+    this.setStructureDetails({
+      type: 'CHoCH',
+      timestamp: choch.timestamp,
+      price: choch.price,
+      direction: 'BULLISH',
     });
 
     this.setReason(`HTF Continuation: 4H OB touch + 15m CHoCH + 15m FVG entry`);

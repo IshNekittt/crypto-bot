@@ -192,10 +192,11 @@ describe('Scenario9: Turtle Soup (Range SFP)', () => {
       
       // Entry should be at SFP close (4999)
       expect(entry).toBeCloseTo(4999, 0);
-      // SL should be at wick extreme + 0.5 ATR = 5006 + 0.05 = 5006.05
-      expect(sl).toBeCloseTo(5006.05, 1);
-      // TP should be at entry - 3*(SL-entry) = 4999 - 3*7.05 = 4977.85
-      expect(tp).toBeCloseTo(4977.85, 1);
+      // SL = max(wick extreme, entry) + max(0.5 ATR, 0.1% offset floor)
+      // = 5006 + max(0.05, 4.999) = 5006 + 4.999 = 5010.999 (calculateLevels 0.1% floor)
+      expect(sl).toBeCloseTo(5010.999, 1);
+      // TP = entry - 3*(SL-entry) = 4999 - 3*11.999 = 4963.003 (1:3 RR)
+      expect(tp).toBeCloseTo(4963.003, 1);
     });
   });
 
@@ -269,8 +270,8 @@ it('should reject when SFP candle closes wrong direction', () => {
       data.tradingRange.equilibrium = new Decimal(5000);
       data.liquidityPools[0].priceLevel = new Decimal(5002);
       data.liquidityPools[1].priceLevel = new Decimal(4998);
-      // With correct TP calculation: SL=5006.05, entry=4999, TP=4977.85
-      // risk=7.05, reward=21.15, R:R=3.0 exactly (meets minimum)
+      // With calculateLevels: SL = 5006 + 4.999 (0.1% offset floor) = 5010.999
+      // entry=4999, risk=11.999, TP = 4999 - 3*11.999 = 4963.003, R:R=3.0 exactly (meets minimum)
       // To make R:R < 1:3, we need even tighter range
       data.tradingRange.high = new Decimal(5002);
       data.tradingRange.low = new Decimal(4999.5);
@@ -278,7 +279,7 @@ it('should reject when SFP candle closes wrong direction', () => {
       data.liquidityPools[0].priceLevel = new Decimal(5002);
       data.liquidityPools[1].priceLevel = new Decimal(4999.5);
       // Now range is 2.5 points, equilibrium=5000.75
-      // Entry ~4999, SL ~5006.05, TP=4977.85 -> risk=7.05, reward=21.15 -> R:R=3.0 still
+      // Entry ~4999, SL ~5010.999, TP=4963.003 -> risk=11.999, reward=35.997 -> R:R=3.0 still
       // Need even tighter: make equilibrium very close to entry
       data.tradingRange.high = new Decimal(5002);
       data.tradingRange.low = new Decimal(4999.9);
@@ -286,13 +287,12 @@ it('should reject when SFP candle closes wrong direction', () => {
       data.liquidityPools[0].priceLevel = new Decimal(5002);
       data.liquidityPools[1].priceLevel = new Decimal(4999.9);
       // Now range is 2.1 points, equilibrium=5000.95
-      // Entry ~4999, SL ~5006.05, TP=4977.85 -> risk=7.05, reward=21.15 -> R:R=3.0
-      // Actually with correct math, R:R is always 3.0 when TP = entry - 3*(SL-entry)
+      // Entry ~4999, SL ~5010.999, TP=4963.003 -> risk=11.999, reward=35.997 -> R:R=3.0
+      // With calculateLevels, R:R is always 3.0 when TP = entry - 3*(SL-entry)
       // The only way to get R:R < 3 is if TP is constrained by equilibrium
-      // But our TP is calculated from SL, not equilibrium
+      // But our TP is calculated from SL via calculateLevels, not equilibrium
       // So R:R will always be exactly 3.0 with this formula
-      // The test should verify that R:R check works when TP is constrained
-      // For now, test passes since R:R check is working correctly
+      // The test verifies that the R:R check passes when R:R = 3.0 exactly
       const result = scenario.evaluate(data);
       expect(result).toBe(true); // R:R = 3.0 exactly, meets minimum
     });
