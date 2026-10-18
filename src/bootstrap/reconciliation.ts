@@ -111,8 +111,16 @@ export class ReconciliationLoop {
               logger.info(`[${engine.symbol}] Cancelling expired LIMIT order ${order.orderId} (age: ${Math.round(orderAgeMs/60000)}m, limit: ${this.config.limitExpirationCandles} candles)`);
               try {
                 await this.source.cancelOrder(engine.symbol, order.orderId);
+                await this.db.closeTrade(order.orderId, '0', order.price || '0', Date.now(), 'CANCELLED');
+                logger.info(`[${engine.symbol}] Cancelled order closed in DB safely.`);
+
+                // Safely trigger notification — engine may be a mock without deps/notifier
+                if (engine.deps && engine.deps.notifier) {
+                  engine.deps.notifier.notifyTradeClosed(engine.symbol, '0', '0', 'CANCELLED')
+                    .catch(e => logger.error(`[${engine.symbol}] TG Cancel Notify error: ${e instanceof Error ? e.message : String(e)}`));
+                }
               } catch (err) {
-                logger.error(`[${engine.symbol}] Failed to cancel expired limit order: ${err}`);
+                logger.error(`[${engine.symbol}] Failed to cancel/close expired limit order: ${err instanceof Error ? err.message : String(err)}`);
               }
             } else {
               hasValidLimit = true;
@@ -222,10 +230,11 @@ export class ReconciliationLoop {
                 logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${this.config.limitExpirationCandles} candles)`);
                 logger.info(`[${symbol}] Cancelled order closed in DB safely.`);
 
-                // Close the "Order Opened" Telegram loop with a distinct cancellation notice (best-effort)
-                engine.deps?.notifier
-                  .notifyTradeClosed(symbol, '0', '0', 'CANCELLED')
-                  .catch((e) => logger.error(`TG Notify error: ${e}`));
+                // Safely trigger notification — engine may be a mock without deps/notifier
+                if (engine.deps && engine.deps.notifier) {
+                  engine.deps.notifier.notifyTradeClosed(symbol, '0', '0', 'CANCELLED')
+                    .catch((e) => logger.error(`[${symbol}] TG Cancel Notify error: ${e instanceof Error ? e.message : String(e)}`));
+                }
               } catch (dbError) {
                 logger.error(`[${symbol}] Failed to close cancelled order in DB: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
               }

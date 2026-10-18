@@ -693,11 +693,11 @@ export class StrategyEngine {
 
   // Honest logging
   if (burnedZone && burnedStructure) {
-    logger.warn(`[${this.symbol}] Setup burned: zone ${zd?.type} mitigated, structure added to mitigatedStructures`);
+    logger.info(`[${this.symbol}] Setup burned: zone ${zd?.type} mitigated, structure added to mitigatedStructures`);
   } else if (burnedZone) {
-    logger.warn(`[${this.symbol}] Setup burned: ONLY zone ${zd?.type} mitigated (no structure)`);
+    logger.info(`[${this.symbol}] Setup burned: ONLY zone ${zd?.type} mitigated (no structure)`);
   } else if (burnedStructure) {
-    logger.warn(`[${this.symbol}] Setup burned: ONLY structure added to mitigatedStructures (no zone)`);
+    logger.info(`[${this.symbol}] Setup burned: ONLY structure added to mitigatedStructures (no zone)`);
   } else {
     logger.error(`[${this.symbol}] CRITICAL: burnSetup called but found neither valid zoneDetails nor structureDetails! Ghost signals may occur.`);
   }
@@ -930,7 +930,7 @@ export class StrategyEngine {
     const slBuffer = livePrice.mul(new Decimal(this.deps.config.preflightBufferPct));
     const slBreached = isLong ? livePrice.lte(sl.plus(slBuffer)) : livePrice.gte(sl.minus(slBuffer));
     if (slBreached) {
-      logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
+      logger.info(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) breached SL (${this.plan.stopLoss}). Aborting & burning.`);
       this.burnSetup(this.plan);
       this.plan = null;
       this.transition(StrategyState.SCANNING);
@@ -940,7 +940,7 @@ export class StrategyEngine {
     // 2. Pre-flight TP reached check (unconditional for ALL orders)
     const tpReached = isLong ? livePrice.gte(tp) : livePrice.lte(tp);
     if (tpReached) {
-      logger.warn(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already reached TP (${this.plan.takeProfit}). Aborting & burning.`);
+      logger.info(`[${this.symbol}] Pre-flight DEAD SETUP (Auto): Live price (${livePriceStr}) already reached TP (${this.plan.takeProfit}). Aborting & burning.`);
       this.burnSetup(this.plan);
       this.plan = null;
       this.transition(StrategyState.SCANNING);
@@ -978,7 +978,7 @@ export class StrategyEngine {
       if (priceMovedTowardTp.gt(0)) {
         const deviationPct = priceMovedTowardTp.div(entry);
         if (deviationPct.gt(0.002)) { // > 0.2%
-          logger.warn(`[${this.symbol}] Slippage Guard (Auto): Market price moved ${deviationPct.mul(100).toFixed(3)}% toward TP. R:R degraded. Aborting & burning.`);
+          logger.info(`[${this.symbol}] Slippage Guard (Auto): Market price moved ${deviationPct.mul(100).toFixed(3)}% toward TP. R:R degraded. Aborting & burning.`);
           this.burnSetup(this.plan);
           this.plan = null;
           this.transition(StrategyState.SCANNING);
@@ -1117,7 +1117,7 @@ export class StrategyEngine {
         logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);
       }
     }
-    logger.warn(`${this.symbol}: reconciliation force-reset IN_TRADE → SCANNING (no position on exchange)`);
+    logger.info(`${this.symbol}: reconciliation force-reset IN_TRADE → SCANNING (no position on exchange)`);
     this.transition(StrategyState.SCANNING);
     return true;
   }
@@ -1221,7 +1221,7 @@ export class StrategyEngine {
           // NO PNL FOUND ON EXCHANGE
           // Check if this was a Limit order that was cancelled (no executions)
           if (trade.order_type === 'Limit') {
-            logger.warn(`[${this.symbol}] Limit order ${trade.id} has no closed PnL. Assuming CANCELLED unfilled.`);
+            logger.info(`[${this.symbol}] Limit order ${trade.id} has no closed PnL. Assuming CANCELLED unfilled.`);
             await this.deps.db.closeTrade(trade.id, '0', trade.entryPrice, Date.now(), 'CANCELLED');
 
             // Close the "Order Opened" Telegram loop with a distinct cancellation notice (best-effort)

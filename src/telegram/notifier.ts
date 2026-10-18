@@ -575,7 +575,13 @@ export class TelegramNotifier {
     // Cancelled limit orders: send a distinct message so the "Order Opened" loop gets closed
     if (reason === 'CANCELLED') {
       const text = `🗑️ <b>Limit Order Cancelled</b>\n\n📊 ${symbol}\n⏳ Reason: Expired / Timeout`;
-      return this.sendMessage(text);
+      try {
+        await this.sendMessage(text);
+        logger.info(`[${symbol}] Sent Telegram notification for Cancelled Limit Order.`);
+      } catch (e) {
+        logger.error(`[${symbol}] Failed to send CANCELLED notification: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      return true;
     }
     
     const safePnl = pnl ? new Decimal(pnl) : new Decimal(0);
