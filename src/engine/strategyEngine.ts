@@ -599,11 +599,11 @@ export class StrategyEngine {
           finalPnlString = entryPrice.minus(exitPrice).mul(qty).toFixed(8);
         }
         logger.warn(`[${this.symbol}] Calculated fallback PnL from trade data: ${finalPnlString}`);
-        logger.warn(`[${this.symbol}] Using fallback exit price: ${exitPriceStr}`);
       }
 
       if (finalExitPrice === null) {
-        // Use live price as fallback for exit price
+        // Use live price as fallback for exit price. This is the single source
+        // of the "Using fallback exit price" log — never log it twice.
         finalExitPrice = wsExitPrice ?? this.getLivePrice() ?? trade.entryPrice;
         logger.warn(`[${this.symbol}] Using fallback exit price: ${finalExitPrice}`);
       }

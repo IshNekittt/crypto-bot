@@ -1957,7 +1957,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (252 tests, all green)
+npm test             # jest (261 tests, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -2026,6 +2026,8 @@ docker compose up -d
 38. **Context-Aware Slippage Guard** — The >0.2% slippage guard must never be applied to Limit orders, as it would cause valid pullback setups to be aborted. Slippage guard is strictly for Market orders; Limit orders wait for pullback by design.
 
 39. **Burn Trigger Structure on Trade Open (Live)** — BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) MUST push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (standard 100-entry cap). This mirrors backtester burn-on-entry (Invariant 15) and closes the live ghost-signal gap — never rely solely on `burnSetup()` (abort paths) or trade-close mitigation.
+
+40. **Bybit V5 Demo Account Balance Fetching** — Bybit Demo accounts act exclusively as Unified Trading Accounts (UTA). When fetching wallet balances in demo mode, the system MUST ONLY query `accountType: 'UNIFIED'` to prevent masking real errors with `[10001] accountType only support UNIFIED` errors from legacy `CONTRACT` queries.
 
 ---
 
@@ -2531,6 +2533,14 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
 **Rule**: Always access the freshest structures using `array[length-1]` or reversed iteration to prevent trading stale, days-old setups.
 
+### 16.42 ❌ FORBIDDEN: Blindly querying `CONTRACT` account types for balances on Bybit Demo
+
+**Root Cause**: Bybit Demo accounts are exclusively Unified Trading Accounts (UTA), and UTA 2.0 dropped the legacy `CONTRACT` account type. Querying `getWalletBalance({ accountType: 'CONTRACT' })` returns `[10001] accountType only support UNIFIED.`, which overwrote the original `UNIFIED` failure and surfaced a misleading error in the `process()` loop.
+
+**Fix**: `getUsdtBalance()` in `src/api/bybitClient.ts` queries ONLY `accountType: 'UNIFIED'` when `config.demoTrading` is true. For non-demo accounts the legacy `CONTRACT` fallback is preserved, but its expected `[10001] "only support unified"` rejection is ignored and never masks the original `UNIFIED` error.
+
+**Rule**: Blindly querying `CONTRACT` account types for balances on Bybit Demo environments is FORBIDDEN. This triggers `[10001]` errors that can mask genuine API failures. Filter queries by `UNIFIED` when demo trading is active.
+
 ---
 
-_Last updated: 2026-10-19 (documented the HTML Equity Curve generator — closed vs max floating drawdown, reversed y1 axis rules, X-axis anchoring; see §7.18.1). All 259 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-19. All 261 tests green. Build passes. Enterprise-ready._

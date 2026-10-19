@@ -7,7 +7,7 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-259%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Tests](https://img.shields.io/badge/Tests-261%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 [![Version](https://img.shields.io/badge/Version-v2026--10--19-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
@@ -1505,7 +1505,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (259)
+# All tests (261)
 npm test
 
 # Watch mode
@@ -1544,7 +1544,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full 180-day backtest (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (259 tests)
+npm test             # Jest (261 tests)
 npm run test:watch   # Watch mode
 ```
 

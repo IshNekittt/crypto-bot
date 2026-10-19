@@ -50,6 +50,14 @@ const RATE_LIMIT_CODES = new Set([10006, 10007]);
 const SERVER_ERROR_CODES = new Set([10001, 10002, 10003, 10004, 10005]);
 const RATE_LIMIT_429_CODE = 429;
 
+// Bybit V5: UTA 2.0 dropped the legacy CONTRACT account type. Probing it on a
+// Unified account returns [10001] "accountType only support UNIFIED.".
+const UNIFIED_ONLY_RET_CODE = 10001;
+
+function isUnifiedOnlyAccountError(retCode: number, retMsg: string | undefined): boolean {
+  return retCode === UNIFIED_ONLY_RET_CODE && /only support unified/i.test(retMsg ?? '');
+}
+
 function isCircuitBreakerError(retCode: number): boolean {
   return RATE_LIMIT_CODES.has(retCode) || SERVER_ERROR_CODES.has(retCode) || retCode >= 50000;
 }
@@ -335,12 +343,25 @@ export class BybitClient {
 
   async getUsdtBalance(): Promise<Decimal> {
     return this.executeWithRetry(async () => {
-      const accountTypes = ['UNIFIED', 'CONTRACT'] as const;
+      // Bybit V5: Unified Trading Accounts (all Demo accounts are UTA) expose
+      // funds exclusively through accountType=UNIFIED. Querying CONTRACT on a
+      // UTA returns [10001] "accountType only support UNIFIED.", so only probe
+      // it for non-demo accounts that may still be classic/legacy accounts.
+      const accountTypes = this.config.demoTrading
+        ? (['UNIFIED'] as const)
+        : (['UNIFIED', 'CONTRACT'] as const);
+
       let lastError = 'unknown error';
       for (const accountType of accountTypes) {
         try {
           const response = await this.rest.getWalletBalance({ accountType, coin: 'USDT' });
           if (response.retCode !== 0) {
+            // A CONTRACT probe on a UTA is an expected rejection, not a balance
+            // failure — never let it mask the original UNIFIED error.
+            if (accountType === 'CONTRACT' && isUnifiedOnlyAccountError(response.retCode, response.retMsg)) {
+              logger.debug('USDT balance: CONTRACT account type unsupported on Unified account, skipping');
+              continue;
+            }
             lastError = `[${response.retCode}] ${response.retMsg}`;
             continue;
           }

@@ -14,7 +14,10 @@ function makeRest(): Record<string, jest.Mock> {
   };
 }
 
-function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: BybitClient; rest: Record<string, jest.Mock> } {
+function makeClient(
+  rest: Record<string, jest.Mock> = makeRest(),
+  overrides: { demoTrading?: boolean } = {},
+): { client: BybitClient; rest: Record<string, jest.Mock> } {
   const config = {
     apiKey: 'test',
     apiSecret: 'test',
@@ -55,6 +58,7 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     enableHealthcheckServer: false,
     allowedDaysOfWeek: [1, 2, 3, 4, 5],
     enforceKillzones: true,
+    ...overrides,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }
@@ -197,6 +201,34 @@ describe('BybitClient.getUsdtBalance', () => {
     const { client, rest } = makeClient();
     rest.getWalletBalance.mockResolvedValue({ retCode: 10001, result: {} });
     await expect(client.getUsdtBalance()).rejects.toThrow(/Failed to fetch USDT balance/);
+  });
+
+  it('queries only UNIFIED on demo accounts (all demo accounts are UTA)', async () => {
+    const { client, rest } = makeClient(undefined, { demoTrading: true });
+    rest.getWalletBalance.mockResolvedValue({
+      retCode: 0,
+      result: { list: [{ coin: [{ coin: 'USDT', walletBalance: '500' }] }] },
+    });
+
+    const balance = await client.getUsdtBalance();
+
+    expect(balance.toNumber()).toBe(500);
+    expect(rest.getWalletBalance).toHaveBeenCalledTimes(1);
+    expect(rest.getWalletBalance).toHaveBeenCalledWith({ accountType: 'UNIFIED', coin: 'USDT' });
+  });
+
+  it('does not let the expected CONTRACT [10001] rejection mask the UNIFIED error', async () => {
+    const { client, rest } = makeClient();
+    rest.getWalletBalance
+      .mockRejectedValueOnce(new Error('UNIFIED temporarily unavailable'))
+      .mockResolvedValueOnce({ retCode: 10001, retMsg: 'accountType only support UNIFIED.', result: {} });
+
+    const error = await client.getUsdtBalance().catch((caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('UNIFIED temporarily unavailable');
+    expect((error as Error).message).not.toContain('only support UNIFIED');
+    expect(rest.getWalletBalance).toHaveBeenCalledWith({ accountType: 'CONTRACT', coin: 'USDT' });
   });
 });
 
