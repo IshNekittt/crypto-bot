@@ -8,7 +8,7 @@ import { Candle, Timeframe } from "../types";
 import { InstrumentInfo } from "./executionSimulator";
 import { MitigatedStructure } from "../types";
 import { Decimal } from "decimal.js";
-import { loadCachedOrFetch, getTimeRangeForSixMonths } from "./historyLoader";
+import { loadCachedOrFetch, getTimeRangeForDays } from "./historyLoader";
 import {
   openTrade,
   checkAndCloseTrade,
@@ -433,10 +433,7 @@ async function runBacktestForSymbol(
 async function main(): Promise<void> {
   logger.info("Starting SMC Backtester (V5 Capable)...");
 
-  const config = loadConfig() as ReturnType<typeof loadConfig> & {
-    enableSniperMode?: boolean;
-    backtestDays?: number;
-  };
+  const config = loadConfig();
   const useCsvMode = config.backtestCsvPath !== null;
 
   let client: BybitClient | null = null;
@@ -462,7 +459,11 @@ async function main(): Promise<void> {
       instruments.set(symbol, info);
     }
 
-    const { fromMs, toMs } = getTimeRangeForSixMonths();
+    const backtestDays = config.backtestDays;
+    const { fromMs, toMs } = getTimeRangeForDays(backtestDays);
+    logger.info(
+      `[Backtest Range] BACKTEST_DAYS=${backtestDays} → ${new Date(fromMs).toISOString()} - ${new Date(toMs).toISOString()}`,
+    );
 
     for (const symbol of symbolsToTest) {
       logger.info(`\n=== Backtesting ${symbol} ===`);
@@ -491,14 +492,14 @@ async function main(): Promise<void> {
 
       const candles1m: Candle[] = [];
       if (config.enableSniperMode) {
-        const days = config.backtestDays || 60;
-        const from1m = toMs - days * 24 * 60 * 60 * 1000;
-        logger.info(`Fetching 1m candles for Sniper Mode (${days} days)...`);
+        logger.info(
+          `Fetching 1m candles for Sniper Mode (${backtestDays} days)...`,
+        );
         const fetched1m = await loadCachedOrFetch(
           client,
           symbol,
           "1",
-          Math.max(fromMs, from1m),
+          fromMs,
           toMs,
           config.useLocalCacheOnly
         );

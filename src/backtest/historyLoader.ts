@@ -6,7 +6,7 @@ import * as path from 'path';
 
 const CACHE_DIR = path.resolve(process.cwd(), 'data/backtest_cache');
 const MAX_CANDLES_PER_REQUEST = 1000;
-const SIX_MONTHS_MS = 6 * 30 * 24 * 60 * 60 * 1000;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MAX_RETRIES = 5;
 const BASE_RETRY_DELAY_MS = 3000;
 
@@ -142,8 +142,20 @@ function mergeCandles(existing: Candle[], incoming: Candle[]): Candle[] {
   return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
-export function getTimeRangeForSixMonths(): { fromMs: number; toMs: number } {
+/**
+ * Builds the historical window for a backtest.
+ *
+ * The window must come from `BACKTEST_DAYS` (config.backtestDays) — never from
+ * a hardcoded 180-day / "six months" constant. Every candle loader (1m, LTF and
+ * HTF) must be driven by the same range so the chart, the report and the
+ * simulated period can never disagree with `.env`.
+ */
+export function getTimeRangeForDays(days: number): { fromMs: number; toMs: number } {
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new Error(`Backtest range requires a positive number of days, got: ${days}`);
+  }
+
   const toMs = Date.now();
-  const fromMs = toMs - SIX_MONTHS_MS;
+  const fromMs = toMs - Math.round(days * MS_PER_DAY);
   return { fromMs, toMs };
 }

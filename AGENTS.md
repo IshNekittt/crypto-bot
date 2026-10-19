@@ -105,7 +105,7 @@ src/
 │   ├── bybitClient.ts     # REST with Circuit Breaker, Retry, ClosedPnL
 │   └── wsClient.ts        # WS with 3-min Watchdog, 5s reconnect, custom logger
 ├── backtest/         # Historical simulation engine
-│   ├── run.ts             # CLI entry, multi-symbol, 180-day default
+│   ├── run.ts             # CLI entry, multi-symbol, BACKTEST_DAYS window
 │   ├── executionSimulator.ts  # State machine: SCANNING→IN_TRADE→CLOSED
 │   └── reporter.ts        # PnL report generation
 ├── bootstrap/        # Startup & recovery
@@ -869,8 +869,19 @@ await this.deps.db.openTrade({
 
 ### 6.2 Progress Calculation
 
+**Profit-direction guard (mandatory, v2026-10-19)**: progress MUST only be computed for trades that are in profit. Before any progress math, `evaluateTradeManagement()` evaluates `isProfitable`:
+
+```typescript
+const isProfitable = isLong ? currentPrice.gt(entry) : currentPrice.lt(entry);
+if (!isProfitable) {
+  return { action: 'none', reason: 'Trade is not in profit', updatedState: state };
+}
 ```
-progress = |currentPrice - entry| / |takeProfit - entry|  // 0.0 to 1.0
+
+Reason: an absolute-value distance (`|currentPrice - entry|`) treats an adverse move toward SL as progress toward TP — the bot then tries to move SL to entry while price is on the wrong side, producing Bybit error `[10001]` (StopLoss above/below base_price). Progress is measured as **directional** movement, strictly positive because of the guard:
+
+```
+progress = (isLong ? currentPrice - entry : entry - currentPrice) / |takeProfit - entry|  // 0.0 to 1.0
 ```
 
 ### 6.3 Milestone Logic
@@ -1047,12 +1058,12 @@ public calculateLevels(
 
 **Problem**: Hardcoded '15m'/'240' timeframes and fixed 17280 candle count (180 days of 15m) prevented testing other timeframes. Cache filenames were hardcoded to '15', causing 5m cache to overwrite 15m cache.
 
-**Solution**: Fully dynamic backtester using config-driven timeframes.
+**Solution**: Fully dynamic backtester using config-driven timeframes and a config-driven history window.
 
 | Component | Detail |
 |-----------|--------|
 | **LTF/HTF Timeframes** | Read from `config.ltfTimeframe` / `config.htfTimeframe` (strings like '5', '15', '60') |
-| **Dynamic Candle Count** | `Math.ceil((180 * 24 * 60) / ltfMinutes)` → 51840 for 5m, 17280 for 15m, 7200 for 60m |
+| **History Window** | `getTimeRangeForDays(config.backtestDays)` (`BACKTEST_DAYS`, default 60) — single source of truth for 1m, LTF and HTF loaders. **No hardcoded 180 / "six months".** |
 | **Cache Filenames** | Dynamic: `BTCUSDT_5.json`, `BTCUSDT_15.json` (includes timeframe) |
 | **Dynamic Timeframes in API** | `config.ltfTimeframe as Timeframe` / `config.htfTimeframe as Timeframe` |
 | **Cache Key** | `getCachePath(symbol, timeframe)` uses timeframe in filename |
@@ -1061,11 +1072,14 @@ public calculateLevels(
 **Removed Hardcoded Values:**
 - ❌ `'15'` / `'240'` strings everywhere
 - ❌ `17280` fixed candle count (180 days × 96 candles/day for 15m)
+- ❌ `SIX_MONTHS_MS = 6 * 30 * 24 * 60 * 60 * 1000` / `getTimeRangeForSixMonths()` — replaced by `getTimeRangeForDays(config.backtestDays)`
 - ❌ `'15'` in cache filenames (`BTCUSDT_15.json`)
 - ❌ Hardcoded '15m' / '4H' strings in log messages
 
 **Added Dynamic Calculations:**
-- ✅ `totalCandles = Math.ceil((180 * 24 * 60) / ltfMinutes)`
+- ✅ `getTimeRangeForDays(days)` (`historyLoader.ts`) — validates `days > 0` and returns `{ fromMs, toMs }`
+- ✅ `run.ts` logs `[Backtest Range] BACKTEST_DAYS=N → <from> - <to>` before loading
+- ✅ All loaders (`candles1m`, `candlesLtf`, `candlesHtf`) receive the same `fromMs`/`toMs` window
 - ✅ Cache filename: `getCachePath(symbol, timeframe)` → `BTCUSDT_5.json` / `BTCUSDT_60.json`
 - ✅ Dynamic log: `[SYMBOL] Starting backtest loop over 51840 5m candles...`
 - ✅ Progress: `candle ${i}/${candlesLtf.length} (${((i / candlesLtf.length) * 100).toFixed(1)}%)`
@@ -1891,7 +1905,8 @@ CREATE TABLE symbol_state (
 - **Max Drawdown**: Calculated correctly (not `TODO%`).
 - **HTML Equity Curve**: `writeBacktestArtifacts()` writes `data/Backtest_Chart_<SYMBOL>.html` (self-contained Chart.js) with Balance / Running Peak / Closed Drawdown % / Max Floating Drawdown % — see §7.18.1.
 - **CLI**: `npm run backtest -- BTCUSDT` (single symbol filter via `parseArgs`).
-- **Performance**: ~25s for 17,280 candles (180 days × 3 symbols).
+- **History window**: `BACKTEST_DAYS` (default 60) → `getTimeRangeForDays(config.backtestDays)` shared by 1m/LTF/HTF loaders (see §7.7, Invariant 42).
+- **Performance**: ~25s for 17,280 15m candles (180-day window, 3 symbols); scales with `BACKTEST_DAYS`.
 
 ---
 
@@ -1921,6 +1936,12 @@ HISTORY_CANDLES=200        # 15m/4H history (max 1000)
 MACRO_CANDLES=1000         # 1W/1D for macro context (max 1000)
 LTF_TIMEFRAME=15
 HTF_TIMEFRAME=240
+
+# Backtest
+BACKTEST_DAYS=60           # History window for ALL backtest loaders (1m/LTF/HTF), 1m requires a 1m cache
+ENABLE_SNIPER_MODE=false
+SNIPER_DISPLACEMENT_MULTIPLIER=1.5
+USE_LOCAL_CACHE_ONLY=false # true = offline backtest, cache only, zero Bybit API calls
 
 # Features
 ENABLE_LIVE_TEST_ORDERS=false
@@ -2028,6 +2049,10 @@ docker compose up -d
 39. **Burn Trigger Structure on Trade Open (Live)** — BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) MUST push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (standard 100-entry cap). This mirrors backtester burn-on-entry (Invariant 15) and closes the live ghost-signal gap — never rely solely on `burnSetup()` (abort paths) or trade-close mitigation.
 
 40. **Bybit V5 Demo Account Balance Fetching** — Bybit Demo accounts act exclusively as Unified Trading Accounts (UTA). When fetching wallet balances in demo mode, the system MUST ONLY query `accountType: 'UNIFIED'` to prevent masking real errors with `[10001] accountType only support UNIFIED` errors from legacy `CONTRACT` queries.
+
+41. **Profit-Direction Guard in Adaptive Fractioning** — `evaluateTradeManagement()` MUST verify `isProfitable` (`currentPrice.gt(entry)` for Long, `currentPrice.lt(entry)` for Short) BEFORE any progress math. If `!isProfitable` → return `{ action: 'none', reason: 'Trade is not in profit' }`. Absolute-value progress is FORBIDDEN — it makes adverse moves look like progress and triggers bogus SL→entry updates rejected by Bybit `[10001]`.
+
+42. **Backtest History Window from `BACKTEST_DAYS`** — The backtest candle window MUST come from `getTimeRangeForDays(config.backtestDays)` and be shared by the 1m, LTF and HTF loaders. Hardcoding 180 days (`SIX_MONTHS_MS`, `6 * 30`, `Math.ceil((180 * 24 * 60) / ltfMinutes)`) is FORBIDDEN — the chart period, report period and simulated period must always match `.env`.
 
 ---
 
@@ -2541,6 +2566,22 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
 **Rule**: Blindly querying `CONTRACT` account types for balances on Bybit Demo environments is FORBIDDEN. This triggers `[10001]` errors that can mask genuine API failures. Filter queries by `UNIFIED` when demo trading is active.
 
+### 16.43 ❌ FORBIDDEN: Measuring trade progress with an absolute value (|current − entry|)
+
+**Root Cause**: `evaluateTradeManagement()` computed `priceMovement = |currentPrice − entry|`. When price moved **against** the position (toward SL), the absolute distance kept growing and was divided by the TP distance — so a losing trade "reached" 33%/66% "progress" and the bot attempted `move_sl_to_entry` / partial closes while price was on the wrong side of entry. Bybit rejected the SL update with `[10001]` (StopLoss should be lower/higher than base_price), and milestones could be marked as triggered on a losing position.
+
+**Fix**: Hard profit-direction guard before any progress math — `isProfitable = isLong ? currentPrice.gt(entry) : currentPrice.lt(entry)`. If false → `{ action: 'none', reason: 'Trade is not in profit' }` and no exchange call is made. When true, movement is measured **directionally** (`currentPrice − entry` / `entry − currentPrice`), which is guaranteed positive by the guard.
+
+**Rule**: Never use `.abs()` for progress toward TP. Progress is only meaningful for an in-profit trade, and only in the profitable direction. Covered by `tests/tradeManager.test.ts`.
+
+### 16.44 ❌ FORBIDDEN: Hardcoding the backtest history window (180 days / "six months")
+
+**Root Cause**: `historyLoader.ts` defined `SIX_MONTHS_MS = 6 * 30 * 24 * 60 * 60 * 1000` and `getTimeRangeForSixMonths()`, which `run.ts` used for the LTF and HTF loaders — ignoring `BACKTEST_DAYS`. The 1m loader used `config.backtestDays`, so the chart/report claimed a 180-day period even when `.env` requested 60 days, and different loaders disagreed about the window.
+
+**Fix**: `getTimeRangeForDays(days)` replaces the constant; `run.ts` derives a single `{ fromMs, toMs }` from `config.backtestDays` and passes it to all three loaders (1m, LTF, HTF) plus the report/artifact period.
+
+**Rule**: All backtest loaders MUST share the window produced by `config.backtestDays`. No hardcoded day counts anywhere in the backtester. Covered by `tests/backtestRange.test.ts`.
+
 ---
 
-_Last updated: 2026-10-19. All 261 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-19. All 273 tests green. Build passes. Enterprise-ready._

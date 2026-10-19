@@ -7,7 +7,7 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-261%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Tests](https://img.shields.io/badge/Tests-273%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 [![Version](https://img.shields.io/badge/Version-v2026--10--19-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
@@ -18,6 +18,8 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 **v2026-10-18**: Added configurable entry filters — **`ALLOWED_DAYS_OF_WEEK`** (block NEW entries on weekends/toxic days at the ScenarioRouter level, Live + Backtest) and **`ENFORCE_KILLZONES`** (global killzone bypass for backtesting). Both are entry-only filters — active trade management (SL trailing, partial closes) is never affected.
 
 **v2026-10-19**: Added **Max Floating Drawdown** to the HTML Equity Curve — a dashed reference line showing the deepest intra-trade dip reported by the simulator alongside the Closed Drawdown series. The full chart (Balance, Running Peak, Closed Drawdown %, Max Floating Drawdown %) is now documented end-to-end.
+
+**v2026-10-19 (fixes)**: Two architectural bugs eliminated — (1) **Profit-direction guard in Adaptive Fractioning**: progress is no longer computed with an absolute value, so a trade moving toward SL can never be treated as "in profit" (kills the bogus SL→entry updates rejected by Bybit `[10001]`); (2) **Backtester history window**: the hardcoded 180-day / "six months" range is gone — `BACKTEST_DAYS` now drives the 1m, LTF and HTF loaders through a single `getTimeRangeForDays(config.backtestDays)` window.
 
 </div>
 
@@ -823,7 +825,7 @@ docker compose up -d
 | **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                                         |
 | **PREFLIGHT_BUFFER_PCT**           |          |          `0.05`           | Pre-flight spread buffer in % (default 0.05 = 0.05%)                                                                                   |
 | **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable V5 Sniper Mode (1m execution inside 15m zones)                                                                                  |
-| **BACKTEST_DAYS**                  |          |           `60`            | History depth for 1m candles in backtest (Sniper Mode)                                                                                 |
+| **BACKTEST_DAYS**                  |          |           `60`            | History window for the backtest — shared by 1m, LTF and HTF loaders                                                                    |
 | **BACKTEST_CSV_PATH**              |          |             —             | Path to local CSV file for offline backtesting                                                                                         |
 | **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                                    |
 | **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                                            |
@@ -1542,9 +1544,9 @@ npm test -- --coverage
 npm run typecheck    # tsc --noEmit (strict, must pass)
 npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
-npm run backtest     # Full 180-day backtest (all symbols)
+npm run backtest     # Full backtest over BACKTEST_DAYS (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (261 tests)
+npm test             # Jest (273 tests)
 npm run test:watch   # Watch mode
 ```
 

@@ -68,7 +68,25 @@ export function evaluateTradeManagement(context: TradeContext): TradeManagementS
   const initialQty = new Decimal(state.initialQty || context.initialQty);
 
   const isLong = context.side === 'Buy';
-  
+
+  // CRITICAL: Never manage a trade that is moving against us.
+  // Progress toward TP must be measured ONLY when price has moved in the
+  // profitable direction from entry. Measuring an absolute distance would
+  // treat an adverse move (toward/through SL) as progress toward TP, which
+  // attempts to move the stop to entry while price is on the wrong side and
+  // causes Bybit error [10001] (StopLoss should be lower/higher than base_price).
+  const isProfitable = isLong
+    ? currentPrice.gt(entry)
+    : currentPrice.lt(entry);
+
+  if (!isProfitable) {
+    return {
+      action: 'none',
+      reason: 'Trade is not in profit',
+      updatedState: state,
+    };
+  }
+
   // Calculate distances using the Decimal variables
   const riskDistance = isLong 
     ? entry.minus(sl).abs() 
@@ -76,9 +94,12 @@ export function evaluateTradeManagement(context: TradeContext): TradeManagementS
   const rewardDistance = isLong 
     ? tp.minus(entry).abs() 
     : entry.minus(tp).abs();
-  const priceMovement = isLong 
-    ? currentPrice.minus(entry).abs() 
-    : entry.minus(currentPrice).abs();
+
+  // Directional movement (NOT absolute): the isProfitable guard above
+  // guarantees this value is strictly positive for both sides.
+  const priceMovement = isLong
+    ? currentPrice.minus(entry)
+    : entry.minus(currentPrice);
 
   // Safety check
   if (rewardDistance.lte(0) || riskDistance.lte(0)) {
