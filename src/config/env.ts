@@ -45,6 +45,8 @@ export interface BotConfig {
   readonly maxWorkingCapital: number;
   readonly useLocalCacheOnly: boolean;
   readonly enableHealthcheckServer: boolean;
+  readonly allowedDaysOfWeek: number[];
+  readonly enforceKillzones: boolean;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -98,6 +100,19 @@ function parseActiveScenarios(raw: string | null): number[] {
     );
   }
   return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+function parseAllowedDaysOfWeek(raw: string): number[] {
+  const days = raw
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 7);
+  if (days.length === 0) {
+    throw new Error(
+      "ALLOWED_DAYS_OF_WEEK must contain ISO weekday numbers (1=Monday ... 7=Sunday), e.g. ALLOWED_DAYS_OF_WEEK=1,2,3,4,5",
+    );
+  }
+  return [...new Set(days)].sort((a, b) => a - b);
 }
 
 function parseFundingSymbols(raw: string | null): string[] {
@@ -364,6 +379,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
 
   const enableHealthcheckServer = (optionalEnv(env, "ENABLE_HEALTHCHECK_SERVER") ?? "false").toLowerCase() === "true";
 
+  const allowedDaysOfWeek = parseAllowedDaysOfWeek(
+    optionalEnv(env, "ALLOWED_DAYS_OF_WEEK") ?? "1,2,3,4,5",
+  );
+
+  const enforceKillzones =
+    (optionalEnv(env, "ENFORCE_KILLZONES") ?? "true").toLowerCase() === "true";
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, "BYBIT_API_KEY"),
@@ -409,5 +431,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     maxWorkingCapital,
     useLocalCacheOnly,
     enableHealthcheckServer,
+    allowedDaysOfWeek,
+    enforceKillzones,
   };
 }

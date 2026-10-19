@@ -1,4 +1,6 @@
 import { Decimal } from 'decimal.js';
+import * as fs from 'fs';
+import * as path from 'path';
 import { TradeResult } from './executionSimulator';
 import { Scenario2_FVGFill } from '../engine/scenarios/Scenario2_FVGFill';
 import { Scenario4_MitigationChain } from '../engine/scenarios/Scenario4_MitigationChain';
@@ -256,4 +258,456 @@ export function printReport(
   maxDrawdown: Decimal
 ): void {
   console.log(generateReport(symbol, initialBalance, finalBalance, trades, periodStart, periodEnd, totalDays, maxDrawdown));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HTML Equity Curve (Chart.js, CDN-loaded, fully self-contained output)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface EquityPoint {
+  label: string;
+  equity: number;
+  peak: number;
+  drawdownPct: number;
+}
+
+export interface BacktestArtifacts {
+  reportPath: string;
+  chartPath: string;
+}
+
+const CHART_JS_CDN = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Safely embeds a value into an inline <script> block.
+ * Escapes "<" so a "</script>" sequence can never terminate the block early.
+ */
+function serializeForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
+}
+
+function formatUtcTimestamp(ts: number): string {
+  return new Date(ts).toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+}
+
+/**
+ * Builds the equity series from closed trades (sorted by exit time).
+ * Presentation only — the Decimal math stays authoritative; values are
+ * converted to `number` exclusively for Chart.js rendering.
+ */
+export function buildEquitySeries(
+  initialBalance: Decimal,
+  trades: TradeResult[],
+  periodStart: Date
+): EquityPoint[] {
+  const sorted = [...trades].sort((a, b) => a.exitTime - b.exitTime);
+  const points: EquityPoint[] = [];
+
+  let balance = initialBalance;
+  let peak = initialBalance;
+
+  const toPoint = (ts: number, current: Decimal, runningPeak: Decimal): EquityPoint => {
+    const drawdownPct = runningPeak.gt(0)
+      ? runningPeak.minus(current).div(runningPeak).mul(100).toNumber()
+      : 0;
+    return {
+      label: formatUtcTimestamp(ts),
+      equity: current.toNumber(),
+      peak: runningPeak.toNumber(),
+      drawdownPct: Math.max(0, drawdownPct),
+    };
+  };
+
+  // Anchor the chart to the first executed trade rather than to the raw backtest
+  // start. The 1m Sniper cache can begin months after the 15m/4H window, so using
+  // `periodStart` would draw a huge, misleading flat line before the first trade.
+  // Start exactly one day before that trade (clamped to the backtest start).
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  const firstTradeEntry =
+    sorted.length > 0
+      ? sorted.reduce((min, trade) => Math.min(min, trade.entryTime), sorted[0].entryTime)
+      : null;
+  const chartStartTime =
+    firstTradeEntry === null
+      ? periodStart.getTime()
+      : Math.max(periodStart.getTime(), firstTradeEntry - ONE_DAY_MS);
+
+  // Anchor point: balance before the first trade
+  points.push(toPoint(chartStartTime, balance, peak));
+
+  for (const trade of sorted) {
+    balance = balance.plus(trade.pnl);
+    if (balance.gt(peak)) peak = balance;
+    points.push(toPoint(trade.exitTime, balance, peak));
+  }
+
+  return points;
+}
+
+export function generateEquityCurveHtml(
+  symbol: string,
+  initialBalance: Decimal,
+  finalBalance: Decimal,
+  trades: TradeResult[],
+  periodStart: Date,
+  periodEnd: Date,
+  maxDrawdown: Decimal
+): string {
+  const series = buildEquitySeries(initialBalance, trades, periodStart);
+
+  const labels = series.map((p) => p.label);
+  const equity = series.map((p) => p.equity);
+  const peak = series.map((p) => p.peak);
+  // Positive magnitudes: the secondary axis is reversed, so 0% sits at the top
+  // and deeper drawdowns are drawn downwards (tooltips render them as negative).
+  const drawdown = series.map((p) => p.drawdownPct);
+
+  // Y1 axis headroom. Chart.js auto-scale can settle exactly on the deepest dip,
+  // and because the axis is reversed the red line then looks like it plunges
+  // through the floor of the plot. Reserve 20% of extra depth below the worst
+  // drawdown so the line always stays inside the chart.
+  // The simulator's reported `maxDrawdown` is also considered: it samples equity
+  // continuously (entry fees, partial closes), so it can be deeper than anything
+  // the closed-trade series captures. Using only the series would leave the axis
+  // ending above the figure printed in the text report.
+  const seriesMaxDrawdown = drawdown.reduce((max, value) => (value > max ? value : max), 0);
+  const reportedMaxDrawdown = maxDrawdown.isFinite() ? maxDrawdown.toNumber() : 0;
+  const deepestDrawdown = Math.max(seriesMaxDrawdown, reportedMaxDrawdown, 0);
+  const drawdownAxisMax = deepestDrawdown > 0 ? deepestDrawdown * 1.2 : 1;
+  const drawdownAxisMaxLiteral = drawdownAxisMax.toFixed(4);
+
+  const netProfit = finalBalance.minus(initialBalance);
+  const netProfitPercent = initialBalance.gt(0)
+    ? netProfit.div(initialBalance).mul(100)
+    : new Decimal('0');
+  const wins = trades.filter((t) => t.pnl.gt(0)).length;
+  const winRate = trades.length > 0 ? (wins / trades.length) * 100 : 0;
+  const netPositive = netProfit.gte(0);
+  const safeSymbol = escapeHtml(symbol);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Equity Curve — ${safeSymbol}</title>
+<script src="${CHART_JS_CDN}"></script>
+<style>
+  :root {
+    --bg: #121212;
+    --panel: #1b1b1b;
+    --border: #2a2a2a;
+    --text: #f5f5f5;
+    --muted: #9e9e9e;
+    --green: #00e676;
+    --red: #ff5252;
+    --amber: #ffc400;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: 0.4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .card .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; }
+  .card .v { font-size: 18px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .chart-wrap {
+    position: relative;
+    width: 100%;
+    height: 68vh;
+    min-height: 420px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .legend { margin-top: 14px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .legend b { color: var(--text); font-weight: 600; }
+  #fallback { display: none; color: var(--red); padding: 24px; }
+</style>
+</head>
+<body>
+  <h1>Equity Curve — ${safeSymbol}</h1>
+  <div class="sub">${periodStart.toISOString().split('T')[0]} → ${periodEnd.toISOString().split('T')[0]} · ${trades.length} closed trades</div>
+
+  <div class="cards">
+    <div class="card"><div class="k">Initial Balance</div><div class="v">$${initialBalance.toFixed(2)}</div></div>
+    <div class="card"><div class="k">Final Balance</div><div class="v">$${finalBalance.toFixed(2)}</div></div>
+    <div class="card"><div class="k">Net Profit</div><div class="v ${netPositive ? 'pos' : 'neg'}">${netPositive ? '+' : ''}$${netProfit.toFixed(2)}</div></div>
+    <div class="card"><div class="k">Return</div><div class="v ${netPositive ? 'pos' : 'neg'}">${netProfitPercent.toFixed(2)}%</div></div>
+    <div class="card"><div class="k">Max Drawdown</div><div class="v neg">${maxDrawdown.toFixed(2)}%</div></div>
+    <div class="card"><div class="k">Win Rate</div><div class="v">${winRate.toFixed(2)}%</div></div>
+  </div>
+
+  <div class="chart-wrap">
+    <canvas id="equityChart"></canvas>
+    <div id="fallback">Chart.js could not be loaded from the CDN. Open this file with an internet connection to render the chart.</div>
+  </div>
+
+  <div class="legend">
+    <b>Green</b> segments = equity making new highs · <b>Red</b> segments = equity below its running peak (drawdown).<br />
+    Dashed grey = running peak (high-water mark) · Thin red line = closed drawdown depth (%, right axis: 0% at the top, deeper drawdowns point downwards).<br />
+    Thick dashed red = max floating drawdown, the deepest intra-trade equity dip recorded by the simulator.<br />
+    Max Floating Drawdown represents intra-trade equity dips not visible in closed-trade data points. All timestamps UTC.
+  </div>
+
+  <script>
+    const LABELS = ${serializeForScript(labels)};
+    const EQUITY = ${serializeForScript(equity)};
+    const PEAK = ${serializeForScript(peak)};
+    const DRAWDOWN = ${serializeForScript(drawdown)};
+    // Intra-trade (floating) drawdown sampled by the simulator. The closed-trade
+    // series above cannot show it, so it is drawn as a horizontal reference line.
+    const MAX_FLOATING_DRAWDOWN = ${reportedMaxDrawdown.toFixed(4)};
+    const HAS_FLOATING_DRAWDOWN = MAX_FLOATING_DRAWDOWN > 0;
+    const GREEN = '#00e676';
+    const RED = '#ff5252';
+
+    function render() {
+      if (typeof Chart === 'undefined') {
+        document.getElementById('equityChart').style.display = 'none';
+        document.getElementById('fallback').style.display = 'block';
+        return;
+      }
+
+      const canvas = document.getElementById('equityChart');
+      const ctx = canvas.getContext('2d');
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.parentElement.clientHeight || 420);
+      gradient.addColorStop(0, 'rgba(0, 230, 118, 0.28)');
+      gradient.addColorStop(1, 'rgba(0, 230, 118, 0.02)');
+
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: LABELS,
+          datasets: [
+            {
+              label: 'Balance (USDT)',
+              data: EQUITY,
+              borderWidth: 2,
+              pointRadius: 0,
+              pointHitRadius: 12,
+              tension: 0.15,
+              fill: true,
+              backgroundColor: gradient,
+              // Colour each segment by whether the account was underwater at that point
+              segment: {
+                borderColor: (seg) => {
+                  const idx = typeof seg.p1DataIndex === 'number' ? seg.p1DataIndex : 0;
+                  return DRAWDOWN[idx] > 0.0001 ? RED : GREEN;
+                }
+              },
+              yAxisID: 'y'
+            },
+            {
+              label: 'Running Peak',
+              data: PEAK,
+              borderColor: 'rgba(158, 158, 158, 0.85)',
+              borderWidth: 1,
+              borderDash: [6, 4],
+              pointRadius: 0,
+              fill: false,
+              tension: 0,
+              yAxisID: 'y'
+            },
+            {
+              label: 'Closed Drawdown %',
+              data: DRAWDOWN,
+              borderColor: 'rgba(255, 82, 82, 0.6)',
+              borderWidth: 1,
+              pointRadius: 0,
+              pointHitRadius: 12,
+              fill: false,
+              tension: 0.1,
+              yAxisID: 'y1'
+            },
+            {
+              label: 'Max Floating Drawdown',
+              // Flat reference line at the deepest intra-trade equity dip. Hidden
+              // entirely when the simulator recorded no drawdown, so an all-time-high
+              // run does not get a meaningless line pinned to 0%.
+              data: HAS_FLOATING_DRAWDOWN ? LABELS.map(() => MAX_FLOATING_DRAWDOWN) : [],
+              borderColor: 'rgba(255, 0, 0, 0.5)',
+              borderDash: [5, 5],
+              borderWidth: 1,
+              pointRadius: 0,
+              pointHitRadius: 12,
+              fill: false,
+              tension: 0,
+              yAxisID: 'y1'
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: {
+              labels: { color: '#f5f5f5', usePointStyle: true, boxWidth: 8, font: { size: 11 } }
+            },
+            tooltip: {
+              callbacks: {
+                label: (item) => {
+                  if (item.dataset.yAxisID === 'y1') {
+                    const depth = Number(item.parsed.y);
+                    const formatted = (depth === 0 ? '0.00' : '-' + Math.abs(depth).toFixed(2)) + '%';
+                    // Both y1 datasets share the same formatting but must stay
+                    // distinguishable in the tooltip, otherwise the flat reference
+                    // line is mistaken for a duplicate of the closed line.
+                    const prefix = item.dataset.label === 'Max Floating Drawdown'
+                      ? 'Max Floating Drawdown: '
+                      : 'Closed Drawdown: ';
+                    return prefix + formatted;
+                  }
+                  return item.dataset.label + ': $' + Number(item.parsed.y).toFixed(2);
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              ticks: {
+                color: '#9e9e9e',
+                maxRotation: 0,
+                autoSkip: true,
+                maxTicksLimit: 10,
+                font: { size: 10 }
+              },
+              grid: { color: 'rgba(255,255,255,0.04)' }
+            },
+            y: {
+              position: 'left',
+              ticks: {
+                color: '#9e9e9e',
+                font: { size: 10 },
+                callback: (v) => '$' + Number(v).toLocaleString()
+              },
+              grid: { color: 'rgba(255,255,255,0.07)' }
+            },
+            y1: {
+              type: 'linear',
+              position: 'right',
+              // Reversed secondary axis: 0% at the top, deeper drawdowns point downwards.
+              // min: 0 pins the top edge even when every trade is a new high (no drawdown),
+              // where Chart.js would otherwise expand the domain to -1..1.
+              reverse: true,
+              min: 0,
+              suggestedMin: 0,
+              // 20% headroom below the deepest drawdown (computed in TS) so the red
+              // line can never be clipped by the bottom edge of the chart.
+              suggestedMax: ${drawdownAxisMaxLiteral},
+              ticks: {
+                color: 'rgba(255,82,82,0.75)',
+                font: { size: 10 },
+                callback: (v) => {
+                  const depth = Number(v);
+                  return (depth === 0 ? '' : '-') + Math.abs(depth).toFixed(1) + '%';
+                }
+              },
+              grid: { drawOnChartArea: false }
+            }
+          }
+        }
+      });
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', render);
+    } else {
+      render();
+    }
+  </script>
+</body>
+</html>
+`;
+}
+
+/**
+ * Sanitizes a symbol for safe use inside a filename.
+ * Bybit symbols are alphanumeric, but this guards against path traversal and
+ * OS-reserved characters if a symbol ever arrives from an untrusted source.
+ */
+function sanitizeFilenamePart(value: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '_');
+  return cleaned.length > 0 ? cleaned : 'UNKNOWN';
+}
+
+/**
+ * Writes the text report and the HTML equity curve into `dataDir`.
+ * Both files are per-symbol, so multi-symbol runs never clobber each other.
+ */
+export function writeBacktestArtifacts(
+  symbol: string,
+  initialBalance: Decimal,
+  finalBalance: Decimal,
+  trades: TradeResult[],
+  periodStart: Date,
+  periodEnd: Date,
+  totalDays: number,
+  maxDrawdown: Decimal,
+  dataDir = 'data'
+): BacktestArtifacts {
+  const dir = path.resolve(process.cwd(), dataDir);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const report = generateReport(
+    symbol,
+    initialBalance,
+    finalBalance,
+    trades,
+    periodStart,
+    periodEnd,
+    totalDays,
+    maxDrawdown
+  );
+  const chart = generateEquityCurveHtml(
+    symbol,
+    initialBalance,
+    finalBalance,
+    trades,
+    periodStart,
+    periodEnd,
+    maxDrawdown
+  );
+
+  const fileSymbol = sanitizeFilenamePart(symbol);
+  const reportPath = path.join(dir, `Backtest_Report_${fileSymbol}.txt`);
+  const chartPath = path.join(dir, `Backtest_Chart_${fileSymbol}.html`);
+
+  fs.writeFileSync(reportPath, report, 'utf-8');
+  fs.writeFileSync(chartPath, chart, 'utf-8');
+
+  return { reportPath, chartPath };
 }

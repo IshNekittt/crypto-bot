@@ -46,6 +46,8 @@ describe('PendingTradeManager', () => {
 maxWorkingCapital: 0,
     preflightBufferPct: "0.05",
     enableHealthcheckServer: false,
+    allowedDaysOfWeek: [1, 2, 3, 4, 5],
+    enforceKillzones: true,
 };
 
   beforeEach(() => {

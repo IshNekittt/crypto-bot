@@ -15,7 +15,7 @@ import {
   getInitialState,
   TradeResult,
 } from "./executionSimulator";
-import { printReport } from "./reporter";
+import { printReport, writeBacktestArtifacts } from "./reporter";
 
 function parseArgs(config: any): string[] {
   const args = process.argv.slice(2);
@@ -542,6 +542,28 @@ async function main(): Promise<void> {
         Math.round((toMs - fromMs) / (24 * 60 * 60 * 1000)),
         result.maxDrawdown,
       );
+
+      // Persist artifacts (text report + HTML equity curve) to the data directory.
+      // Non-fatal: a disk/permission error must never abort the whole backtest run.
+      try {
+        const artifacts = writeBacktestArtifacts(
+          symbol,
+          initialBalance,
+          finalBalance,
+          trades,
+          new Date(fromMs),
+          new Date(toMs),
+          Math.round((toMs - fromMs) / (24 * 60 * 60 * 1000)),
+          result.maxDrawdown,
+          config.dataDir,
+        );
+        logger.info(`[${symbol}] Report saved: ${artifacts.reportPath}`);
+        logger.info(`[${symbol}] Equity curve saved: ${artifacts.chartPath}`);
+      } catch (err) {
+        logger.warn(
+          `[${symbol}] Failed to write backtest artifacts: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
 
       if (global.gc) global.gc();
     }

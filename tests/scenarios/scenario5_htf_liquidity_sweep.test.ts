@@ -40,6 +40,8 @@ const mockConfig: BotConfig = {
     maxWorkingCapital: 0,
     preflightBufferPct: "0.05",
     enableHealthcheckServer: false,
+    allowedDaysOfWeek: [1, 2, 3, 4, 5],
+    enforceKillzones: true,
 };
 
 describe('Scenario5: HTF Liquidity Sweep', () => {
@@ -184,6 +186,13 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
       const result = scenario.evaluate(createMockPatternData({ killzone: 'NONE', hasLiquiditySweep: true }));
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('London or NY killzone');
+    });
+
+    it('should bypass killzone gate when enforceKillzones=false (backtest bypass)', () => {
+      const bypassScenario = new Scenario5_HTFLiquiditySweep({ ...mockConfig, enforceKillzones: false });
+      const result = bypassScenario.evaluate(createMockPatternData({ killzone: 'NONE', hasLiquiditySweep: true }));
+      expect(result).toBe(true);
+      expect(bypassScenario.getReason()).toContain('HTF Liquidity Sweep');
     });
   });
 

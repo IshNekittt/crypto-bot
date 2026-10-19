@@ -43,7 +43,7 @@ export class Scenario7_AMD extends BaseScenario {
     // Manipulation: London open (02:00-05:00 NY) sweep of Asian Low
     // Distribution: Reversal and move to Asian High
     const currentKillzone = patternData.currentKillzone;
-    if (!currentKillzone || (currentKillzone !== 'LONDON' && currentKillzone !== 'NY')) {
+    if (this.config.enforceKillzones !== false && (!currentKillzone || (currentKillzone !== 'LONDON' && currentKillzone !== 'NY'))) {
       this.logRejection('AMD requires London or NY killzone (Manipulation/Distribution phase)');
       Scenario7_AMD.rejectionStats.killzone++;
       return false;

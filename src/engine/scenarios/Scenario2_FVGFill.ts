@@ -75,7 +75,7 @@ export class Scenario2_FVGFill extends BaseScenario {
   override evaluate(patternData: any): boolean {
     Scenario2_FVGFill.rejectionStats.totalEvals++;
 
-    if (!patternData.currentKillzone || patternData.currentKillzone === 'NONE') {
+    if (this.config.enforceKillzones !== false && (!patternData.currentKillzone || patternData.currentKillzone === 'NONE')) {
       this.logRejection('Not in active killzone');
       Scenario2_FVGFill.rejectionStats.killzone++;
       return false;

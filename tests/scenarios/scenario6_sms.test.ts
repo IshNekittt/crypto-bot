@@ -40,6 +40,8 @@ const mockConfig: BotConfig = {
     maxWorkingCapital: 0,
     preflightBufferPct: "0.05",
     enableHealthcheckServer: false,
+    allowedDaysOfWeek: [1, 2, 3, 4, 5],
+    enforceKillzones: true,
 };
 
 describe('Scenario6: Failure Swing (SMS)', () => {
@@ -92,6 +94,24 @@ describe('Scenario6: Failure Swing (SMS)', () => {
       const levels = scenario.calculateLevels(entry, zone, 'BEARISH', atr);
       
       expect(levels.stopLoss.gt(levels.entry)).toBe(true);
+    });
+  });
+
+  describe('killzone bypass (ENFORCE_KILLZONES=false)', () => {
+    const emptyPatternData = { currentKillzone: 'NONE', candles15m: [], structures: [], zones: [] };
+
+    it('should reject outside killzone when enforcement is enabled (default)', () => {
+      const result = scenario.evaluate(emptyPatternData);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('killzone');
+    });
+
+    it('should bypass the killzone gate when enforceKillzones=false', () => {
+      const bypassScenario = new Scenario6_SMS({ ...mockConfig, enforceKillzones: false });
+      const result = bypassScenario.evaluate(emptyPatternData);
+      // Proceeds PAST the killzone gate and fails later on missing data — not on killzone
+      expect(result).toBe(false);
+      expect(bypassScenario.getReason()).not.toContain('killzone');
     });
   });
 });

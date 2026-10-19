@@ -53,6 +53,8 @@ function makeClient(rest: Record<string, jest.Mock> = makeRest()): { client: Byb
     maxWorkingCapital: 0,
     preflightBufferPct: "0.05",
     enableHealthcheckServer: false,
+    allowedDaysOfWeek: [1, 2, 3, 4, 5],
+    enforceKillzones: true,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };
 }

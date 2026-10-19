@@ -960,6 +960,8 @@ In `checkAndCloseTrade()`:
 
 Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 
+> **Bypass (v2026-10-18)**: Killzone gates can be disabled globally via `ENFORCE_KILLZONES=false` (e.g., for backtesting without session constraints). The bypass covers BOTH the `BaseScenario.isInKillzone()` helper (Scenarios 1, 3, 6, 10, 11) AND the direct `patternData.currentKillzone` checks (Scenarios 2, 4, 5, 7, 8, 9, 12). Entry filter ONLY — active trade management is never affected.
+
 ### 7.4 V5 Sniper Mode (1m Execution) — **NEW v2026-09-30**
 
 **Architecture**: Two-loop system — Radar (15m/4H) scans for macro POI, Sniper (1m) waits for precise entry inside zone.
@@ -1545,6 +1547,31 @@ Added two new sections to backtest report (`reporter.ts`):
 
 All timestamps in **UTC** for cross-referencing with live logs.
 
+#### 7.18.1 HTML Equity Curve Generator — **NEW v2026-10-19**
+
+**Artifact**: `writeBacktestArtifacts()` in `src/backtest/reporter.ts` emits `data/Backtest_Chart_<SYMBOL>.html` next to the text report on every run. The file is self-contained (inline CSS + serialized data arrays) and loads Chart.js 4.4.1 from the CDN. `generateEquityCurveHtml()` is a pure function so it is unit-testable without disk I/O. Artifact writing is non-fatal — a disk error logs a warning and never aborts the backtest.
+
+**Data pipeline**: `buildEquitySeries(initialBalance, trades, periodStart)` sorts trades by `exitTime`, walks them once, and produces `{ label, equity, peak, drawdownPct }` per point plus one anchor point. Decimal math stays authoritative; values are converted to `number` only at the Chart.js boundary.
+
+**X-axis anchoring**: the chart starts **one day before the earliest `entryTime`** — minimum across all trades, not `trades[0]` (the incoming array is unsorted) — clamped to `periodStart`. Without this, a 1m Sniper cache starting months after the 15m/4H window rendered a misleading months-long flat line (the "April Illusion").
+
+**Two drawdown metrics — deliberate design**:
+
+| Series | Data source | Purpose |
+| --- | --- | --- |
+| **Closed Drawdown %** | `(peak - balance) / peak` recomputed after each closed trade | Dips actually locked in by realized PnL; shows drawdown duration and shape |
+| **Max Floating Drawdown** | Flat dashed line at `maxDrawdown` reported by `ExecutionSimulator` | Deepest **intra-trade** equity dip sampled continuously (entry fees, partial closes, adverse excursion) |
+
+**Why both**: the closed-trade series is sampled only at exit, so a position that went 20% underwater before recovering to a small loss leaves almost no trace — the chart shows ~6% while the summary card reports 19.93%. That dissonance makes the report look broken. The floating reference line exposes the true "max pain" floor **without storing tick-by-tick equity**, which would balloon both artifact size and simulator memory.
+
+**Rendering rules**:
+- Drawdown is plotted as **positive magnitudes** on `y1`; the axis uses `reverse: true` + `min: 0` + `suggestedMin: 0` so `0%` sits at the top and deeper drawdowns point downwards. Tooltips and tick labels add the minus sign. Re-negating the data would flip the axis direction — never do it.
+- `y1.suggestedMax = max(seriesMax, reportedMax) * 1.2` — 20% headroom below the deepest dip, because a reversed axis otherwise clips the red line at the plot floor. `reportedMax` is included because the simulator's figure can be deeper than any closed-trade point (fees, partial closes).
+- The floating line dataset is **suppressed entirely** (`data: []`) when the reported max drawdown is `0` (or non-finite), so an all-time-high run does not get a meaningless line pinned at `0%`.
+- Tooltip entries are prefixed by dataset name (`Closed Drawdown: -6.40%` / `Max Floating Drawdown: -19.93%`) so the two `y1` series never read as duplicates.
+
+**Invariant**: The floating line value MUST come from the simulator's `maxDrawdown`, **never** from `max(series drawdown)`. Recomputing it from closed trades collapses both metrics into one and reintroduces the visual gap.
+
 ---
 
 ### 7.19 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
@@ -1680,6 +1707,32 @@ const levels = this.calculateLevels(
   this.config.smcSlAtrOffset ? new Decimal(this.config.smcSlAtrOffset) : new Decimal('0.5')
 );
 this.setLevels({ entry: levels.entry, stopLoss: levels.stopLoss, takeProfit: levels.takeProfit });
+```
+
+---
+
+### 7.22 Day-of-Week Entry Filter (ALLOWED_DAYS_OF_WEEK) — **NEW v2026-10-18**
+
+**Problem**: Weekends (Sat/Sun) are toxic low-liquidity environments — thin order books, wide spreads, erratic moves → negative-expectancy trades. Additionally, backtests need the ability to compare "strict killzone" vs "killzone-free" performance.
+
+**Solution**: Two configurable macro entry filters (see also §7.3 bypass note):
+
+| Variable | Default | Semantics |
+|----------|---------|-----------|
+| `ALLOWED_DAYS_OF_WEEK` | `1,2,3,4,5` | Comma-separated ISO weekday numbers in **UTC** (1=Monday ... 7=Sunday). Days NOT in the list block NEW entries. |
+| `ENFORCE_KILLZONES` | `true` | `false` = all killzone gates are bypassed globally. Backtesting use case. |
+
+**Implementation**:
+1. **Parsing** (`src/config/env.ts`): `parseAllowedDaysOfWeek()` filters to integers 1..7, deduplicates, sorts ascending; throws if no valid days remain. `enforceKillzones` parsed like other boolean flags.
+2. **Day filter injection** (`src/engine/scenarioRouter.ts`): at the very top of `evaluate()`, the UTC weekday of `currentCandleTimestamp` is computed via luxon (`DateTime.fromMillis(ts, { zone: 'utc' }).weekday`). If not included in `config.allowedDaysOfWeek` → immediate untriggered return (`reason: 'Day-of-week filter'`) BEFORE any scenario evaluation. Router-level placement guarantees identical behavior in **Live Trading and Backtesting** (both go through `router.evaluate(...)`).
+3. **Killzone bypass** (`src/engine/baseScenario.ts`): `if (this.config.enforceKillzones === false) return true;` at the top of `isInKillzone()`. Direct `patternData.currentKillzone` gates in Scenarios 2, 4, 5, 7, 8, 9, 12 are prefixed with `this.config.enforceKillzones !== false && ...`.
+
+**CRITICAL INVARIANT**: Both filters are **entry filters ONLY**. They gate NEW setups at the router/scenario stage and NEVER affect active trade management — `checkAndManagePosition()` (Adaptive Fractioning: SL→entry, partial closes, trailing SL) runs on every incoming tick, completely independent of the router. A trade opened on Friday is fully managed (trailed/closed) through the weekend regardless of `ALLOWED_DAYS_OF_WEEK`.
+
+**Config example** (24/7 crypto backtesting without session constraints):
+```bash
+ALLOWED_DAYS_OF_WEEK=1,2,3,4,5,6,7   # enable weekend entries
+ENFORCE_KILLZONES=false              # bypass London/NY killzone gates
 ```
 
 ---
@@ -1836,6 +1889,7 @@ CREATE TABLE symbol_state (
 - **State Machine**: `openTrade()` / `checkAndCloseTrade()` in `executionSimulator.ts`.
 - **Drawdown Guard**: `consecutiveLosses` increments on loss → feeds `RiskManager.getEffectiveRiskPercent()`.
 - **Max Drawdown**: Calculated correctly (not `TODO%`).
+- **HTML Equity Curve**: `writeBacktestArtifacts()` writes `data/Backtest_Chart_<SYMBOL>.html` (self-contained Chart.js) with Balance / Running Peak / Closed Drawdown % / Max Floating Drawdown % — see §7.18.1.
 - **CLI**: `npm run backtest -- BTCUSDT` (single symbol filter via `parseArgs`).
 - **Performance**: ~25s for 17,280 candles (180 days × 3 symbols).
 
@@ -1878,6 +1932,10 @@ COOLDOWN_CANDLES=16
 # SMC Parameters
 SMC_SL_ATR_OFFSET=0.5              # ATR multiplier for SL offset (default 0.5)
 SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR (default 1.5)
+
+# Entry Filters (day-of-week + killzone)
+ALLOWED_DAYS_OF_WEEK=1,2,3,4,5     # ISO weekdays in UTC (1=Mon ... 7=Sun) allowed for NEW entries
+ENFORCE_KILLZONES=true             # false = bypass all killzone gates globally (backtesting)
 
 # Hybrid Smart Entry
 SMART_ENTRY_THRESHOLD_PCT=0.15     # Market vs Limit threshold in % (default 0.15 = 0.15%)
@@ -2475,4 +2533,4 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
 ---
 
-_Last updated: 2026-10-16 (ghost-signal gaps closed: timestamp-only router mitigation + burn trigger structure on trade open). All 252 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-19 (documented the HTML Equity Curve generator — closed vs max floating drawdown, reversed y1 axis rules, X-axis anchoring; see §7.18.1). All 259 tests green. Build passes. Enterprise-ready._

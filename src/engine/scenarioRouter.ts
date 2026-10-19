@@ -1,6 +1,7 @@
 import { IScenario, StructureDetails, MitigatedZone, MitigatedStructure } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
+import { DateTime } from 'luxon';
 import { ZoneDetails } from '../types';
 import { BotConfig } from '../config/env';
 import { PatternData } from '../smc/patternRecognizer';
@@ -102,6 +103,20 @@ async evaluate(
     candles1m: any[] = [], // 1m candles for Sniper Mode (Scenario 12)
     patternData?: PatternData // Pre-computed PatternData for performance
   ): Promise<RouterResult> {
+    // Day-of-Week filter (UTC): block NEW entries on disallowed weekdays (e.g., weekends).
+    // Applies identically to Live Trading and Backtesting (router-level gate).
+    // NOTE: Entry filter ONLY — it never affects active trade management (SL trailing/closing).
+    const allowedDays = this.config.allowedDaysOfWeek;
+    if (allowedDays && allowedDays.length > 0) {
+      const weekday = DateTime.fromMillis(currentCandleTimestamp, { zone: 'utc' }).weekday;
+      if (!allowedDays.includes(weekday)) {
+        logger.debug(
+          `[${this.symbol}] Entry scan skipped: UTC weekday ${weekday} is not in ALLOWED_DAYS_OF_WEEK (${allowedDays.join(',')})`,
+        );
+        return { triggered: false, scenario: null, levels: null, reason: 'Day-of-week filter', zoneDetails: null, structureDetails: null };
+      }
+    }
+
     if (!this.scenarios.length) {
       return { triggered: false, scenario: null, levels: null, reason: 'No scenarios configured', zoneDetails: null, structureDetails: null };
     }

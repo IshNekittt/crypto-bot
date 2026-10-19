@@ -40,6 +40,10 @@ const mockConfig: BotConfig = {
     maxWorkingCapital: 0,
     preflightBufferPct: "0.05",
     enableHealthcheckServer: false,
+    // All days allowed so deterministic router tests (Date.now()) never depend on the run day.
+    // Day-of-week filtering itself is covered by dedicated tests below.
+    allowedDaysOfWeek: [1, 2, 3, 4, 5, 6, 7],
+    enforceKillzones: true,
 };
 
 const mockNotifier = {
@@ -226,6 +230,67 @@ describe('ScenarioRouter', () => {
       await router.evaluate(candles15m, candles4h, Date.now());
 
       expect(mockPatternRecognizer.buildPatternData).toHaveBeenCalledWith('SOLUSDT', candles15m, candles4h, expect.any(Number));
+    });
+  });
+
+  describe('day-of-week filter', () => {
+    // Fixed UTC timestamps: Saturday 2026-10-17 12:00 UTC / Sunday 2026-10-18 12:00 UTC / Monday 2026-10-19 12:00 UTC
+    const SATURDAY_TS = 1792238400000;
+    const SUNDAY_TS = 1792324800000;
+    const MONDAY_TS = 1792411200000;
+
+    const buildRouter = (allowedDays: number[]) => {
+      const dayConfig: BotConfig = { ...mockConfig, allowedDaysOfWeek: allowedDays };
+      const testRouter = new ScenarioRouter({
+        symbol: 'SOLUSDT',
+        patternRecognizer: { buildPatternData: jest.fn().mockResolvedValue({}) },
+        notifier: mockNotifier,
+        activeScenarios: [1],
+        config: dayConfig,
+      });
+      const mockScenarios = [
+        { id: 1, name: 'Test1', evaluate: jest.fn().mockReturnValue(true), getLevels: () => ({ entry: '100', stopLoss: '99', takeProfit: '103' }), getReason: () => 'Test1 reason', getZoneDetails: () => null, getStructureDetails: () => null },
+      ] as unknown as IScenario[];
+      (testRouter as any).scenarios = mockScenarios;
+      return { testRouter, mockScenarios };
+    };
+
+    it('should block new entries on Saturday when only weekdays are allowed', async () => {
+      const { testRouter, mockScenarios } = buildRouter([1, 2, 3, 4, 5]);
+
+      const result = await testRouter.evaluate([], [], SATURDAY_TS);
+
+      expect(result.triggered).toBe(false);
+      expect(result.reason).toBe('Day-of-week filter');
+      expect(mockScenarios[0].evaluate).not.toHaveBeenCalled();
+    });
+
+    it('should block new entries on Sunday when only weekdays are allowed', async () => {
+      const { testRouter, mockScenarios } = buildRouter([1, 2, 3, 4, 5]);
+
+      const result = await testRouter.evaluate([], [], SUNDAY_TS);
+
+      expect(result.triggered).toBe(false);
+      expect(result.reason).toBe('Day-of-week filter');
+      expect(mockScenarios[0].evaluate).not.toHaveBeenCalled();
+    });
+
+    it('should evaluate scenarios normally on allowed weekdays', async () => {
+      const { testRouter, mockScenarios } = buildRouter([1, 2, 3, 4, 5]);
+
+      const result = await testRouter.evaluate([], [], MONDAY_TS);
+
+      expect(result.triggered).toBe(true);
+      expect(mockScenarios[0].evaluate).toHaveBeenCalledTimes(1);
+    });
+
+    it('should allow weekend entries when all 7 days are configured', async () => {
+      const { testRouter, mockScenarios } = buildRouter([1, 2, 3, 4, 5, 6, 7]);
+
+      const result = await testRouter.evaluate([], [], SATURDAY_TS);
+
+      expect(result.triggered).toBe(true);
+      expect(mockScenarios[0].evaluate).toHaveBeenCalledTimes(1);
     });
   });
 });

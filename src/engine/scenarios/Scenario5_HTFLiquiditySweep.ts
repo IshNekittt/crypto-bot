@@ -37,8 +37,9 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     Scenario5_HTFLiquiditySweep.rejectionStats.totalEvals++;
 
     // CRITICAL: Killzone check - sweep must happen in London/NY killzone only (not ASIAN)
+    // Bypassable globally via ENFORCE_KILLZONES=false (backtesting)
     const killzone = patternData.currentKillzone;
-    if (!killzone || (killzone !== 'LONDON' && killzone !== 'NY')) {
+    if (this.config.enforceKillzones !== false && (!killzone || (killzone !== 'LONDON' && killzone !== 'NY'))) {
       this.logRejection('HTF Liquidity Sweep requires London or NY killzone');
       Scenario5_HTFLiquiditySweep.rejectionStats.killzone++;
       return false;

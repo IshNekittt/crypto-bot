@@ -73,9 +73,9 @@ export class Scenario9_TurtleSoup extends BaseScenario {
   override evaluate(patternData: any): boolean {
     Scenario9_TurtleSoup.rejectionStats.totalEvals++;
 
-    // CRITICAL: Killzone check - London/NY only for Turtle Soup
+    // CRITICAL: Killzone check - London/NY only for Turtle Soup (bypassable via ENFORCE_KILLZONES=false)
     const killzone = patternData.currentKillzone;
-    if (!killzone || (killzone !== 'LONDON' && killzone !== 'NY')) {
+    if (this.config.enforceKillzones !== false && (!killzone || (killzone !== 'LONDON' && killzone !== 'NY'))) {
       this.logRejection('Turtle Soup requires London or NY killzone');
       Scenario9_TurtleSoup.rejectionStats.killzone++;
       return false;

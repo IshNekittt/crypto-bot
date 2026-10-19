@@ -76,6 +76,9 @@ export abstract class BaseScenario implements IScenario {
   }
 
   protected isInKillzone(patternData: any): boolean {
+    // Global bypass: ENFORCE_KILLZONES=false disables all killzone gates (backtesting use case).
+    // Entry filter ONLY — trade management is never affected.
+    if (this.config.enforceKillzones === false) return true;
     return patternData.currentKillzone !== 'NONE';
   }
 

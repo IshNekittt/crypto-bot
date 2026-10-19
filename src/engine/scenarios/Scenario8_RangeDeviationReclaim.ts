@@ -40,9 +40,9 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
   override evaluate(patternData: any): boolean {
     Scenario8_RangeDeviationReclaim.rejectionStats.totalEvals++;
 
-    // CRITICAL: Killzone check - only London/NY
+    // CRITICAL: Killzone check - only London/NY (bypassable via ENFORCE_KILLZONES=false)
     const killzone = patternData.currentKillzone;
-    if (!killzone || (killzone !== 'LONDON' && killzone !== 'NY')) {
+    if (this.config.enforceKillzones !== false && (!killzone || (killzone !== 'LONDON' && killzone !== 'NY'))) {
       this.logRejection('Range Deviation requires London or NY killzone');
       Scenario8_RangeDeviationReclaim.rejectionStats.killzone++;
       return false;

@@ -7,13 +7,17 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-252%20passing-brightgreen?logo=jest)](https://jestjs.io/)
-[![Version](https://img.shields.io/badge/Version-v2026--10--16-blue)](https://github.com/)
+[![Tests](https://img.shields.io/badge/Tests-259%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Version](https://img.shields.io/badge/Version-v2026--10--19-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
 
 **v2026-10-16**: Fixed Silent State Desync in Adaptive Fractioning (failed partial closes now abort milestone updates and retry next tick), tick-agnostic trade management on every confirmed tick, global tick-memory live prices, and closed the live ghost-signal gaps: **timestamp-only structure mitigation in the ScenarioRouter** + **trigger CHoCH burned on trade open in both live entry paths**.
+
+**v2026-10-18**: Added configurable entry filters — **`ALLOWED_DAYS_OF_WEEK`** (block NEW entries on weekends/toxic days at the ScenarioRouter level, Live + Backtest) and **`ENFORCE_KILLZONES`** (global killzone bypass for backtesting). Both are entry-only filters — active trade management (SL trailing, partial closes) is never affected.
+
+**v2026-10-19**: Added **Max Floating Drawdown** to the HTML Equity Curve — a dashed reference line showing the deepest intra-trade dip reported by the simulator alongside the Closed Drawdown series. The full chart (Balance, Running Peak, Closed Drawdown %, Max Floating Drawdown %) is now documented end-to-end.
 
 </div>
 
@@ -665,7 +669,40 @@ Max consecutive days without trades, periods >3/5/7 days.
 
 All timestamps in **UTC** for cross-referencing with live logs.
 
-_Full implementation details: [AGENTS.md §7.18](AGENTS.md#718-backtest-report-enhancements--new-v2026-09-24)_
+### 📈 HTML Equity Curve (`Backtest_Chart_<SYMBOL>.html`)
+
+Alongside the text report, the backtester writes an interactive equity curve to `data/`:
+
+| File | Content |
+| --- | --- |
+| `data/Backtest_Report_<SYMBOL>.txt` | Full text report (printed to console too) |
+| `data/Backtest_Chart_<SYMBOL>.html` | Self-contained Chart.js equity curve (CDN-loaded) |
+
+The chart is generated automatically on every run — no extra flag needed. It renders four series:
+
+| Series | Axis | Meaning |
+| --- | --- | --- |
+| **Balance (USDT)** | Left | Account equity after each closed trade, sorted by exit time |
+| **Running Peak** | Left | High-water mark — the maximum balance reached so far |
+| **Closed Drawdown (%)** | Right | Dip below the running peak as locked in by each closed trade |
+| **Max Floating Drawdown (%)** | Right | Flat dashed reference line at the deepest intra-trade dip reported by the simulator |
+
+Equity segments are **green** while the account is making new highs and **red** while it is below its
+running peak, making drawdown duration visible at a glance. The drawdown axis is inverted (`0%` at the
+top, deeper drawdowns pointing downwards) and tooltips render depths as negative percentages.
+
+**Why two drawdown metrics?** The right axis is a closed-trade series, so it cannot show a position
+that was, say, 20% underwater before recovering to a small loss. The simulator samples equity
+continuously, so its `Max Drawdown` card includes those intra-trade dips. The dashed **Max Floating
+Drawdown** line bridges that gap: it shows where the true "max pain" floor sits relative to the
+closed-trade curve.
+
+The X-axis is anchored to **one day before the first executed trade** (clamped to the backtest start),
+so a late-starting dataset (e.g. 1m Sniper cache) does not produce a months-long flat line. All
+timestamps are UTC. Artifact writing is non-fatal — a disk error logs a warning and never aborts the
+backtest run.
+
+_Full implementation details: [AGENTS.md §7.18.1](AGENTS.md#7181-html-equity-curve-generator--new-v2026-10-19)_
 
 ---
 
@@ -793,6 +830,8 @@ docker compose up -d
 | **MAX_WORKING_CAPITAL**            |          |            `0`            | Strategy capacity limit in USDT. 0 = unlimited. If balance > cap, risk calc uses cap. Drawdown guard uses capped balance.              |
 | **USE_LOCAL_CACHE_ONLY**           |          |          `false`          | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys. |
 | **ENABLE_HEALTHCHECK_SERVER**      |          |          `false`          | Enable Express health check server for cloud platforms (e.g., Render.com). Default `false` for security (Secure Mode). **Required `true` on Render.com.** |
+| **ALLOWED_DAYS_OF_WEEK**           |          |        `1,2,3,4,5`        | ISO weekdays in **UTC** (1=Monday ... 7=Sunday) allowed for **NEW entries**. Default blocks weekend entries. Set `1,2,3,4,5,6,7` to enable weekend entries. Entry filter only — never blocks active trade management. |
+| **ENFORCE_KILLZONES**              |          |          `true`           | `true` = entries require London/NY killzone. `false` = bypass ALL killzone gates globally (backtesting without session constraints). Entry filter only. |
 
 ---
 
@@ -861,6 +900,8 @@ PREFLIGHT_BUFFER_PCT=0.05
 SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5
+ALLOWED_DAYS_OF_WEEK=1,2,3,4,5
+ENFORCE_KILLZONES=true
 
 # Strategy Capacity Limit
 MAX_WORKING_CAPITAL=20000
@@ -910,8 +951,8 @@ ENABLE_HEALTHCHECK_SERVER=false
 # Backup
 BACKUP_PASSWORD=your_backup_encryption_password_here
 
-# --- Local CSV Backtest (optional) ---
-# Раскомментируй для прогона локального CSV бэктеста конкретного актива:
+# --- Local CSV Backtest (optional, V4 Classic only — not supported in Sniper Mode) ---
+# Uncomment to run an offline CSV backtest for a specific asset:
 # BACKTEST_CSV_PATH=./data/csv/EURUSD_15m.csv
 ```
 
@@ -959,6 +1000,8 @@ PREFLIGHT_BUFFER_PCT=0.05
 SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5
+ALLOWED_DAYS_OF_WEEK=1,2,3,4,5
+ENFORCE_KILLZONES=true
 
 # Strategy Capacity Limit
 MAX_WORKING_CAPITAL=3000
@@ -969,8 +1012,11 @@ ACTIVE_SCENARIOS=12
 SCENARIOS_SOLUSDT=12
 SCENARIOS_AVAXUSDT=12
 
-# Funding Monitor DISABLED for V5
+# Funding Monitor DISABLED for V5 (thresholds kept for parity with .env.subaru)
 ENABLE_FUNDING_MONITOR=false
+FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,AVAXUSDT,SUIUSDT,NEARUSDT
+FUNDING_ALERT_THRESHOLD_PCT=0.0
+FUNDING_RESTORE_THRESHOLD_PCT=0.015
 
 # Trading Settings
 RISK_PERCENT=2
@@ -1001,6 +1047,10 @@ ENABLE_HEALTHCHECK_SERVER=false
 
 # Backup
 BACKUP_PASSWORD=your_backup_encryption_password_here
+
+# --- Local CSV Backtest (optional, V4 Classic only — not supported in Sniper Mode) ---
+# Uncomment to run an offline CSV backtest for a specific asset:
+# BACKTEST_CSV_PATH=./data/csv/SOLUSDT_15m.csv
 ```
 
 | Aspect         | Setting                               | Rationale                  |
@@ -1455,7 +1505,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (252)
+# All tests (259)
 npm test
 
 # Watch mode
@@ -1494,7 +1544,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full 180-day backtest (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (252 tests)
+npm test             # Jest (259 tests)
 npm run test:watch   # Watch mode
 ```
 

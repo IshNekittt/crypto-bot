@@ -59,7 +59,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
   override evaluate(patternData: any): boolean {
     Scenario4_MitigationChain.rejectionStats.totalEvals++;
 
-    if (!patternData.currentKillzone || patternData.currentKillzone === 'NONE') {
+    if (this.config.enforceKillzones !== false && (!patternData.currentKillzone || patternData.currentKillzone === 'NONE')) {
       this.logRejection('Not in active killzone');
       Scenario4_MitigationChain.rejectionStats.killzone++;
       return false;

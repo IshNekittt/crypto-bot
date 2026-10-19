@@ -23,9 +23,9 @@ export class Scenario12_SniperTouch extends BaseScenario {
     }
 
     // === FILTER 1: KILLZONE CHECK ===
-    // Sniper only trades during London or NY killzones
+    // Sniper only trades during London or NY killzones (bypassable via ENFORCE_KILLZONES=false)
     const currentKillzone = patternData.currentKillzone;
-    if (currentKillzone !== 'LONDON' && currentKillzone !== 'NY') {
+    if (this.config.enforceKillzones !== false && currentKillzone !== 'LONDON' && currentKillzone !== 'NY') {
       this.logRejection(`Outside killzone: ${currentKillzone}`);
       return false;
     }
