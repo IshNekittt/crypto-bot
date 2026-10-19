@@ -79,6 +79,7 @@ maxWorkingCapital: 0,
     enableHealthcheckServer: false,
     allowedDaysOfWeek: [1, 2, 3, 4, 5],
     enforceKillzones: true,
+    enableTradeNotifications: true,
 };
 
     reconciliation = new ReconciliationLoop(mockSource, mockDb, mockEngines, mockConfig);

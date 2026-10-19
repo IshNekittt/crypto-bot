@@ -58,6 +58,7 @@ function makeClient(
     enableHealthcheckServer: false,
     allowedDaysOfWeek: [1, 2, 3, 4, 5],
     enforceKillzones: true,
+    enableTradeNotifications: true,
     ...overrides,
   };
   return { client: new BybitClient(rest as unknown as RestClientV5, config), rest };

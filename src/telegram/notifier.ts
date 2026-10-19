@@ -9,11 +9,16 @@ import { ExecutionEngine } from "../execution/executionEngine";
 import { StrategyEngine } from "../engine/strategyEngine";
 import { NewsService } from "../services/newsService";
 import { FundingMonitorService } from "../services/fundingMonitorService";
+import { BotConfig } from "../config/env";
 
 export class TelegramNotifier {
   readonly bot: Telegraf;
   readonly chatId: string;
   private readonly autoTrading: boolean;
+  private config: Pick<BotConfig, "enableTradeNotifications"> = {
+    enableTradeNotifications:
+      (process.env.ENABLE_TRADE_NOTIFICATIONS ?? "true").toLowerCase() === "true",
+  };
   private pendingTradeManager: PendingTradeManager | null = null;
   private backupService: BackupService | null = null;
   private bybitClient: BybitClient | null = null;
@@ -25,6 +30,10 @@ export class TelegramNotifier {
 
   setPendingTradeManager(manager: PendingTradeManager): void {
     this.pendingTradeManager = manager;
+  }
+
+  setBotConfig(config: Pick<BotConfig, "enableTradeNotifications">): void {
+    this.config = config;
   }
 
   setBackupService(service: BackupService): void {
@@ -541,6 +550,7 @@ export class TelegramNotifier {
     scenarioId: number,
     reason: string,
   ): Promise<boolean> {
+    if (!this.config.enableTradeNotifications) return true;
     const text = [
       "👀 <b>Setup Found</b>",
       "",
@@ -557,6 +567,7 @@ export class TelegramNotifier {
     sl: string,
     tp: string,
   ): Promise<boolean> {
+    if (!this.config.enableTradeNotifications) return true;
     const text = [
       "🚀 <b>Order Opened</b>",
       "",
@@ -572,6 +583,7 @@ export class TelegramNotifier {
     _pnlPercent: string,
     reason?: string,
   ): Promise<boolean> {
+    if (!this.config.enableTradeNotifications) return true;
     // Cancelled limit orders: send a distinct message so the "Order Opened" loop gets closed
     if (reason === 'CANCELLED') {
       const text = `🗑️ <b>Limit Order Cancelled</b>\n\n📊 ${symbol}\n⏳ Reason: Expired / Timeout`;

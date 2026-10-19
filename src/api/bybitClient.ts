@@ -134,7 +134,11 @@ export class BybitClient {
   private static readonly MAX_RETRIES = 3;
   private static readonly BASE_BACKOFF_MS = 1000;
 
-  private notifier: { notifyCriticalError: (msg: string) => Promise<boolean> } | null = null;
+  private notifier: {
+    notifyCriticalError: (msg: string) => Promise<boolean>;
+    sendMessage?: (msg: string) => Promise<boolean>;
+  } | null = null;
+  private isApiDegraded = false;
   public readonly config: BotConfig;
 
   constructor(rest: RestClientV5, config: BotConfig) {
@@ -142,7 +146,10 @@ export class BybitClient {
     this.config = config;
   }
 
-  setTelegramNotifier(notifier: { notifyCriticalError: (msg: string) => Promise<boolean> }): void {
+  setTelegramNotifier(notifier: {
+    notifyCriticalError: (msg: string) => Promise<boolean>;
+    sendMessage?: (msg: string) => Promise<boolean>;
+  }): void {
     this.notifier = notifier;
   }
 
@@ -209,6 +216,36 @@ export class BybitClient {
     this.globalRateLimit.consecutive429Count = 0;
   }
 
+  /**
+   * Stateful degradation marker. Triggered only when the retry loop has fully
+   * exhausted its attempts — logged once per degradation episode (edge-triggered)
+   * so a rate-limit storm produces one alert, not one per failed call.
+   */
+  private markApiDegraded(operationName: string, lastError: Error | null): void {
+    if (this.isApiDegraded) return;
+    this.isApiDegraded = true;
+    const detail = lastError ? `: ${lastError.message}` : '';
+    logger.error(
+      `REST API Degradation: Failed after ${BybitClient.MAX_RETRIES} attempts. (${operationName}${detail})`,
+    );
+  }
+
+  /**
+   * Clears the degradation flag after the first successful call and announces
+   * recovery to Telegram (fire-and-forget).
+   */
+  private handleApiRecovery(): void {
+    if (!this.isApiDegraded) return;
+    this.isApiDegraded = false;
+    logger.info('REST API Recovery: connection restored after degradation');
+    const notifier = this.notifier;
+    if (notifier?.sendMessage) {
+      void notifier
+        .sendMessage('🟢 <b>API Connection Recovered</b>\nREST connection restored successfully.')
+        .catch(() => {});
+    }
+  }
+
   async executeWithRetry<T>(operation: () => Promise<T>, operationName: string): Promise<T> {
     if (this.checkGlobalRateLimitCircuit()) {
       throw new Error('Global rate limit circuit breaker OPEN — REST paused for 5 minutes');
@@ -220,6 +257,7 @@ export class BybitClient {
       try {
         const result = await operation();
         this.recordGlobalRateLimitSuccess();
+        this.handleApiRecovery();
         return result;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
@@ -239,6 +277,12 @@ export class BybitClient {
         }
 
         this.recordGlobalRateLimitError(retCode);
+
+        // All retry attempts are exhausted — the REST layer is degraded.
+        if (attempt >= BybitClient.MAX_RETRIES) {
+          this.markApiDegraded(operationName, lastError);
+        }
+
         throw lastError;
       }
     }

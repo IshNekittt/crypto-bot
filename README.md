@@ -21,6 +21,8 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 **v2026-10-19 (fixes)**: Two architectural bugs eliminated — (1) **Profit-direction guard in Adaptive Fractioning**: progress is no longer computed with an absolute value, so a trade moving toward SL can never be treated as "in profit" (kills the bogus SL→entry updates rejected by Bybit `[10001]`); (2) **Backtester history window**: the hardcoded 180-day / "six months" range is gone — `BACKTEST_DAYS` now drives the 1m, LTF and HTF loaders through a single `getTimeRangeForDays(config.backtestDays)` window.
 
+**v2026-10-19 (monitoring)**: Added the **global error monitoring & alerting layer** — every `logger.error(...)` now reaches Telegram via a custom Winston transport (`setLoggerTelegramHook`, Telegram/Telegraf lines filtered to prevent notification loops), a **routine-notification toggle** (`ENABLE_TRADE_NOTIFICATIONS`), **stateful degradation alerts** for REST API and WebSocket (`🟢 API/WS Connection Recovered` after retry exhaustion / watchdog timeout) and **hardened backtest chunk retries** (8 attempts, 3s pause, a dead chunk never crashes the backtest).
+
 </div>
 
 ---
@@ -834,6 +836,7 @@ docker compose up -d
 | **ENABLE_HEALTHCHECK_SERVER**      |          |          `false`          | Enable Express health check server for cloud platforms (e.g., Render.com). Default `false` for security (Secure Mode). **Required `true` on Render.com.** |
 | **ALLOWED_DAYS_OF_WEEK**           |          |        `1,2,3,4,5`        | ISO weekdays in **UTC** (1=Monday ... 7=Sunday) allowed for **NEW entries**. Default blocks weekend entries. Set `1,2,3,4,5,6,7` to enable weekend entries. Entry filter only — never blocks active trade management. |
 | **ENFORCE_KILLZONES**              |          |          `true`           | `true` = entries require London/NY killzone. `false` = bypass ALL killzone gates globally (backtesting without session constraints). Entry filter only. |
+| **ENABLE_TRADE_NOTIFICATIONS**     |          |          `true`           | `false` = mute routine trade messages (Setup Found / Order Opened / Position Closed / Cancelled Limit). Critical `logger.error` alerts are still delivered via the global Telegram hook. |
 
 ---
 
@@ -944,6 +947,9 @@ COOLDOWN_CANDLES=16
 LOG_LEVEL=info
 DATA_DIR=data
 
+# Notifications (false = mute routine trade messages, errors still delivered)
+ENABLE_TRADE_NOTIFICATIONS=true
+
 # Offline Mode
 USE_LOCAL_CACHE_ONLY=false
 
@@ -1040,6 +1046,9 @@ COOLDOWN_CANDLES=16
 # Logging & Data
 LOG_LEVEL=info
 DATA_DIR=data
+
+# Notifications (false = mute routine trade messages, errors still delivered)
+ENABLE_TRADE_NOTIFICATIONS=true
 
 # Offline Mode
 USE_LOCAL_CACHE_ONLY=false

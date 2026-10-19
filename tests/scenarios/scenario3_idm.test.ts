@@ -42,6 +42,7 @@ const mockConfig: BotConfig = {
     enableHealthcheckServer: false,
     allowedDaysOfWeek: [1, 2, 3, 4, 5],
     enforceKillzones: true,
+    enableTradeNotifications: true,
 };
 
 describe('Scenario3: Inducement (IDM)', () => {

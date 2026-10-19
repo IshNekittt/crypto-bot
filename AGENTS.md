@@ -330,6 +330,48 @@ This eliminates dependency on ReconciliationLoop for recovery and ensures the bo
 
 ---
 
+### 3.9 Global Error Monitoring, Notification Toggle & Stateful Degradation Alerts — **NEW v2026-10-19**
+
+#### 3.9.1 Winston Telegram Transport (`src/utils/logger.ts`)
+
+Every `logger.error(...)` in the codebase is routed to Telegram without per-call-site wiring:
+
+1. `setLoggerTelegramHook(fn)` stores a module-local callback (called once in `src/index.ts`: `setLoggerTelegramHook((msg) => notifier.notifyCriticalError(msg).catch(() => {}))`).
+2. `class TelegramTransport extends Transport` (from `winston-transport`) is added to the `winston.createLogger` transports array.
+3. In `log(info, callback)`: `callback()` is invoked immediately (never stalls the logger), then — **only for `info.level === 'error'`** — the hook is invoked.
+4. **Infinite-loop filter (mandatory)**: messages containing `telegram` or `telegraf` (case-insensitive) are dropped. The delivery layer itself logs failures via `logger.error`, so without the filter a Telegram outage would recursively re-send its own failure forever. The hook call is additionally wrapped in `try/catch` so a throwing hook can never break the logging pipeline.
+
+**Invariant**: The hook only ever calls `notifyCriticalError` — it must never be awaited inside `log()`.
+
+#### 3.9.2 Routine Trade Notification Toggle (`ENABLE_TRADE_NOTIFICATIONS`)
+
+- Parsed in `src/config/env.ts` as `enableTradeNotifications` (default `true`), injected into the notifier via `notifier.setBotConfig(config)`.
+- `notifySetupFound`, `notifyOrderOpened` and `notifyTradeClosed` (including the `CANCELLED` Limit branch) return `true` immediately when the toggle is off.
+- The toggle **never** gates `notifyCriticalError` or the global error hook — muting trade spam keeps all error alerts flowing.
+
+#### 3.9.3 Stateful Degradation Alerts (REST + WS)
+
+Both channels implement the same edge-triggered state machine: **degraded (red) → first success (green)**, one alert per episode.
+
+| Layer | Degradation trigger | Recovery trigger | Recovery message |
+|-------|--------------------|------------------|------------------|
+| **REST** (`bybitClient.ts`) | `executeWithRetry` exhausts all retries (`attempt >= MAX_RETRIES`) → `isApiDegraded = true` + `logger.error('REST API Degradation: Failed after ${maxRetries} attempts.')` | First successful operation in `executeWithRetry` → `isApiDegraded = false` | `🟢 API Connection Recovered` via `notifier.sendMessage` |
+| **WS** (`wsClient.ts`) | Watchdog timeout (3 min silence) → `isWsDegraded = true` + `logger.error('[WS Watchdog] ...')` | `reconnected` → resync promise resolves successfully → `isWsDegraded = false` | `🟢 WS Connection Recovered` via `notifier.sendMessage` |
+
+**Notes**: the degradation marker is only set when retries are actually exhausted (a non-retryable business error on the first attempt does not mark degradation). `markApiDegraded` is edge-triggered — one Telegram alert per episode, not one per failed call. Recovery notifications use `.catch(() => {})` (fire-and-forget).
+
+#### 3.9.4 Fatal Crash Guard (`src/index.ts`)
+
+`setupGlobalErrorHandlers()` wraps both `uncaughtException` and `unhandledRejection`, sends `notifyCriticalError` through `Promise.race` with a **3000 ms timeout**, and only then calls `process.exit(1)` — guaranteed SOS delivery attempt before the process dies.
+
+#### 3.9.5 Backtest Chunk Retry Guard (`src/backtest/historyLoader.ts`)
+
+- Each pagination chunk (critical for 1m history — hundreds of requests) gets **8 attempts with a 3 s pause**, logging `[WARN] Fetch chunk failed, retrying...`.
+- If a chunk still fails, the loader logs the permanent failure and **breaks pagination instead of crashing the backtest** — already-collected candles are merged with cache and returned (partial history; run.ts logs the shortened window).
+- An empty result never overwrites the cache file (`No candles fetched ... cache file left untouched`), so a failed fetch cannot poison the cache.
+
+---
+
 ## 4. TELEGRAM UI & SECURITY
 
 ### 4.1 Security Middleware — `src/telegram/notifier.ts:197-204`
@@ -1958,6 +2000,9 @@ SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR (default 1.5)
 ALLOWED_DAYS_OF_WEEK=1,2,3,4,5     # ISO weekdays in UTC (1=Mon ... 7=Sun) allowed for NEW entries
 ENFORCE_KILLZONES=true             # false = bypass all killzone gates globally (backtesting)
 
+# Notifications
+ENABLE_TRADE_NOTIFICATIONS=true    # false = mute routine trade messages; logger.error alerts still delivered
+
 # Hybrid Smart Entry
 SMART_ENTRY_THRESHOLD_PCT=0.15     # Market vs Limit threshold in % (default 0.15 = 0.15%)
 LIMIT_EXPIRATION_CANDLES=6         # Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)
@@ -2053,6 +2098,14 @@ docker compose up -d
 41. **Profit-Direction Guard in Adaptive Fractioning** — `evaluateTradeManagement()` MUST verify `isProfitable` (`currentPrice.gt(entry)` for Long, `currentPrice.lt(entry)` for Short) BEFORE any progress math. If `!isProfitable` → return `{ action: 'none', reason: 'Trade is not in profit' }`. Absolute-value progress is FORBIDDEN — it makes adverse moves look like progress and triggers bogus SL→entry updates rejected by Bybit `[10001]`.
 
 42. **Backtest History Window from `BACKTEST_DAYS`** — The backtest candle window MUST come from `getTimeRangeForDays(config.backtestDays)` and be shared by the 1m, LTF and HTF loaders. Hardcoding 180 days (`SIX_MONTHS_MS`, `6 * 30`, `Math.ceil((180 * 24 * 60) / ltfMinutes)`) is FORBIDDEN — the chart period, report period and simulated period must always match `.env`.
+
+43. **Global Error Alerting via Logger Hook** — All `logger.error(...)` output MUST reach Telegram through `setLoggerTelegramHook` + `TelegramTransport`. Log lines containing `telegram`/`telegraf` MUST be filtered out to prevent infinite notification loops. The hook is fire-and-forget and must never block or throw inside `log()`.
+
+44. **Routine Notification Toggle never gates Errors** — `ENABLE_TRADE_NOTIFICATIONS=false` mutes ONLY `notifySetupFound` / `notifyOrderOpened` / `notifyTradeClosed` (incl. `CANCELLED`). `notifyCriticalError`, the logger hook, fatal crash SOS and degradation/recovery alerts MUST always be delivered.
+
+45. **Edge-Triggered Degradation Alerts** — REST (`isApiDegraded`) and WS (`isWsDegraded`) degradation flags are set on failure (retry exhaustion / watchdog timeout) and cleared on the first success (REST call success / resync success). Degradation is logged once per episode; recovery sends exactly one green alert per episode.
+
+46. **Backtest Chunk Retry Guard** — Backtest history pagination MUST retry each chunk up to 8 attempts with a 3 s pause (`[WARN] Fetch chunk failed, retrying...`). A permanently failing chunk MUST NOT crash the backtest — pagination stops, partial history is kept, and an empty result MUST NOT overwrite the cache file.
 
 ---
 

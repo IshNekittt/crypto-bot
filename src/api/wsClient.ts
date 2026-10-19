@@ -40,6 +40,10 @@ export interface KlineUpdate {
   readonly candle: Candle;
 }
 
+export interface WsRecoveryNotifier {
+  sendMessage: (msg: string) => Promise<boolean>;
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -103,6 +107,8 @@ export class BybitWebsocket {
   private resyncHandler: (() => Promise<void>) | null = null;
   private watchdogTimer: NodeJS.Timeout | null = null;
   private lastMessageTime = Date.now();
+  private notifier: WsRecoveryNotifier | null = null;
+  private isWsDegraded = false;
 
   constructor(config: BotConfig) {
     this.ws = new WebsocketClient({
@@ -117,15 +123,36 @@ export class BybitWebsocket {
     this.startWatchdog();
   }
 
+  setTelegramNotifier(notifier: WsRecoveryNotifier): void {
+    this.notifier = notifier;
+  }
+
   private startWatchdog(): void {
     this.watchdogTimer = setInterval(() => {
       const silenceMs = Date.now() - this.lastMessageTime;
       if (silenceMs >= WS_WATCHDOG_TIMEOUT_MS) {
         logger.error(`[WS Watchdog] ${silenceMs}ms of silence (threshold: ${WS_WATCHDOG_TIMEOUT_MS}ms) — forcing reconnect`);
+        this.isWsDegraded = true;
         this.forceReconnect();
       }
     }, 30000); // Check every 30 seconds
     this.watchdogTimer.unref();
+  }
+
+  /**
+   * Clears the WS degradation flag after a successful reconnect + resync and
+   * announces recovery to Telegram (fire-and-forget).
+   */
+  private handleWsRecovery(): void {
+    if (!this.isWsDegraded) return;
+    this.isWsDegraded = false;
+    logger.info('WS Recovery: connection restored after watchdog degradation');
+    const notifier = this.notifier;
+    if (notifier) {
+      void notifier
+        .sendMessage('🟢 <b>WS Connection Recovered</b>\nWebSocket stream restored successfully.')
+        .catch(() => {});
+    }
   }
 
   private forceReconnect(): void {
@@ -169,9 +196,15 @@ export class BybitWebsocket {
       this.resetWatchdog();
       const resync = this.resyncHandler;
       if (resync) {
-        resync().catch((error: unknown) => logger.error(
-          `Resync after reconnect failed: ${error instanceof Error ? error.message : String(error)}`,
-        ));
+        // Recovery is only declared after the resync (time sync + history reload)
+        // completes successfully — a reconnect alone does not prove the feed is healthy.
+        resync()
+          .then(() => this.handleWsRecovery())
+          .catch((error: unknown) => logger.error(
+            `Resync after reconnect failed: ${error instanceof Error ? error.message : String(error)}`,
+          ));
+      } else {
+        this.handleWsRecovery();
       }
     });
 

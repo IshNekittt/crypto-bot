@@ -44,6 +44,7 @@ const mockConfig: BotConfig = {
     // Day-of-week filtering itself is covered by dedicated tests below.
     allowedDaysOfWeek: [1, 2, 3, 4, 5, 6, 7],
     enforceKillzones: true,
+    enableTradeNotifications: true,
 };
 
 const mockNotifier = {

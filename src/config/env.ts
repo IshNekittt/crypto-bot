@@ -47,6 +47,7 @@ export interface BotConfig {
   readonly enableHealthcheckServer: boolean;
   readonly allowedDaysOfWeek: number[];
   readonly enforceKillzones: boolean;
+  readonly enableTradeNotifications: boolean;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -386,6 +387,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const enforceKillzones =
     (optionalEnv(env, "ENFORCE_KILLZONES") ?? "true").toLowerCase() === "true";
 
+  // Routine trade notifications (Setup Found / Order Opened / Position Closed).
+  // Default true — set ENABLE_TRADE_NOTIFICATIONS=false to mute trade spam while
+  // keeping all logger.error alerts flowing through the global Telegram hook.
+  const enableTradeNotifications =
+    (optionalEnv(env, "ENABLE_TRADE_NOTIFICATIONS") ?? "true").toLowerCase() ===
+    "true";
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, "BYBIT_API_KEY"),
@@ -433,5 +441,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     enableHealthcheckServer,
     allowedDaysOfWeek,
     enforceKillzones,
+    enableTradeNotifications,
   };
 }

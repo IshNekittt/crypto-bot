@@ -7,8 +7,12 @@ import * as path from 'path';
 const CACHE_DIR = path.resolve(process.cwd(), 'data/backtest_cache');
 const MAX_CANDLES_PER_REQUEST = 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const MAX_RETRIES = 5;
-const BASE_RETRY_DELAY_MS = 3000;
+// Hardened chunk pagination (critical for 1m history, which needs hundreds of requests):
+// every chunk gets up to 8 attempts with a 3s pause before failing. The backtest loop
+// below catches a permanent chunk failure and keeps the already-collected candles
+// instead of crashing the entire run.
+const MAX_CHUNK_ATTEMPTS = 8;
+const CHUNK_RETRY_DELAY_MS = 3000;
 
 export interface CachedData {
   symbol: string;
@@ -27,31 +31,23 @@ async function fetchWithRetry(
   endTime: number
 ): Promise<Candle[]> {
   let lastError: Error | null = null;
-  
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+
+  for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
     try {
       return await client.getKlines(symbol, timeframe, limit, endTime);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      const isRetryable = err instanceof Error && (
-        err.message.includes('EPIPE') ||
-        err.message.includes('ECONNRESET') ||
-        err.message.includes('ETIMEDOUT') ||
-        err.message.includes('timeout') ||
-        err.message.includes('socket hang up')
+
+      if (attempt === MAX_CHUNK_ATTEMPTS) break;
+
+      logger.warn(
+        `[WARN] Fetch chunk failed, retrying... [${symbol} ${timeframe}] attempt ${attempt}/${MAX_CHUNK_ATTEMPTS} in ${CHUNK_RETRY_DELAY_MS}ms: ${lastError.message}`
       );
-      
-      if (!isRetryable || attempt === MAX_RETRIES) {
-        throw lastError;
-      }
-      
-      const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-      logger.warn(`[${symbol} ${timeframe}] Fetch attempt ${attempt}/${MAX_RETRIES} failed: ${lastError.message}. Retrying in ${delay}ms...`);
-      await new Promise(r => setTimeout(r, delay));
+      await new Promise(r => setTimeout(r, CHUNK_RETRY_DELAY_MS));
     }
   }
-  
-  throw lastError;
+
+  throw lastError ?? new Error(`Chunk fetch failed for ${symbol} ${timeframe} after ${MAX_CHUNK_ATTEMPTS} attempts`);
 }
 
 function ensureCacheDir(): void {
@@ -105,9 +101,24 @@ export async function loadCachedOrFetch(
   logger.info(`Fetching ${symbol} ${timeframe} from Bybit: ${new Date(fromMs).toISOString()} - ${new Date(toMs).toISOString()}`);
   const allCandles: Candle[] = [];
   let currentEnd = toMs;
+  let chunkFailed = false;
 
   while (currentEnd > fromMs) {
-    const candles = await fetchWithRetry(client, symbol, timeframe, MAX_CANDLES_PER_REQUEST, currentEnd);
+    let candles: Candle[];
+    try {
+      candles = await fetchWithRetry(client, symbol, timeframe, MAX_CANDLES_PER_REQUEST, currentEnd);
+    } catch (error) {
+      // A single dead chunk must never crash the whole backtest. Keep everything
+      // fetched so far (merged with cache below) and stop paginating backwards.
+      chunkFailed = true;
+      logger.error(
+        `[WARN] Fetch chunk failed permanently for ${symbol} ${timeframe} after ${MAX_CHUNK_ATTEMPTS} attempts: ` +
+        `${error instanceof Error ? error.message : String(error)}. ` +
+        `Saving partial history: ${allCandles.length} candles fetched, pagination stopped at ${new Date(currentEnd).toISOString()}`
+      );
+      break;
+    }
+
     if (candles.length === 0) break;
 
     allCandles.push(...candles);
@@ -116,21 +127,32 @@ export async function loadCachedOrFetch(
     await new Promise(r => setTimeout(r, 100));
   }
 
+  if (chunkFailed) {
+    logger.warn(
+      `[${symbol} ${timeframe}] Backtest will run on partial history (chunk pagination was interrupted); ` +
+      `missing data before ${new Date(currentEnd).toISOString()}`
+    );
+  }
+
   allCandles.sort((a, b) => a.timestamp - b.timestamp);
 
   const merged = cached ? mergeCandles(cached.candles, allCandles) : allCandles;
 
-  const toSave: CachedData = {
-    symbol,
-    timeframe,
-    candles: merged,
-    from: merged[0]?.timestamp ?? fromMs,
-    to: merged[merged.length - 1]?.timestamp ?? toMs,
-    savedAt: Date.now(),
-  };
+  if (merged.length > 0) {
+    const toSave: CachedData = {
+      symbol,
+      timeframe,
+      candles: merged,
+      from: merged[0]?.timestamp ?? fromMs,
+      to: merged[merged.length - 1]?.timestamp ?? toMs,
+      savedAt: Date.now(),
+    };
 
-  fs.writeFileSync(cachePath, JSON.stringify(toSave));
-  logger.info(`Saved cache for ${symbol} ${timeframe}: ${merged.length} candles`);
+    fs.writeFileSync(cachePath, JSON.stringify(toSave));
+    logger.info(`Saved cache for ${symbol} ${timeframe}: ${merged.length} candles`);
+  } else {
+    logger.warn(`No candles fetched for ${symbol} ${timeframe} — cache file left untouched`);
+  }
 
   return merged.filter(c => c.timestamp >= fromMs && c.timestamp <= toMs);
 }
