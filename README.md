@@ -7,8 +7,8 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-273%20passing-brightgreen?logo=jest)](https://jestjs.io/)
-[![Version](https://img.shields.io/badge/Version-v2026--10--19-blue)](https://github.com/)
+[![Tests](https://img.shields.io/badge/Tests-285%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Version](https://img.shields.io/badge/Version-v2026--10--20-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
@@ -22,6 +22,8 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 **v2026-10-19 (fixes)**: Two architectural bugs eliminated — (1) **Profit-direction guard in Adaptive Fractioning**: progress is no longer computed with an absolute value, so a trade moving toward SL can never be treated as "in profit" (kills the bogus SL→entry updates rejected by Bybit `[10001]`); (2) **Backtester history window**: the hardcoded 180-day / "six months" range is gone — `BACKTEST_DAYS` now drives the 1m, LTF and HTF loaders through a single `getTimeRangeForDays(config.backtestDays)` window.
 
 **v2026-10-19 (monitoring)**: Added the **global error monitoring & alerting layer** — every `logger.error(...)` now reaches Telegram via a custom Winston transport (`setLoggerTelegramHook`, Telegram/Telegraf lines filtered to prevent notification loops), a **routine-notification toggle** (`ENABLE_TRADE_NOTIFICATIONS`), **stateful degradation alerts** for REST API and WebSocket (`🟢 API/WS Connection Recovered` after retry exhaustion / watchdog timeout) and **hardened backtest chunk retries** (8 attempts, 3s pause, a dead chunk never crashes the backtest).
+
+**v2026-10-20**: The HTML backtest artifact now includes an **interactive TradingView Lightweight Charts panel** below the equity curve — OHLC candles with every trade's entry (arrow) and exit (TP/SL circle) overlaid as markers. Candles are fed from the same `candlesLtf` array the simulation ran on, so price action and trades are always in sync.
 
 </div>
 
@@ -680,7 +682,7 @@ Alongside the text report, the backtester writes an interactive equity curve to 
 | File | Content |
 | --- | --- |
 | `data/Backtest_Report_<SYMBOL>.txt` | Full text report (printed to console too) |
-| `data/Backtest_Chart_<SYMBOL>.html` | Self-contained Chart.js equity curve (CDN-loaded) |
+| `data/Backtest_Chart_<SYMBOL>.html` | Self-contained Chart.js equity curve + Lightweight Charts candlestick panel (CDN-loaded) |
 
 The chart is generated automatically on every run — no extra flag needed. It renders four series:
 
@@ -705,6 +707,24 @@ The X-axis is anchored to **one day before the first executed trade** (clamped t
 so a late-starting dataset (e.g. 1m Sniper cache) does not produce a months-long flat line. All
 timestamps are UTC. Artifact writing is non-fatal — a disk error logs a warning and never aborts the
 backtest run.
+
+### 🕯️ Asset Price & Trade Overlay (Lightweight Charts)
+
+Directly below the equity curve, the same HTML file renders an interactive **TradingView Lightweight
+Charts** terminal built from the exact `candlesLtf` array the simulation ran on:
+
+| Element | Meaning |
+| --- | --- |
+| **Green / red candles** | LTF OHLC (15m by default; the panel title is derived from the actual candle spacing) |
+| **▲ arrow (below bar)** | `Buy` entry — green |
+| **▼ arrow (above bar)** | `Sell` entry — red |
+| **● circle** | Exit marker: green above the bar for a win, red below the bar for a loss, labelled `TP` / `SL` / `BOTH` |
+
+Marker timestamps are snapped to the nearest preceding candle (Lightweight Charts requires every
+marker time to exist in the series) and sorted ascending. The renderer detects the CDN version at
+runtime and supports both the v5 API (`addSeries` + `createSeriesMarkers`) and the v4 API
+(`addCandlestickSeries` + `setMarkers`). The equity panel and the price panel render independently —
+if one CDN is unreachable, the other still draws.
 
 _Full implementation details: [AGENTS.md §7.18.1](AGENTS.md#7181-html-equity-curve-generator--new-v2026-10-19)_
 

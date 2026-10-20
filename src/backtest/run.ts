@@ -27,13 +27,14 @@ function parseArgs(config: any): string[] {
 }
 
 function cleanupMemory(
-  candlesLtf: any[],
   candlesHtf: any[],
   candles1m: any[],
   router: any,
   _recognizer: any,
 ): void {
-  if (candlesLtf) candlesLtf.length = 0;
+  // LTF candles are intentionally NOT cleared here: they are handed back to the
+  // caller to render the price chart in the HTML artifact. HTF/1m buffers are
+  // dead weight after the simulation loop.
   if (candlesHtf) candlesHtf.length = 0;
   if (candles1m) candles1m.length = 0;
   if (router) {
@@ -426,7 +427,7 @@ async function runBacktestForSymbol(
   logger.info(
     `[${symbol}] Backtest finished successfully. Processed ${mainCandles.length} candles, generated ${results.length} trades. Max Drawdown: ${state.maxDrawdown.toFixed(2)}%`,
   );
-  cleanupMemory(candlesLtf, candlesHtf, candles1m, router, null);
+  cleanupMemory(candlesHtf, candles1m, router, null);
   return { trades: results, maxDrawdown: state.maxDrawdown };
 }
 
@@ -542,6 +543,7 @@ async function main(): Promise<void> {
         new Date(toMs),
         Math.round((toMs - fromMs) / (24 * 60 * 60 * 1000)),
         result.maxDrawdown,
+        candlesLtf,
       );
 
       // Persist artifacts (text report + HTML equity curve) to the data directory.
@@ -557,6 +559,7 @@ async function main(): Promise<void> {
           Math.round((toMs - fromMs) / (24 * 60 * 60 * 1000)),
           result.maxDrawdown,
           config.dataDir,
+          candlesLtf,
         );
         logger.info(`[${symbol}] Report saved: ${artifacts.reportPath}`);
         logger.info(`[${symbol}] Equity curve saved: ${artifacts.chartPath}`);

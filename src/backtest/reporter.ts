@@ -255,7 +255,11 @@ export function printReport(
   periodStart: Date,
   periodEnd: Date,
   totalDays: number,
-  maxDrawdown: Decimal
+  maxDrawdown: Decimal,
+  // Accepted for signature symmetry with writeBacktestArtifacts(): the text
+  // report has no candle-based section, only the HTML artifact draws them.
+  // Prefixed with "_" because tsconfig enables noUnusedParameters.
+  _candles: any[] = []
 ): void {
   console.log(generateReport(symbol, initialBalance, finalBalance, trades, periodStart, periodEnd, totalDays, maxDrawdown));
 }
@@ -277,6 +281,8 @@ export interface BacktestArtifacts {
 }
 
 const CHART_JS_CDN = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+const LIGHTWEIGHT_CHARTS_CDN =
+  'https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js';
 
 function escapeHtml(value: string): string {
   return value
@@ -356,6 +362,155 @@ export function buildEquitySeries(
   return points;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TradingView Lightweight Charts — price action + trade overlay
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface TradingViewCandle {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface TradingViewMarker {
+  time: number;
+  position: 'aboveBar' | 'belowBar';
+  color: string;
+  shape: 'arrowUp' | 'arrowDown' | 'circle';
+  text: string;
+}
+
+/**
+ * Converts backtest candles (timestamp in ms, OHLC as strings) into the
+ * Lightweight Charts candle format (timestamp in seconds, OHLC as numbers).
+ *
+ * Presentation only — money remains `Decimal`/string everywhere else. Invalid
+ * candles are dropped instead of poisoning the series, because a single NaN
+ * makes the browser-side `setData()` throw and kills the whole chart.
+ * Timestamps are deduplicated and sorted ascending: Lightweight Charts requires
+ * strictly ascending, unique times.
+ */
+export function buildTradingViewCandles(candles: any[]): TradingViewCandle[] {
+  const byTime = new Map<number, TradingViewCandle>();
+
+  for (const candle of candles) {
+    const timestampMs = Number(candle?.timestamp);
+    const open = Number(candle?.open);
+    const high = Number(candle?.high);
+    const low = Number(candle?.low);
+    const close = Number(candle?.close);
+
+    if (!Number.isFinite(timestampMs)) continue;
+    if (![open, high, low, close].every((value) => Number.isFinite(value))) continue;
+
+    // Seconds, not milliseconds — Lightweight Charts treats numbers as UTCTimestamp.
+    const time = Math.floor(timestampMs / 1000);
+    byTime.set(time, { time, open, high, low, close });
+  }
+
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
+
+/**
+ * Builds entry/exit markers for the price chart.
+ *
+ * Lightweight Charts requires every marker time to match an existing candle
+ * exactly, so trade timestamps are snapped to the latest candle at or before
+ * the event. Trades that predate the first candle clamp to the chart start.
+ */
+export function buildTradingViewMarkers(
+  trades: TradeResult[],
+  candles: TradingViewCandle[]
+): TradingViewMarker[] {
+  if (candles.length === 0) return [];
+
+  const times = candles.map((candle) => candle.time);
+
+  const alignToCandle = (timestampMs: number): number | null => {
+    if (!Number.isFinite(timestampMs)) return null;
+
+    const targetSeconds = Math.floor(timestampMs / 1000);
+    if (targetSeconds <= times[0]) return times[0];
+
+    // Binary search: largest candle time <= target (times is sorted ascending).
+    let low = 0;
+    let high = times.length - 1;
+    let best = times[times.length - 1];
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (times[mid] <= targetSeconds) {
+        best = times[mid];
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    return best;
+  };
+
+  const markers: TradingViewMarker[] = [];
+
+  for (const trade of trades) {
+    const isLong = trade.side === 'Buy';
+    const entryTime = alignToCandle(trade.entryTime);
+    const exitTime = alignToCandle(trade.exitTime);
+
+    if (entryTime !== null) {
+      markers.push({
+        time: entryTime,
+        position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#22c55e' : '#ef4444',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: `${trade.side} Entry`,
+      });
+    }
+
+    if (exitTime !== null) {
+      const isWin = trade.pnl.gte(0);
+      markers.push({
+        time: exitTime,
+        position: isWin ? 'aboveBar' : 'belowBar',
+        color: isWin ? '#22c55e' : '#ef4444',
+        shape: 'circle',
+        text: trade.closedBy || (isWin ? 'TP' : 'SL'),
+      });
+    }
+  }
+
+  // Lightweight Charts requires markers sorted by time. Array.prototype.sort is
+  // stable, so an entry always precedes its exit when both land on one candle.
+  return markers.sort((a, b) => a.time - b.time);
+}
+
+/**
+ * Human-readable LTF label ("15m", "4H", "1D") derived from the candle spacing
+ * instead of a hardcoded timeframe, so custom `LTF_TIMEFRAME` runs stay correct.
+ */
+export function describeCandleInterval(candles: TradingViewCandle[]): string {
+  if (candles.length < 2) return '';
+
+  const deltas = candles
+    .slice(0, 50)
+    .map((candle, index, sample) => (index === 0 ? 0 : candle.time - sample[index - 1].time))
+    .slice(1)
+    .filter((delta) => delta > 0)
+    .sort((a, b) => a - b);
+
+  if (deltas.length === 0) return '';
+
+  const intervalSeconds = deltas[Math.floor(deltas.length / 2)];
+  const minutes = Math.round(intervalSeconds / 60);
+
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes % 1440 === 0) return `${minutes / 1440}D`;
+  if (minutes % 60 === 0) return `${minutes / 60}H`;
+  return `${minutes}m`;
+}
+
 export function generateEquityCurveHtml(
   symbol: string,
   initialBalance: Decimal,
@@ -363,9 +518,17 @@ export function generateEquityCurveHtml(
   trades: TradeResult[],
   periodStart: Date,
   periodEnd: Date,
-  maxDrawdown: Decimal
+  maxDrawdown: Decimal,
+  candles: any[]
 ): string {
   const series = buildEquitySeries(initialBalance, trades, periodStart);
+
+  const tvCandles = buildTradingViewCandles(candles);
+  const tvMarkers = buildTradingViewMarkers(trades, tvCandles);
+  const timeframeLabel = describeCandleInterval(tvCandles);
+  const overlayTitle = timeframeLabel
+    ? `Asset Price &amp; Trade Overlay (${timeframeLabel})`
+    : 'Asset Price &amp; Trade Overlay';
 
   const labels = series.map((p) => p.label);
   const equity = series.map((p) => p.equity);
@@ -404,6 +567,7 @@ export function generateEquityCurveHtml(
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Equity Curve — ${safeSymbol}</title>
 <script src="${CHART_JS_CDN}"></script>
+<script src="${LIGHTWEIGHT_CHARTS_CDN}"></script>
 <style>
   :root {
     --bg: #121212;
@@ -453,6 +617,16 @@ export function generateEquityCurveHtml(
   }
   .legend { margin-top: 14px; color: var(--muted); font-size: 12px; line-height: 1.7; }
   .legend b { color: var(--text); font-weight: 600; }
+  .card-title {
+    margin: 0 0 15px 0;
+    font-size: 14px;
+    color: #a1a1aa;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .tv-chart { width: 100%; height: 600px; }
+  .tv-empty { color: var(--muted); font-size: 13px; padding: 24px 4px; }
   #fallback { display: none; color: var(--red); padding: 24px; }
 </style>
 </head>
@@ -481,6 +655,11 @@ export function generateEquityCurveHtml(
     Max Floating Drawdown represents intra-trade equity dips not visible in closed-trade data points. All timestamps UTC.
   </div>
 
+  <div class="card" style="margin-top: 20px;">
+    <div class="card-title">${overlayTitle}</div>
+    <div id="tvchart" class="tv-chart"></div>
+  </div>
+
   <script>
     const LABELS = ${serializeForScript(labels)};
     const EQUITY = ${serializeForScript(equity)};
@@ -492,6 +671,11 @@ export function generateEquityCurveHtml(
     const HAS_FLOATING_DRAWDOWN = MAX_FLOATING_DRAWDOWN > 0;
     const GREEN = '#00e676';
     const RED = '#ff5252';
+
+    // ─── Trade overlay data (Lightweight Charts) ───
+    // Plain OHLC numbers: the chart library has no notion of Decimal/strings.
+    const CANDLE_DATA = ${serializeForScript(tvCandles)};
+    const MARKER_DATA = ${serializeForScript(tvMarkers)};
 
     function render() {
       if (typeof Chart === 'undefined') {
@@ -643,10 +827,69 @@ export function generateEquityCurveHtml(
       });
     }
 
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', render);
-    } else {
+    // ─── TradingView Lightweight Charts: price action + trade markers ───
+    // Independent from the Chart.js renderer above: a CDN failure on one
+    // library must never blank out the other panel.
+    function renderTradeChart() {
+      const container = document.getElementById('tvchart');
+      if (!container) return;
+
+      if (typeof LightweightCharts === 'undefined') {
+        container.innerHTML = '<div class="tv-empty">Lightweight Charts could not be loaded from the CDN. Open this file with an internet connection to render the price chart.</div>';
+        return;
+      }
+      if (CANDLE_DATA.length === 0) {
+        container.innerHTML = '<div class="tv-empty">No LTF candles were captured for this backtest window.</div>';
+        return;
+      }
+
+      const chartOptions = {
+        autoSize: true,
+        layout: { textColor: '#d1d5db', background: { type: 'solid', color: '#18181b' } },
+        grid: { vertLines: { color: '#27272a' }, horzLines: { color: '#27272a' } },
+        timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#27272a' },
+        rightPriceScale: { borderColor: '#27272a' }
+      };
+
+      const chart = LightweightCharts.createChart(container, chartOptions);
+
+      const seriesOptions = {
+        upColor: '#22c55e',
+        downColor: '#ef4444',
+        borderVisible: false,
+        wickUpColor: '#22c55e',
+        wickDownColor: '#ef4444'
+      };
+
+      // Lightweight Charts v5 replaced addCandlestickSeries() with addSeries().
+      // Both branches are kept so the artifact survives a CDN version bump.
+      const series = typeof chart.addSeries === 'function' && LightweightCharts.CandlestickSeries
+        ? chart.addSeries(LightweightCharts.CandlestickSeries, seriesOptions)
+        : chart.addCandlestickSeries(seriesOptions);
+
+      series.setData(CANDLE_DATA);
+
+      if (MARKER_DATA.length > 0) {
+        // v5 exposes markers as a primitive; v4 keeps them on the series.
+        if (typeof LightweightCharts.createSeriesMarkers === 'function') {
+          LightweightCharts.createSeriesMarkers(series, MARKER_DATA);
+        } else if (typeof series.setMarkers === 'function') {
+          series.setMarkers(MARKER_DATA);
+        }
+      }
+
+      chart.timeScale().fitContent();
+    }
+
+    function renderAll() {
       render();
+      renderTradeChart();
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', renderAll);
+    } else {
+      renderAll();
     }
   </script>
 </body>
@@ -677,7 +920,8 @@ export function writeBacktestArtifacts(
   periodEnd: Date,
   totalDays: number,
   maxDrawdown: Decimal,
-  dataDir = 'data'
+  dataDir = 'data',
+  candles: any[] = []
 ): BacktestArtifacts {
   const dir = path.resolve(process.cwd(), dataDir);
   fs.mkdirSync(dir, { recursive: true });
@@ -699,7 +943,8 @@ export function writeBacktestArtifacts(
     trades,
     periodStart,
     periodEnd,
-    maxDrawdown
+    maxDrawdown,
+    candles
   );
 
   const fileSymbol = sanitizeFilenamePart(symbol);

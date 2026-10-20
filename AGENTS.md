@@ -1628,6 +1628,24 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 **Invariant**: The floating line value MUST come from the simulator's `maxDrawdown`, **never** from `max(series drawdown)`. Recomputing it from closed trades collapses both metrics into one and reintroduces the visual gap.
 
+**Trade Overlay (Lightweight Charts)** — **NEW v2026-10-20**:
+
+The same artifact also renders a second panel under the equity curve: an interactive OHLC candlestick terminal with every trade's entry and exit drawn as markers.
+
+| Piece | Detail |
+| --- | --- |
+| **Wiring** | `printReport(..., candles = [])` → `writeBacktestArtifacts(..., dataDir = 'data', candles = [])` → `generateEquityCurveHtml(..., candles)`. `run.ts` passes `candlesLtf` to both artifact writers. |
+| **Candle conversion** | `buildTradingViewCandles(candles)` — ms → seconds (`Math.floor(ts / 1000)`), string OHLC → number, malformed candles dropped, duplicates deduped (last wins), sorted ascending. Lightweight Charts requires strictly ascending unique times and throws on NaN. |
+| **Marker alignment** | `buildTradingViewMarkers(trades, candles)` — binary-searches the latest candle time `<= event time`, so every marker timestamp exists in the series. Entries are arrows (`arrowUp`/`arrowDown`, `Buy` below bar / `Sell` above bar); exits are circles coloured by PnL sign and labelled `TP`/`SL`/`BOTH` from `TradeResult.closedBy`. Markers are sorted ascending (stable sort keeps entry before exit on a shared candle). |
+| **Timeframe label** | `describeCandleInterval(candles)` derives `15m` / `4H` / `1D` from actual candle spacing — no hardcoded timeframe (see Invariant 12). |
+| **Library loading** | Head script `https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js` (unversioned). The inline renderer supports **both** APIs: v5 `chart.addSeries(LightweightCharts.CandlestickSeries, …)` + `LightweightCharts.createSeriesMarkers(series, markers)` and v4 `chart.addCandlestickSeries(…)` + `series.setMarkers(…)`. Pinning to a single major version would silently break the artifact on a CDN bump. |
+| **Isolation** | Chart.js and Lightweight Charts render in independent functions (`render()` / `renderTradeChart()`). A CDN failure in one library never blanks the other panel; an empty candle array shows an explanatory message instead of an empty canvas. |
+| **X-axis** | `fitContent()` after `setData()` so the whole run (and all markers) is visible on open; users can scroll-zoom into individual trades. |
+
+**Memory rule**: `cleanupMemory()` in `run.ts` MUST NOT clear `candlesLtf` — the LTF array is consumed downstream by the text/HTML artifact writers. HTF and 1m buffers are still released. Clearing the LTF array before `printReport` produced an artifact with a zero-candle chart.
+
+**Invariant**: A marker time MUST exist in the candle series and markers MUST be sorted ascending, otherwise Lightweight Charts rejects the whole marker set. Never pass raw trade timestamps (they usually fall between two candles).
+
 ---
 
 ### 7.19 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
@@ -1945,7 +1963,7 @@ CREATE TABLE symbol_state (
 - **State Machine**: `openTrade()` / `checkAndCloseTrade()` in `executionSimulator.ts`.
 - **Drawdown Guard**: `consecutiveLosses` increments on loss → feeds `RiskManager.getEffectiveRiskPercent()`.
 - **Max Drawdown**: Calculated correctly (not `TODO%`).
-- **HTML Equity Curve**: `writeBacktestArtifacts()` writes `data/Backtest_Chart_<SYMBOL>.html` (self-contained Chart.js) with Balance / Running Peak / Closed Drawdown % / Max Floating Drawdown % — see §7.18.1.
+- **HTML Equity Curve**: `writeBacktestArtifacts()` writes `data/Backtest_Chart_<SYMBOL>.html` (self-contained Chart.js + Lightweight Charts) with Balance / Running Peak / Closed Drawdown % / Max Floating Drawdown % and an OHLC candlestick panel with trade entry/exit markers — see §7.18.1.
 - **CLI**: `npm run backtest -- BTCUSDT` (single symbol filter via `parseArgs`).
 - **History window**: `BACKTEST_DAYS` (default 60) → `getTimeRangeForDays(config.backtestDays)` shared by 1m/LTF/HTF loaders (see §7.7, Invariant 42).
 - **Performance**: ~25s for 17,280 15m candles (180-day window, 3 symbols); scales with `BACKTEST_DAYS`.
@@ -2637,4 +2655,4 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
 ---
 
-_Last updated: 2026-10-19. All 273 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-20. All 285 tests green. Build passes. Enterprise-ready._
