@@ -96,7 +96,14 @@ export class ExecutionEngine {
           `MARKET Order placed: ${plan.symbol} ${plan.side} qty=${plan.qty} entry≈${plan.entryPrice} sl=${plan.stopLoss} tp=${plan.takeProfit} id=${orderId}`,
         );
       }
-      await this.notifier.notifyOrderOpened(plan.symbol, plan.entryPrice, plan.stopLoss, plan.takeProfit);
+      // Fire-and-forget: the exchange order is already live. Awaiting Telegram here would
+      // delay db.openTrade and widen the post-fill blind window (SL/TP could be hit
+      // before the engine reaches IN_TRADE).
+      void this.notifier
+        .notifyOrderOpened(plan.symbol, plan.entryPrice, plan.stopLoss, plan.takeProfit)
+        .catch((error) => {
+          logger.error(`TG Notify error: ${error instanceof Error ? error.message : String(error)}`);
+        });
       return { ok: true, orderId };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

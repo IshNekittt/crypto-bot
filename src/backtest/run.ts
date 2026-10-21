@@ -387,7 +387,7 @@ async function runBacktestForSymbol(
           if (
             routerResult.triggered &&
             routerResult.levels &&
-            routerResult.zoneDetails
+            (routerResult.zoneDetails || routerResult.structureDetails)
           ) {
             const levels = routerResult.levels;
             const entryDecimal = new Decimal(levels.entry);
@@ -408,8 +408,8 @@ async function runBacktestForSymbol(
               routerResult.scenario!.id,
               routerResult.scenario!.name,
               instrument,
-              routerResult.zoneDetails,
-              routerResult.structureDetails,
+              routerResult.zoneDetails ?? undefined,
+              routerResult.structureDetails ?? undefined,
               undefined,
               undefined,
               symbol,

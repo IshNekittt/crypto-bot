@@ -12,7 +12,7 @@ import { InstrumentInfo, StrategyState, Timeframe, BotConfig, MitigatedZone, Mit
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { evaluateTradeManagement } from '../risk/tradeManager';
-import { formatPrice } from '../utils/precision';
+import { formatPrice, formatQuantity } from '../utils/precision';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
 const NO_POSITION_RECHECK_MS = 30_000;
@@ -482,18 +482,52 @@ export class StrategyEngine {
     const result = await this.deps.executionEngine.execute(updatedPlan);
     if (!result.ok) {
       logger.error(`[${this.symbol}] Order execution failed: ${result.reason}`);
-      await this.burnSetup(this.plan);
+      this.burnSetup(updatedPlan);
       this.transition(StrategyState.SCANNING);
       // Throw error so Telegram handler catches it and shows rejection to user
       throw new Error(`Exchange Error: ${result.reason}`);
     }
 
+    // Exchange confirmed the order. Burn the trigger structure (in-memory) and enter
+    // IN_TRADE BEFORE the Telegram round-trip settles and BEFORE any DB/REST bookkeeping,
+    // so an SL hit inside that window is caught by the WS closure handlers.
+    if (updatedPlan.structureDetails && updatedPlan.structureDetails.timestamp) {
+      this.mitigatedStructures.push({
+        type: (updatedPlan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+        timestamp: updatedPlan.structureDetails.timestamp,
+        price: updatedPlan.structureDetails.price?.toString() || updatedPlan.entryPrice.toString(),
+        direction: updatedPlan.structureDetails.direction || (updatedPlan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
+      });
+      if (this.mitigatedStructures.length > 100) {
+        this.mitigatedStructures = this.mitigatedStructures.slice(-100);
+      }
+      logger.info(`[${this.symbol}] Trigger structure burned on entry (timestamp=${updatedPlan.structureDetails.timestamp})`);
+    }
+
+    this.transition(StrategyState.IN_TRADE);
+
     try {
+      // Fetch actual entry price from exchange (No Assumed Fill) — same as auto-trading.
+      let actualEntryPrice = updatedPlan.entryPrice;
+      try {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const positions = await this.deps.client.getOpenPositions(this.symbol);
+        if (positions.length > 0) {
+          const pos = positions[0];
+          if (pos.avgPrice && pos.avgPrice.gt(0)) {
+            actualEntryPrice = pos.avgPrice.toString();
+            logger.info(`[${this.symbol}] Actual entry price from exchange: ${actualEntryPrice} (planned: ${updatedPlan.entryPrice})`);
+          }
+        }
+      } catch (e) {
+        logger.warn(`[${this.symbol}] Failed to fetch actual entry price, using planned: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
       await this.deps.db.openTrade({
         id: result.orderId || tradeId,
         symbol: this.symbol,
         scenario_id: updatedPlan.scenarioId ?? null,
-        entry_price: updatedPlan.entryPrice,
+        entry_price: actualEntryPrice,
         sl_price: updatedPlan.stopLoss,
         tp_price: updatedPlan.takeProfit,
         qty: updatedPlan.qty,
@@ -511,23 +545,30 @@ export class StrategyEngine {
         order_id: result.orderId,
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
-      if (this.plan.structureDetails && this.plan.structureDetails.timestamp) {
-        this.mitigatedStructures.push({
-          type: (this.plan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
-          timestamp: this.plan.structureDetails.timestamp,
-          price: this.plan.structureDetails.price?.toString() || this.plan.entryPrice.toString(),
-          direction: this.plan.structureDetails.direction || (this.plan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
-        });
-        if (this.mitigatedStructures.length > 100) {
-          this.mitigatedStructures = this.mitigatedStructures.slice(-100);
-        }
-        logger.info(`[${this.symbol}] Trigger structure burned on entry (timestamp=${this.plan.structureDetails.timestamp})`);
-      }
-      this.transition(StrategyState.IN_TRADE);
+      // No second transition: the engine is already IN_TRADE since the exchange confirmation.
     } catch (dbError) {
-      logger.error(`${this.symbol}: DB openTrade failed, burning setup: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
-      await this.burnSetup(this.plan);
-      this.transition(StrategyState.SCANNING);
+      // The order is live. Resetting to SCANNING without flattening would orphan the
+      // position and burnSetup would mark a genuinely traded setup as aborted.
+      logger.error(
+        `[${this.symbol}] CRITICAL: order is live on the exchange but db.openTrade failed: ${dbError instanceof Error ? dbError.message : String(dbError)}. Attempting emergency flat close.`,
+      );
+
+      const flattened = await this.panicCloseOrphan(result.orderId ?? null, updatedPlan.orderType);
+
+      if (flattened) {
+        logger.error(
+          `[${this.symbol}] CRITICAL DB FAILURE: orphan exposure verified flat. Burning setup and resetting to SCANNING.`,
+        );
+        this.burnSetup(updatedPlan);
+        this.plan = null;
+        this.transition(StrategyState.SCANNING);
+        return;
+      }
+
+      // Exposure could not be verified flat — keep the engine IN_TRADE (Invariant 23).
+      logger.error(
+        `[${this.symbol}] CRITICAL: emergency flat close FAILED. Engine remains ${this.state}; manual intervention required.`,
+      );
     }
   }
 
@@ -988,6 +1029,9 @@ export class StrategyEngine {
     }
 
     logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry (${useMarket ? 'Market' : 'Limit'})`);
+    let orderLive = false;
+    let liveOrderId: string | null = null;
+    let livePlanRef: PositionPlan | null = null;
     try {
       const result = await this.deps.executionEngine.execute(this.plan);
       if (!result.ok) {
@@ -998,8 +1042,33 @@ export class StrategyEngine {
         return;
       }
 
+      // Exchange confirmed the order. Freeze the plan (a WS close event can null this.plan
+      // once the state machine leaves ENTRY_STAGED) and enter IN_TRADE BEFORE any
+      // Telegram/DB/REST bookkeeping. An SL hit inside the reconciliation window must be
+      // visible to handleExecutionPayload/handlePositionPayload (both require IN_TRADE).
+      orderLive = true;
+      liveOrderId = result.orderId;
+      const livePlan = this.plan;
+      livePlanRef = livePlan;
+
+      // Burn the trigger structure immediately on entry (in-memory, zero latency).
+      if (livePlan.structureDetails && livePlan.structureDetails.timestamp) {
+        this.mitigatedStructures.push({
+          type: (livePlan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+          timestamp: livePlan.structureDetails.timestamp,
+          price: livePlan.structureDetails.price?.toString() || livePlan.entryPrice.toString(),
+          direction: livePlan.structureDetails.direction || (livePlan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
+        });
+        if (this.mitigatedStructures.length > 100) {
+          this.mitigatedStructures = this.mitigatedStructures.slice(-100);
+        }
+        logger.info(`[${this.symbol}] Trigger structure burned on entry (timestamp=${livePlan.structureDetails.timestamp})`);
+      }
+
+      this.transition(StrategyState.IN_TRADE);
+
       // Fetch actual entry price from exchange to handle slippage (Market orders) or limit fills
-      let actualEntryPrice = this.plan.entryPrice;
+      let actualEntryPrice = livePlan.entryPrice;
       try {
         await new Promise(resolve => setTimeout(resolve, 500));
         const positions = await this.deps.client.getOpenPositions(this.symbol);
@@ -1007,7 +1076,7 @@ export class StrategyEngine {
           const pos = positions[0];
           if (pos.avgPrice && pos.avgPrice.gt(0)) {
             actualEntryPrice = pos.avgPrice.toString();
-            logger.info(`[${this.symbol}] Actual entry price from exchange: ${actualEntryPrice} (planned: ${this.plan.entryPrice})`);
+            logger.info(`[${this.symbol}] Actual entry price from exchange: ${actualEntryPrice} (planned: ${livePlan.entryPrice})`);
           }
         }
       } catch (e) {
@@ -1017,47 +1086,219 @@ export class StrategyEngine {
       await this.deps.db.openTrade({
         id: result.orderId,
         symbol: this.symbol,
-        scenario_id: this.plan.scenarioId ?? null,
+        scenario_id: livePlan.scenarioId ?? null,
         entry_price: actualEntryPrice,
-        sl_price: this.plan.stopLoss,
-        tp_price: this.plan.takeProfit,
-        qty: this.plan.qty,
-        reason: `Scenario ${this.plan.scenarioId ?? 'N/A'}`,
+        sl_price: livePlan.stopLoss,
+        tp_price: livePlan.takeProfit,
+        qty: livePlan.qty,
+        reason: `Scenario ${livePlan.scenarioId ?? 'N/A'}`,
         opened_at: Date.now(),
-        side: this.plan.side,
-        zone_type: this.plan.zoneDetails?.type ?? null,
-        zone_top: this.plan.zoneDetails?.top?.toString() ?? null,
-        zone_bottom: this.plan.zoneDetails?.bottom?.toString() ?? null,
-        zone_timeframe: this.plan.zoneDetails?.timeframe ?? null,
-        zone_direction: this.plan.zoneDetails?.direction ?? null,
-        zone_timestamp: this.plan.zoneDetails?.timestamp ?? null,
-        order_type: this.plan.orderType,
-        limit_price: this.plan.limitPrice,
+        side: livePlan.side,
+        zone_type: livePlan.zoneDetails?.type ?? null,
+        zone_top: livePlan.zoneDetails?.top?.toString() ?? null,
+        zone_bottom: livePlan.zoneDetails?.bottom?.toString() ?? null,
+        zone_timeframe: livePlan.zoneDetails?.timeframe ?? null,
+        zone_direction: livePlan.zoneDetails?.direction ?? null,
+        zone_timestamp: livePlan.zoneDetails?.timestamp ?? null,
+        order_type: livePlan.orderType,
+        limit_price: livePlan.limitPrice,
         order_id: result.orderId,
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
-      if (this.plan.structureDetails && this.plan.structureDetails.timestamp) {
-        this.mitigatedStructures.push({
-          type: (this.plan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
-          timestamp: this.plan.structureDetails.timestamp,
-          price: this.plan.structureDetails.price?.toString() || this.plan.entryPrice.toString(),
-          direction: this.plan.structureDetails.direction || (this.plan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
-        });
-        if (this.mitigatedStructures.length > 100) {
-          this.mitigatedStructures = this.mitigatedStructures.slice(-100);
-        }
-        logger.info(`[${this.symbol}] Trigger structure burned on entry (timestamp=${this.plan.structureDetails.timestamp})`);
-      }
-      this.transition(StrategyState.IN_TRADE);
+      // No second transition: the state machine is already IN_TRADE since the exchange
+      // confirmation. If a WS close event reset it to SCANNING meanwhile, do not clobber it.
 
       // NO notifySetupFound in auto-trading - execution notification is handled by ExecutionEngine
     } catch (error) {
+      if (orderLive) {
+        // The order is already live on the exchange. Resetting to SCANNING here would
+        // orphan the position (Reconciliation only audits IN_TRADE engines and DB rows),
+        // and burnSetup would incorrectly mark a genuinely traded setup as aborted.
+        logger.error(
+          `[${this.symbol}] CRITICAL: order is live on the exchange but post-execution bookkeeping failed: ${error instanceof Error ? error.message : String(error)}. Attempting emergency flat close.`,
+        );
+
+        // PANIC CLOSE: flatten the orphan so no unmanaged exposure survives the failure.
+        // A reset to SCANNING is allowed only after the exchange is verified flat.
+        const flattened = await this.panicCloseOrphan(liveOrderId, livePlanRef?.orderType ?? 'Market');
+
+        if (flattened) {
+          logger.error(
+            `[${this.symbol}] CRITICAL DB FAILURE: orphan exposure verified flat. Burning setup and resetting to SCANNING.`,
+          );
+          const recoveryPlan = livePlanRef ?? this.plan;
+          if (recoveryPlan) {
+            this.burnSetup(recoveryPlan);
+          }
+          this.plan = null;
+          this.transition(StrategyState.SCANNING);
+          return;
+        }
+
+        // Exposure could not be verified flat. Keep the engine under state-machine
+        // supervision (Invariant 23): resetting to SCANNING would recreate the zombie.
+        logger.error(
+          `[${this.symbol}] CRITICAL: emergency flat close FAILED. Engine remains ${this.state}; manual intervention required.`,
+        );
+        if (this.state !== StrategyState.IN_TRADE) {
+          this.transition(StrategyState.IN_TRADE);
+        }
+        return;
+      }
       logger.error(`[${this.symbol}] Exception during auto-trading execution: ${error instanceof Error ? error.message : String(error)}. Burning setup.`);
       if (this.plan) {
         this.burnSetup(this.plan);
       }
       this.plan = null;
       this.transition(StrategyState.SCANNING);
+    }
+  }
+
+  /**
+   * Emergency flat close for an order that reached the exchange but whose DB record
+   * could not be written ("zombie position"). Cancels a still-resting limit order
+   * first, then flattens any filled position with a reduce-only market order.
+   *
+   * Returns true ONLY when the exchange is verified flat and no live order remains.
+   * A false result means exposure may still exist — the caller MUST keep the engine
+   * IN_TRADE so Reconciliation and manual supervision can see it (Invariant 23).
+   */
+  private async panicCloseOrphan(
+    orderId: string | null,
+    orderType: 'Market' | 'Limit' = 'Market',
+  ): Promise<boolean> {
+    try {
+      // 1. Cancel a resting LIMIT order first so a partially filled order cannot keep filling.
+      // Market orders are IOC and can never rest, so they skip this REST round-trip entirely.
+      let orderCancelled = true;
+      let cancelledOrder = false;
+      if (orderType === 'Limit') {
+        if (orderId) {
+          try {
+            const openOrders = await this.deps.client.getOpenOrders(this.symbol);
+            const liveOrder = openOrders.find(
+              (order) =>
+                order.orderId === orderId &&
+                (order.status === 'New' || order.status === 'PartiallyFilled'),
+            );
+            if (liveOrder) {
+              await this.deps.client.cancelOrder(this.symbol, orderId);
+              cancelledOrder = true;
+              logger.error(
+                `[${this.symbol}] PANIC CANCEL: cancelled live ${liveOrder.orderType} order ${orderId} (status=${liveOrder.status}).`,
+              );
+            }
+          } catch (cancelError) {
+            orderCancelled = false;
+            logger.error(
+              `[${this.symbol}] PANIC CANCEL failed for order ${orderId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
+            );
+          }
+        } else {
+          orderCancelled = false;
+        }
+      }
+
+      // 2. Flatten any filled exposure with a reduce-only market order.
+      const positions = await this.deps.client.getOpenPositions(this.symbol);
+      const openPosition = positions.find(
+        (position) => position.symbol === this.symbol && position.size.gt(0),
+      );
+
+      if (openPosition) {
+        const closeSide: 'Buy' | 'Sell' = openPosition.side === 'Buy' ? 'Sell' : 'Buy';
+        const qty = formatQuantity(
+          openPosition.size,
+          new Decimal(this.deps.instrument.qtyStep),
+        );
+        if (new Decimal(qty).lte(0)) {
+          logger.error(
+            `[${this.symbol}] PANIC CLOSE aborted: formatted qty is zero (size=${openPosition.size.toString()}, qtyStep=${this.deps.instrument.qtyStep}).`,
+          );
+          await this.notifyCriticalSafe(
+            'CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close FAILED (qty below instrument step) — manual intervention required.',
+          );
+          return false;
+        }
+
+        const orderLinkId = `${this.symbol}_panic_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const closeOrderId = await this.deps.client.placeReduceOnlyMarketOrder({
+          symbol: this.symbol,
+          side: closeSide,
+          qty,
+          orderLinkId,
+        });
+        logger.error(
+          `[${this.symbol}] PANIC CLOSE submitted: reduce-only ${closeSide} qty=${qty} orderId=${closeOrderId}`,
+        );
+
+        const flat = await this.isExchangeFlat();
+        if (!flat) {
+          logger.error(
+            `[${this.symbol}] PANIC CLOSE submitted but the position is still open on the exchange.`,
+          );
+          await this.notifyCriticalSafe(
+            'CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close submitted but position is still open — manual intervention required.',
+          );
+          return false;
+        }
+
+        await this.notifyCriticalSafe(
+          'CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close executed.',
+        );
+        return orderCancelled;
+      }
+
+      // 3. No position: either the order was an unfilled limit (now cancelled) or the
+      // exchange is already flat (SL/TP fired before bookkeeping completed).
+      if (!orderCancelled) {
+        await this.notifyCriticalSafe(
+          'CRITICAL DB FAILURE: Could not verify/cancel the orphaned exchange order. Manual intervention required.',
+        );
+        return false;
+      }
+
+      if (cancelledOrder) {
+        await this.notifyCriticalSafe(
+          'CRITICAL DB FAILURE: Orphan LIMIT order detected. Emergency Order Cancel executed.',
+        );
+      } else {
+        await this.notifyCriticalSafe(
+          'CRITICAL DB FAILURE: DB record missing, but the exchange is flat. No emergency order required.',
+        );
+      }
+      return true;
+    } catch (panicError) {
+      logger.error(
+        `[${this.symbol}] CRITICAL: emergency orphan close failed: ${panicError instanceof Error ? panicError.message : String(panicError)}`,
+      );
+      await this.notifyCriticalSafe(
+        `CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close FAILED — manual intervention required. (${panicError instanceof Error ? panicError.message : String(panicError)})`,
+      );
+      return false;
+    }
+  }
+
+  /** Verify the exchange reports no open position for this symbol (bounded polling). */
+  private async isExchangeFlat(): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const positions = await this.deps.client.getOpenPositions(this.symbol);
+      if (!positions.some((position) => position.symbol === this.symbol && position.size.gt(0))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Critical alert delivery that can never break the recovery path. */
+  private async notifyCriticalSafe(message: string): Promise<void> {
+    try {
+      await this.deps.notifier.notifyCriticalError(message);
+    } catch (error) {
+      logger.error(
+        `[${this.symbol}] Failed to deliver critical alert: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

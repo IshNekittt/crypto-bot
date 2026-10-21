@@ -423,9 +423,47 @@ maxWorkingCapital: 0,
       manager.cancelAll();
     });
 
+    it('should return Market order when livePrice is a DISCOUNT beyond the threshold (Long)', async () => {
+      // idealEntry=100, currentPrice=99.50 → better than entry (discount) even though
+      // the deviation (0.5%) exceeds the 0.15% threshold. A Limit at 100 would be
+      // marketable on arrival and fill at a different price than planned.
+      const manager = createManagerWithPrice('99.50');
+
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10', undefined, undefined, '0.01'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
+    it('should return Market order when livePrice is a DISCOUNT beyond the threshold (Short)', async () => {
+      // For a Short a better price is HIGHER than idealEntry: 100.50 vs 100.
+      const manager = createManagerWithPrice('100.50');
+
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '101', '97', 1, 'Test', 'Sell', '10', undefined, undefined, '0.01'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
     it('should use idealEntry as limitPrice for Limit orders', async () => {
-      const manager = createManagerWithPrice('100.50'); // Far from ideal entry
-      
+      // Premium (not a discount): price 0.2% ABOVE ideal entry for a Long.
+      // A discount would legitimately force a Market order (Discount Trap fix).
+      const manager = createManagerWithPrice('50100');
+
       const promise = manager.queueTrade(
         'BTCUSDT', '50000', '49900', '50300', 1, 'Test', 'Buy', '0.1', undefined, undefined, '0.00000001'
       );
@@ -438,6 +476,52 @@ maxWorkingCapital: 0,
       expect(result.limitPrice).toBe('50000.00000000'); // idealEntry used as limit price
       await expect(promise).resolves.toBe(true);
       manager.cancelAll();
+    });
+  });
+
+  describe('Manual Slippage Guard parity (0.2% toward TP)', () => {
+    const createManagerWithThreshold = (currentPrice: string, threshold: string) => {
+      const mgr = new PendingTradeManager(mockNotifier, 5, {
+        ...mockConfig,
+        smartEntryThresholdPct: threshold,
+      });
+      mgr.setPriceProvider(() => currentPrice);
+      return mgr;
+    };
+
+    it('rejects a Market approval when price already moved > 0.2% toward TP (Long)', async () => {
+      // Threshold widened to 0.5% so the order type resolves to Market; the 0.2% guard must still reject.
+      const mgr = createManagerWithThreshold('100.30', '0.005');
+
+      const promise = mgr.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10'
+      );
+
+      const tradeId = Array.from((mgr as any).pendingTrades.keys())[0] as string;
+      const result = mgr.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(false);
+      expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(false);
+      expect(mgr.getPendingCount()).toBe(0);
+      mgr.cancelAll();
+    });
+
+    it('rejects a Market approval when price already moved > 0.2% toward TP (Short)', async () => {
+      const mgr = createManagerWithThreshold('99.70', '0.005');
+
+      const promise = mgr.queueTrade(
+        'SOLUSDT', '100', '101', '97', 1, 'Test', 'Sell', '10'
+      );
+
+      const tradeId = Array.from((mgr as any).pendingTrades.keys())[0] as string;
+      const result = mgr.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(false);
+      expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(false);
+      expect(mgr.getPendingCount()).toBe(0);
+      mgr.cancelAll();
     });
   });
 });

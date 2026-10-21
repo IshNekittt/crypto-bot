@@ -479,6 +479,37 @@ const slBreached = isLong
 
 The buffer creates a safety margin between the live price and the SL, preventing rejections due to order book spread. The default 0.05% is conservative for liquid pairs; adjust via `PREFLIGHT_BUFFER_PCT` in `.env` for less liquid markets.
 
+### 4.4.3 Directional Slippage Guard — Manual Path — **NEW v2026-10-21**
+
+**Problem**: The manual approval path could diverge from `executeStagedEntry()` — a guard built on absolute deviation (`|current − entry|`) rejects *favorable* movement (the Discount Trap) and misreads adverse movement as progress. Parity with the auto path is mandatory: both must measure movement **toward TP only**.
+
+**Solution** (`src/engine/pendingTradeManager.ts:handleApproval`): after the Market/Limit decision is computed (`isDiscount || priceDiffPct <= smartThreshold`), the guard runs **only when `useMarketOrder` is true** (Limit orders wait for a pullback by design — Invariant 38) and uses a signed vector:
+
+```typescript
+const plannedEntry = new Decimal(pending.entry);
+if (useMarketOrder && plannedEntry.gt(0)) {
+  const movedTowardTp = isLong
+    ? currentPrice.minus(plannedEntry)
+    : plannedEntry.minus(currentPrice);
+
+  if (movedTowardTp.gt(0)) {
+    const deviationPct = movedTowardTp.div(plannedEntry);
+    if (deviationPct.gt(new Decimal('0.002'))) {
+      // > 0.2% toward TP → delete pending, resolve(false), reject
+    }
+  }
+}
+```
+
+**Rules**:
+1. **Vector, not magnitude** — `movedTowardTp.gt(0)` gates the check. A discount yields a negative vector and is never rejected (Invariant 37).
+2. **`Math.abs()` / `.abs()` is FORBIDDEN** for this guard. An absolute value cannot distinguish "price ran to TP" (bad R:R) from "price gave a better entry" (desirable).
+3. **Limit orders bypass the guard** (Invariant 38). Pre-flight SL/TP checks remain unconditional for all order types.
+4. **Denominator** is `pending.entry`; the Market/Limit decision divides by `idealEntry`. They coincide today because `queueForApproval()` passes `result.levels.entry` as both `entry` and `idealEntry` — any future divergence must be a deliberate, tested decision.
+5. Threshold `0.002` (0.2%) is duplicated in the auto path; changing one without the other breaks parity.
+
+**Invariant**: Manual and auto slippage protection MUST share identical semantics — directional, Market-only, 0.2% of the planned entry.
+
 ---
 
 ### 4.6 Telegram Localization & Notification Hygiene — **NEW v2026-10-13** (Updated v2026-10-16)
@@ -896,7 +927,39 @@ await this.deps.db.openTrade({
 
 **Invariant**: Database `entry_price` MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. This ensures Adaptive Fractioning's trailing stop math is accurate.
 
+> **Manual path sync (v2026-10-20)**: `handleTradeApproval()` now mirrors this flow exactly — `transition(IN_TRADE)` immediately after exchange confirmation, then 500 ms wait → `getOpenPositions()` → `db.openTrade({ entry_price: actualEntryPrice })`. A post-fill `db.openTrade` failure triggers `panicCloseOrphan()`: the engine burns the setup and returns to `SCANNING` ONLY after the exchange is verified flat, otherwise it stays `IN_TRADE` (Invariants 23 / 47 / 49).
+
+### 5.12 Panic Close & Strict Recovery State — **NEW v2026-10-21**
+
+**Problem**: After `executionEngine.execute()` confirms the order, a `db.openTrade()` failure leaves a live position with no database row. A blind reset to `SCANNING` would orphan that exposure — Reconciliation Step 1 only audits engines in `IN_TRADE`, and `checkAndManagePosition()` reads `db.getOpenTrade()` (no row → no management). The position would survive unmanaged and invisible to Adaptive Fractioning.
+
+**Solution**: `executeStagedEntry()` freezes the live plan (`orderLive`, `liveOrderId`, `livePlanRef`) immediately after exchange confirmation. Any subsequent exception enters the panic branch and calls:
+
+```typescript
+const flattened = await this.panicCloseOrphan(liveOrderId, livePlanRef?.orderType ?? 'Market');
+```
+
+`panicCloseOrphan(orderId, orderType)` (`src/engine/strategyEngine.ts`) executes a strict, ordered recovery:
+
+1. **Cancel the resting order first** (`orderType === 'Limit'` only): `getOpenOrders()` → match `orderId` with status `New`/`PartiallyFilled` → `cancelOrder()`. Market orders are IOC and skip this round-trip. Failure to cancel sets `orderCancelled = false`.
+2. **Flatten any filled exposure**: `getOpenPositions()` → if `size > 0`, compute the opposite `closeSide`, format size via `formatQuantity(size, qtyStep)`, and submit `placeReduceOnlyMarketOrder()`. A formatted qty of zero aborts with a critical alert.
+3. **Verify flatness**: `isExchangeFlat()` polls `getOpenPositions()` up to 3 × 500 ms. A still-open position returns `false` with a critical alert.
+4. **Return contract**: `true` ONLY when the exchange is verified flat AND no live order remains. `false` means exposure may still exist.
+
+**State rule** (`executeStagedEntry` catch block):
+
+| Panic result | State machine action |
+|--------------|---------------------|
+| `true` (verified flat) | `burnSetup(recoveryPlan)` → `plan = null` → `transition(SCANNING)` |
+| `false` (unverified exposure) | Log `CRITICAL`, force `IN_TRADE` if the state drifted, `return` — **never** `SCANNING`, never `burnSetup()` |
+
+**Invariant**: Transitioning to `SCANNING` while an unverified/uncontrolled position exists is **strictly forbidden**. Staying `IN_TRADE` keeps the exposure under Reconciliation supervision — the only mechanism that can later adopt or close it. A live `Limit` order with a null `orderId` conservatively returns `false` (cannot prove the order is gone), so the engine deliberately remains `IN_TRADE`.
+
+> **Operational consequence**: when the panic close cannot be verified, the surviving position may have no `trades` row (the very write that failed). `checkAndManagePosition()` will no-op until Reconciliation adoption or manual intervention — which is precisely why the engine must not pretend the episode ended.
+
 ---
+
+## 6. ADAPTIVE FRACTING — DYNAMIC POSITION MANAGEMENT
 
 **Problem**: Static position management (fixed SL/TP) leaves profit on the table in trending markets and exposes full risk in choppy markets.
 
@@ -1461,6 +1524,20 @@ interface MitigatedStructure {
 
 **Result**: Scenario 12 on SOLUSDT — the rapid-fire 2-minute re-entries after TP are eliminated. The CHoCH is marked as "used" immediately at trade open and after first trade close.
 
+#### 7.13.1 Sweep → CHoCH Causality & Spatial Proximity — **NEW v2026-10-20**
+
+**Problem**: The sweep scan returned only a boolean, so a CHoCH that formed *before* the macro sweep could trigger a Sniper entry (causality inversion). Scenario 12 also accepted a 1m CHoCH/OB that formed far from the swept level, producing entries disconnected from the liquidity that justified the setup. Finally, it emitted a fake zero-width `MITIGATION` zone at the macro level, letting `burnSetup()` add PDH/PDL/PWH/PWL to `mitigatedZones` — a direct Invariant 21 violation.
+
+**Implementation** (`src/engine/scenarios/Scenario12_SniperTouch.ts`):
+
+1. **Latest-sweep causality anchor**: For each macro level, scan the 50-minute lookback newest → oldest; the first hit is that level's most recent sweep. Across all four levels, keep the greatest timestamp as `sweptAt`.
+2. **Strict causality**: `recentStructures` requires `s.timestamp > sweptAt` — a CHoCH on or before the sweep candle is rejected.
+3. **Spatial proximity (midpoint-based)**: `tolerance = max(atr15m, sweptPrice × 0.003)`; `obMidpoint = (OB.top + OB.bottom) / 2`; `distance = |obMidpoint − sweptPrice|`. Reject if `distance > tolerance`. **The measurement is STRICTLY from the Order Block midpoint, never from its edges** (Invariant 51) — a wide OB can straddle the level while its midpoint sits far away, so nearest-edge distance would approve disconnected entries. The CHoCH close distance is logged for observability but not gated (a strong displacement can close further away while the pullback OB stays at the level).
+4. **No macro-pool burning**: `setZoneDetails()` is not called at all; Scenario 12 emits only `structureDetails` (the 1m CHoCH). Ghost-signal protection is structure-only, satisfying Invariant 21.
+5. **Dead code removed**: `detectStructureBreaksAndOBs` → `detectStructureBreaks` (returns `Structure[]`); the unused OB extraction is gone. The fallback OB uses raw `Decimal` percentages (`0.1%`), never `toFixed()`.
+
+**Tests**: `tests/scenarios/scenario12_sniper_touch.test.ts` covers valid entry, causality rejection, ATR/percentage proximity rejection, CHoCH-near/OB-far rejection, and mitigated-structure rejection.
+
 ---
 
 ### 7.14 Backup Service CSV Export — **NEW v2026-10-01**
@@ -1826,7 +1903,7 @@ ENFORCE_KILLZONES=false              # bypass London/NY killzone gates
 | **9**  | Turtle Soup         | Range High sweep (EQH) → short                             | EQH tolerance + SFP on range boundary                                         |
 | **10** | Breaker Block       | OB broken with displacement → retest                       | Body close beyond OB + FVG nearby                                             |
 | **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`). **FRESHNESS**: Always takes newest SMS (`smsList[smsList.length-1]`), newest CHoCH after SMS (`validChochs[validChochs.length-1]`), newest OB before SMS (`mbObs[mbObs.length-1]`). **RETEST**: Current 15m candle must test MB zone with wicks, close inside zone in trade direction, within 12h of CHoCH. **P/D**: Entry close tested against SMS→CHoCH impulse equilibrium (Long=Discount, Short=Premium). |
-| **12** | Sniper Touch        | 1m CHoCH inside 15m macro zone (PDH/PDL/PWH/PWL)           | Killzone (London/NY) + Sweep validation + 1m CHoCH + 1m OB entry              |
+| **12** | Sniper Touch        | 1m CHoCH inside 15m macro zone (PDH/PDL/PWH/PWL)           | Killzone (London/NY) + latest-sweep causality + proximity (1 ATR/0.3%) + 1m CHoCH + 1m OB entry |
 
 ### 8.1 Scenario Overview
 
@@ -2077,7 +2154,7 @@ docker compose up -d
 
 22. **DB Pool Safety** — All DB calls MUST use `const client = await pool.connect(); try {...} finally { client.release(); }`. Connection leaks are forbidden. Every method in `PostgresDatabase` follows this pattern.
 
-23. **Execution Fail-Fast** — On ANY error in `executionEngine.execute()` or `db.openTrade()`, the bot MUST call `burnSetup()` (to prevent spam cycles) and transition to `SCANNING` in a `finally` block — state machine must never stall in `IN_TRADE`. **Applies to BOTH manual approval (`handleTradeApproval`) and auto-trading (`executeStagedEntry`) paths.**
+23. **Execution Fail-Fast vs. Post-Fill Orphan Guard** — Before the exchange confirms an order, ANY error in `executionEngine.execute()` MUST call `burnSetup()` and transition to `SCANNING` (no ghost retry loops). After the exchange confirms the order, the bot MUST NOT reset to `SCANNING` or call `burnSetup()` — even if `db.openTrade()` fails — because the position is already live on the exchange and such a reset orphans it (Reconciliation only audits `IN_TRADE` engines and DB open trades). Post-fill bookkeeping failures are logged as `CRITICAL`, and the engine MUST run `panicCloseOrphan()` instead of a blind reset: `SCANNING` (plus `burnSetup()`) is reachable ONLY after the exchange is verified flat. If the emergency close fails or flatness cannot be verified, the engine remains `IN_TRADE` (Invariant 49). **Applies to BOTH manual approval (`handleTradeApproval`) and auto-trading (`executeStagedEntry`) paths.**
 
 24. **Pre-flight Slippage Guard** — Before sending order to exchange, bot MUST fetch `getLivePrice()`. If live price has crossed SL during approval wait, setup is marked DEAD, burned, and cancelled. No order is sent. **Enforced in BOTH `handleTradeApproval()` (manual) and `executeStagedEntry()` (auto-trading).**
 
@@ -2099,7 +2176,7 @@ docker compose up -d
 
 33. **`positionIdx: 0` Mandatory for TP/SL Orders** — Every `submitOrder()` call with `tpslMode: 'Full'` MUST explicitly include `positionIdx: 0` for One-Way Mode. Omission causes order rejection or TP/SL attachment failure on Bybit V5.
 
-34. **No Assumed Fill** — Database entry price MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. After `executionEngine.execute()`, bot MUST wait 500ms, fetch `getOpenPositions()`, and use `avgPrice` for `db.openTrade()`.
+34. **No Assumed Fill** — Database entry price MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. After `executionEngine.execute()`, bot MUST wait 500ms, fetch `getOpenPositions()`, and use `avgPrice` for `db.openTrade()`. **Enforced in BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) — the manual path previously wrote `updatedPlan.entryPrice`.**
 
 35. **Dual-Channel Closure Detection** — The engine MUST monitor BOTH `Position` and `Execution` WS topics to reliably detect position closures. Relying solely on `Position` channel will miss SL/TP closures.
 
@@ -2124,6 +2201,18 @@ docker compose up -d
 45. **Edge-Triggered Degradation Alerts** — REST (`isApiDegraded`) and WS (`isWsDegraded`) degradation flags are set on failure (retry exhaustion / watchdog timeout) and cleared on the first success (REST call success / resync success). Degradation is logged once per episode; recovery sends exactly one green alert per episode.
 
 46. **Backtest Chunk Retry Guard** — Backtest history pagination MUST retry each chunk up to 8 attempts with a 3 s pause (`[WARN] Fetch chunk failed, retrying...`). A permanently failing chunk MUST NOT crash the backtest — pagination stops, partial history is kept, and an empty result MUST NOT overwrite the cache file.
+
+47. **Post-Fill Transition Precedes Bookkeeping** — Immediately after `executionEngine.execute()` returns `{ ok: true }` (and the trigger structure is burned in memory), the engine MUST `transition(IN_TRADE)` BEFORE the 500 ms wait, `getOpenPositions()` and `db.openTrade()`. Both WS closure handlers (`handleExecutionPayload`, `handlePositionPayload`) ignore every event unless `state === IN_TRADE`, so a fill during the bookkeeping window would otherwise be invisible. There MUST be no second `transition(IN_TRADE)` after the DB write — a WS close event may have reset the state to `SCANNING`, and that reset must never be clobbered.
+
+48. **Backtest Entry Gate Accepts zoneDetails OR structureDetails** — The backtester MUST commit a trade when `levels` exist AND (`zoneDetails` OR `structureDetails`) is present. Scenarios that intentionally omit `zoneDetails` (Scenario 9 Turtle Soup) carry their burn anchor in `structureDetails`; gating on `zoneDetails` alone silently excluded them from backtests while they trade live.
+
+49. **Panic Close & Strict Recovery State** — If `db.openTrade()` fails AFTER the exchange confirms the order, the engine MUST invoke `panicCloseOrphan(orderId, orderType)` (cancel resting Limit order + reduce-only Market flatten + flatness verification). It may `burnSetup()` and return to `SCANNING` ONLY after the exchange is verified flat (`true`). If the emergency close fails or flatness cannot be verified (`false`), the engine MUST remain `IN_TRADE` — an unverified position is never abandoned by a state reset, so Reconciliation and manual supervision can still see it. **Transition to `SCANNING` while an uncontrolled position exists is strictly forbidden.** See §5.12.
+
+50. **Copy-on-Write for the Pattern Cache** — `ScenarioRouter.evaluate()` MUST NEVER mutate the cached `patternData` in place. `filterMitigatedStructures()` / `filterMitigatedZones()` are applied ONLY to shallow copies (`[...baseStructures]`, `[...baseZones]`), and the result is assembled into a new `evaluationData` object (`{ ...basePd, zones: safeZones, structures: safeStructures }`). The backtester reuses one `PatternData` object across every 1m iteration — in-place filtering would permanently strip structures/zones from the cache until the next LTF rebuild, destroying historical context and changing later results. See Anti-Pattern 16.45.
+
+51. **Sniper Midpoint Proximity** — In Scenario 12 (Sniper Touch), the spatial gap between the swept macro level and the entry Order Block MUST be measured from the **OB midpoint** (`(top + bottom) / 2`), never from `top`/`bottom` edges: `obDistance = |obMidpoint − sweptPrice|`, `tolerance = max(atr15m, sweptPrice × 0.003)`. Nearest-edge distance is forbidden — a wide OB can straddle the level while its midpoint is far away, producing entries disconnected from the swept liquidity. The same midpoint is the entry anchor (`idealEntry`). The CHoCH close distance is logging-only and MUST NOT gate the setup.
+
+52. **Directional Slippage Guard** — The >0.2% slippage guard MUST be vectorial: `movedTowardTp = isLong ? currentPrice − plannedEntry : plannedEntry − currentPrice`, gated by `movedTowardTp.gt(0)`. `Math.abs()` / `.abs()` is **FORBIDDEN** here — an absolute deviation would reject favorable discounts (Discount Trap) and cannot distinguish adverse movement from progress. The guard applies to Market orders only (Limit orders wait for a pullback — Invariant 38) and MUST be semantically identical in the manual (`pendingTradeManager.handleApproval`) and auto (`executeStagedEntry`) paths. See §4.4.3.
 
 ---
 
@@ -2653,6 +2742,30 @@ const useMarket = isDiscount || priceDiffPct.lte(threshold);
 
 **Rule**: All backtest loaders MUST share the window produced by `config.backtestDays`. No hardcoded day counts anywhere in the backtester. Covered by `tests/backtestRange.test.ts`.
 
+### 16.45 ❌ FORBIDDEN: In-place mutation of cached `patternData` arrays inside `ScenarioRouter.evaluate()`
+
+**Root Cause**: The router receives a `PatternData` object that may be pre-computed and **shared** — the backtester builds it once per LTF close and reuses the same reference across every 1m iteration. Filtering with a mutating call (`patternData.structures = ...`, `splice()`, `sort()`, or a filter helper that writes back into the input) permanently removes mitigated structures/zones from the cache. From that candle onward the scenarios see a progressively hollowed-out market context, and results depend on iteration order — a silent, non-reproducible backtest corruption.
+
+**Fix**: `evaluate()` reads the arrays defensively and filters **shallow copies only**, then assembles a new object:
+
+```typescript
+const baseStructures = Array.isArray(basePd.structures) ? basePd.structures : [];
+const baseZones = Array.isArray(basePd.zones) ? basePd.zones : [];
+const safeStructures = this.filterMitigatedStructures([...baseStructures], mitigatedStructures);
+const safeZones = this.filterMitigatedZones([...baseZones], mitigatedZones);
+
+const evaluationData: PatternData = {
+  ...basePd,
+  zones: safeZones,
+  structures: safeStructures,
+  candles1m,
+  mitigatedZones,
+  mitigatedStructures,
+};
+```
+
+**Rule**: `ScenarioRouter.evaluate()` is a **read-only consumer** of `patternData`. Filtering MUST target copies (`[...arr]`) and the scenarios MUST receive a freshly assembled `evaluationData` object. Mutating the cached arrays — even to "save allocations" — is FORBIDDEN (Invariant 50). `mitigatedZones` / `mitigatedStructures` are also passed by reference: scenarios must never mutate them either.
+
 ---
 
-_Last updated: 2026-10-20. All 285 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-21. All 296 tests green. Build passes. Enterprise-ready._

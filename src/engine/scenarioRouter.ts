@@ -122,40 +122,37 @@ async evaluate(
     }
 
     try {
-      // Inject fresh mitigated state to prevent stale cache bugs in 1m loop
-      // This must be done BEFORE any patternData processing to ensure fresh state
-      if (patternData) {
-        patternData.mitigatedZones = mitigatedZones;
-        patternData.mitigatedStructures = mitigatedStructures;
-        if (candles1m) patternData.candles1m = candles1m;
-      }
-
       // Use pre-computed PatternData or build it (for backward compatibility / live mode)
-      let pd: PatternData;
-      if (patternData) {
-        pd = patternData;
-        // Attach 1m candles for Sniper Mode scenarios
-        pd.candles1m = candles1m;
-      } else {
-        pd = await this.patternRecognizer.buildPatternData(
-          this.symbol,
-          candles15m,
-          candles4h,
-          currentCandleTimestamp
-        );
-        pd.candles1m = candles1m;
-      }
-      // Attach mitigatedStructures for scenarios that detect their own structures (e.g., Scenario 12)
-      (pd as any).mitigatedStructures = mitigatedStructures;
+      const basePd: PatternData = patternData
+        ? patternData
+        : await this.patternRecognizer.buildPatternData(
+            this.symbol,
+            candles15m,
+            candles4h,
+            currentCandleTimestamp
+          );
 
-      // Filter out mitigated zones from pattern data
-      pd.zones = this.filterMitigatedZones(pd.zones, mitigatedZones);
-      // Filter out mitigated structures from pattern data
-      pd.structures = this.filterMitigatedStructures(pd.structures, mitigatedStructures);
+      // NEVER mutate the cached PatternData: the backtester reuses one object across
+      // 1m iterations, and in-place filtering would permanently strip structures and
+      // zones from the cache until the next 15m rebuild. Filtering is applied to local
+      // copies that are handed to the scenarios instead.
+      const baseStructures = Array.isArray(basePd.structures) ? basePd.structures : [];
+      const baseZones = Array.isArray(basePd.zones) ? basePd.zones : [];
+      const safeStructures = this.filterMitigatedStructures([...baseStructures], mitigatedStructures);
+      const safeZones = this.filterMitigatedZones([...baseZones], mitigatedZones);
+
+      const evaluationData: PatternData = {
+        ...basePd,
+        zones: safeZones,
+        structures: safeStructures,
+        candles1m,
+        mitigatedZones,
+        mitigatedStructures,
+      };
 
       for (const scenario of this.scenarios) {
         try {
-          const matches = scenario.evaluate(pd);
+          const matches = scenario.evaluate(evaluationData);
           
           if (matches) {
             const levels = scenario.getLevels();

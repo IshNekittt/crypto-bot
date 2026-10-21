@@ -186,10 +186,39 @@ export class PendingTradeManager {
         
         // Calculate price difference from idealEntry
         const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
-        const useMarketOrder = priceDiffPct.lte(smartThreshold);
+
+        // Discount Trap fix (mirrors executeStagedEntry): if the live price is BETTER than
+        // the ideal entry (discount), a Limit at idealEntry would be marketable on arrival
+        // and fill at a price different from the planned entry. Force Market in that case.
+        const isDiscount = isLong ? currentPrice.lte(idealEntry) : currentPrice.gte(idealEntry);
+        const useMarketOrder = isDiscount || priceDiffPct.lte(smartThreshold);
         
         logger.info(`[Dynamic Approval] ${tradeId}: idealEntry=${idealEntry.toFixed(4)} currentPrice=${currentPriceStr} diff=${priceDiffPct.mul(100).toFixed(4)}% threshold=${smartThreshold.mul(100).toFixed(2)}% -> ${useMarketOrder ? 'Market' : 'Limit'}`);
-        
+
+        // Manual-path Slippage Guard parity with executeStagedEntry (BUG B4).
+        // Directional movement toward TP — NEVER an absolute deviation: a discount
+        // (better than ideal entry) must never be rejected (Discount Trap, Invariant 37).
+        // Market orders only: Limit orders wait for a pullback by design (Invariant 38).
+        const plannedEntry = new Decimal(pending.entry);
+        if (useMarketOrder && plannedEntry.gt(0)) {
+          const movedTowardTp = isLong
+            ? currentPrice.minus(plannedEntry)
+            : plannedEntry.minus(currentPrice);
+
+          if (movedTowardTp.gt(0)) {
+            const deviationPct = movedTowardTp.div(plannedEntry);
+            if (deviationPct.gt(new Decimal('0.002'))) {
+              logger.warn(
+                `[Slippage Guard] ${tradeId}: price moved ${deviationPct.mul(100).toFixed(3)}% toward TP (> 0.2%), rejecting`,
+              );
+              clearTimeout(pending.timeoutHandle);
+              this.pendingTrades.delete(tradeId);
+              pending.resolve(false);
+              return { approved: false, orderType: 'Market' };
+            }
+          }
+        }
+
         if (!useMarketOrder) {
           // Use Limit order at idealEntry
           clearTimeout(pending.timeoutHandle);

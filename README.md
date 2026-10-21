@@ -7,7 +7,7 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-285%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Tests](https://img.shields.io/badge/Tests-296%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 [![Version](https://img.shields.io/badge/Version-v2026--10--20-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
@@ -25,6 +25,8 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 **v2026-10-20**: The HTML backtest artifact now includes an **interactive TradingView Lightweight Charts panel** below the equity curve — OHLC candles with every trade's entry (arrow) and exit (TP/SL circle) overlaid as markers. Candles are fed from the same `candlesLtf` array the simulation ran on, so price action and trades are always in sync.
 
+**v2026-10-20 (reliability)**: Eliminated the **Post-Fill Blind Window** — both entry paths now transition to `IN_TRADE` immediately after the exchange confirms the order, before the 500 ms `avgPrice` fetch, the DB write and any Telegram round-trip, so an SL/TP fill inside that window is visible to the WS closure handlers. Telegram `notifyOrderOpened` is fire-and-forget, and a post-fill `db.openTrade()` failure keeps the live position tracked (`CRITICAL` log + Reconciliation adoption — never an orphaned reset). Manual approvals now apply the **Discount Trap** rule and write the exchange's real `avgPrice`; the backtester's entry gate accepts `zoneDetails` **or** `structureDetails`, so Scenario 9 (Turtle Soup) is no longer silently excluded from simulations.
+
 </div>
 
 ---
@@ -35,8 +37,9 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **12 SMC Scenarios**        | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block, **Sniper Touch (1m)** |
 | **🎯 V5 Sniper Mode**       | **Two-loop execution**: Radar (15m/4H) finds macro POI → Sniper (1m) waits for CHoCH inside zone → Smart Pullback entry (Market/Limit)                                 |
-| **📊 Dynamic Approval**     | **Market vs Limit decided at approval time**: compares live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%)                  |
+| **📊 Dynamic Approval**     | **Market vs Limit decided at approval time**: live price vs `idealEntry` (zone equilibrium) with `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%); a **discount** (price better than entry) always forces **Market** — a Limit there would be marketable on arrival and break SL geometry |
 | **🛡 Pre-flight SL Check**  | **Validates SL at approval**: If price crossed SL during wait, setup is auto-cancelled — prevents "SL below base_price" Bybit rejection                                |
+| **⚡ Post-Fill Reliability** | **`IN_TRADE` before bookkeeping**: on exchange confirmation both entry paths enter `IN_TRADE` *before* the 500 ms `avgPrice` fetch, DB write and Telegram round-trip; Telegram is fire-and-forget and a post-fill DB failure never orphans the position (CRITICAL log + Reconciliation adoption) |
 | **👻 Ghost Signal Guard**   | **V5 CHoCH mitigation**: 1m CHoCH structures auto-marked "used" at trade open (live) and after trade close — router filters by timestamp only — prevents rapid-fire re-entries on same structure |
 | **⚙️ Adaptive Fractioning** | **Dynamic position management**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — adapts to initial R:R                             |
 | **🧮 Strict Math Side**     | **Side determined by geometry**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — eliminates text-based direction errors and invalid SL levels                            |
@@ -68,22 +71,32 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ```typescript
 const idealEntry = new Decimal(result.levels.entry); // Zone equilibrium (e.g., OB 0.5, FVG 0.5)
-const currentPrice = new Decimal(lastCandle.close); // Signal candle close
+const currentPrice = new Decimal(lastCandle.close); // Re-evaluated at the live tick before execution
 const smartThreshold = new Decimal(config.smartEntryThresholdPct); // 0.0015 = 0.15%
 
 const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
-const useMarketOrder = priceDiffPct.lte(smartThreshold);
+
+// Discount Trap fix: a better-than-ideal price MUST be taken at Market. A Limit at
+// idealEntry would be marketable on arrival and fill at a different price, breaking SL geometry.
+const isLong = idealEntry.gt(new Decimal(result.levels.stopLoss));
+const isDiscount = isLong ? currentPrice.lte(idealEntry) : currentPrice.gte(idealEntry);
+const useMarketOrder = isDiscount || priceDiffPct.lte(smartThreshold);
 
 const orderType = useMarketOrder ? "Market" : "Limit";
-const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
+const limitPrice = useMarketOrder
+  ? null
+  : formatPrice(idealEntry, new Decimal(instrument.tickSize)); // never toFixed()
 ```
 
-| Condition                                            | Order Type       | Price        |
-| ---------------------------------------------------- | ---------------- | ------------ |
-| `\|idealEntry - currentPrice\| / idealEntry ≤ 0.15%` | **Market** (IOC) | —            |
-| `\|idealEntry - currentPrice\| / idealEntry > 0.15%` | **Limit** (GTC)  | `idealEntry` |
+| Condition                                                              | Order Type       | Price        |
+| ---------------------------------------------------------------------- | ---------------- | ------------ |
+| **Discount** — live price better than `idealEntry` (Long ≤ / Short ≥)  | **Market** (IOC) | —            |
+| No discount AND `\|idealEntry - livePrice\| / idealEntry ≤ 0.15%`       | **Market** (IOC) | —            |
+| No discount AND `\|idealEntry - livePrice\| / idealEntry > 0.15%`       | **Limit** (GTC)  | `idealEntry` |
 
 **Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
+
+Both entry paths (`executeStagedEntry()` auto, `handleTradeApproval()` manual) re-evaluate this rule at the **live tick** — the signal-time value is only preliminary, never a pre-commitment.
 
 ### Smart Cancellation — Limit Order Lifecycle
 
@@ -277,6 +290,23 @@ _Update v2026-10-16_: The trigger CHoCH is now burned **on trade open** in both 
 
 ---
 
+### ⚡ Post-Fill Blind Window — Eliminated (v2026-10-20)
+
+**Problem**: After `executionEngine.execute()` returned success, the engine stayed in `ENTRY_STAGED` while it waited 500 ms, fetched `getOpenPositions()` and wrote `db.openTrade()` — with an awaited Telegram notification stacked on top. Bybit can hit SL/TP inside that window, but both WS closure handlers (`handleExecutionPayload`, `handlePositionPayload`) deliberately ignore events unless the state is `IN_TRADE`. A position could therefore be closed while invisible to the bot, leaving the engine stuck until the ReconciliationLoop.
+
+**Fix** — both entry paths (`executeStagedEntry()` auto and `handleTradeApproval()` manual) now:
+
+1. Burn the trigger structure in memory (zero latency, Invariant 39).
+2. `transition(IN_TRADE)` **immediately after the exchange confirmation** — before the 500 ms wait, `getOpenPositions()` and `db.openTrade()`.
+3. Only then fetch the real `avgPrice` and persist the trade record.
+4. **Never transition a second time** — a WS close event may already have reset the state to `SCANNING`, and that reset must not be clobbered.
+
+Telegram `notifyOrderOpened` is fire-and-forget (a send failure is logged, never treated as an order failure). If `db.openTrade()` throws **after** the fill, the engine logs `CRITICAL` and **stays `IN_TRADE`** — it never resets to `SCANNING` and never calls `burnSetup()`, because that would orphan a live position (Reconciliation only audits `IN_TRADE` engines and DB rows). Fail-fast burning is reserved for errors **before** the exchange confirms.
+
+_See [AGENTS.md §5.11, Invariants 23 / 34 / 47](AGENTS.md)._
+
+---
+
 ### Strict Mathematical Side Determination — v2026-10-05
 
 **Problem**: Previously, trade side (`Buy`/`Sell`) was derived from text-based direction fields (`zoneDetails.direction`, `sweepDirection`, `BULLISH`/`BEARISH` strings). This led to fatal errors when the text label disagreed with the actual SL/TP geometry (e.g., "BULLISH" label but SL above entry).
@@ -357,9 +387,11 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 | **Timezone Sanity Check** (Docker + luxon + tzdata)                       | §7.11                |
 | **Same-Candle SL/TP Resolution** (conservative lookahead fix)             | §7.15                |
 | **Cooldown Logic** (only after LOSS, dynamic timeframe)                   | §7.17                |
-| **Scenario 11** (Mitigation Block implementation)                         | §7.24                |
+| **Scenario 11** (Mitigation Block implementation)                         | §8.4                 |
+| **Post-Fill Blind Window** (state before bookkeeping, orphan guard)       | §5.11, §13 (23/34/47) |
+| **Backtest Entry Gate** (`zoneDetails` OR `structureDetails`)             | §13 (48)             |
 | **Database CRUD Audit**                                                   | §9.1                 |
-| **Critical Anti-Patterns** (blood-signed lessons)                         | §14                  |
+| **Critical Anti-Patterns** (blood-signed lessons)                         | §16                  |
 
 ---
 
@@ -367,7 +399,7 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 
 **Problem**: Zone objects (OB, FVG, Breaker, Mitigation) can have arbitrary `top`/`bottom` ordering — not guaranteed `top > bottom`. Naive SL formulas fail when zone is inverted.
 
-**Solution**: Centralized `BaseScenario.calculateLevels()` — single source of truth for all bidirectional scenarios (S1, S5, S6, S10, S11).
+**Solution**: Centralized `BaseScenario.calculateLevels()` — single source of truth for all bidirectional scenarios (S1, S5, S6, S10, S11, S12).
 
 **Evolution v2026-09-20 — Safety Hardening**:
 
@@ -410,7 +442,7 @@ public calculateLevels(
 - **BEARISH (Short)**: `SL > Entry > TP` — always, even if `zone.top < zone.bottom`
 - `Decimal.min/max` handles inverted zones automatically
 - **Offset floor**: `SL` always at least 0.1% from entry (prevents RiskManager division by zero)
-- Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 (all scenarios with zone-based entries)
+- Used by Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12 (all scenarios with zone-based entries)
 - 16 dedicated tests verify geometry: 4 scenarios × 2 directions × 2 zone orientations
 
 ---
@@ -543,7 +575,7 @@ _Full implementation details: [AGENTS.md §7.11](AGENTS.md#711-timezone-sanity-c
 | ---------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **BacktestState**      | Added `mitigatedStructures: MitigatedStructure[]`                                                          |
 | **MitigatedStructure** | `{ type: 'SMS' \| 'CHoCH' \| 'BOS', timestamp: number, price: string, direction: 'BULLISH' \| 'BEARISH' }` |
-| **On trade open (live)** | v2026-10-16: Both `executeStagedEntry()` & `handleTradeApproval()` push trigger `structureDetails` to `mitigatedStructures` immediately after `db.openTrade()`, before `transition(IN_TRADE)` |
+| **On trade open (live)** | Both `executeStagedEntry()` & `handleTradeApproval()` push the trigger `structureDetails` to `mitigatedStructures` **immediately after the exchange confirms the order — before `transition(IN_TRADE)`**, the 500 ms `avgPrice` fetch and `db.openTrade()` (v2026-10-20) |
 | **On trade close**     | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures`                                     |
 | **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()` — **timestamp-only match** (v2026-10-16) |
 | **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                                                            |

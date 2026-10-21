@@ -2,6 +2,12 @@ import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../../config/env';
 import { PatternData, MacroContext, Structure } from '../../smc/patternRecognizer';
+import { logger } from '../../utils/logger';
+
+/** CHoCH / OB must sit within 0.3% of the swept level (or 1 ATR(15m), whichever is wider). */
+const MIN_PROXIMITY_PCT = new Decimal('0.003');
+/** Synthetic depth for the fallback OB when no opposite-colored candle exists (0.1%). */
+const FALLBACK_OB_WIDTH_PCT = new Decimal('0.001');
 
 export class Scenario12_SniperTouch extends BaseScenario {
   constructor(config: BotConfig) {
@@ -30,9 +36,6 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Get current price from latest 1m candle
-    const lastCandle1m = candles1m[candles1m.length - 1];
-
     // Get macro levels from patternData
     const macro = patternData.macroContext as MacroContext & { dailyLevels: any; weeklyLevels: any };
     const macroLevels: { price: Decimal; name: string }[] = [
@@ -48,38 +51,41 @@ export class Scenario12_SniperTouch extends BaseScenario {
     }
 
     // === FILTER 2: SWEEP VALIDATION (SFP - Swing Failure Pattern) ===
-    // Check recent 1m candles (last 30-50 min) for sweep of macro level
-    // Sweep = wick pierces level, body closes back inside
+    // Check recent 1m candles (last 30-50 min) for sweep of macro level.
+    // Sweep = wick pierces level, body closes back inside.
     const lookbackCandles = candles1m.slice(-50); // Last 50 minutes
     const isResistance = (levelName: string) => levelName === 'PDH' || levelName === 'PWH';
-    
-    // Find which macro level was swept
+
+    // Find which macro level was swept and WHEN. `sweptAt` is the causality anchor:
+    // only structures formed strictly after the latest sweep may trigger an entry.
     let sweptLevel: { price: Decimal; name: string; direction: 'BULLISH' | 'BEARISH' } | null = null;
-    
+    let sweptAt = 0;
+
     for (const level of macroLevels) {
       const resistance = isResistance(level.name);
       const levelPrice = level.price;
-      
-      if (resistance) {
-        // Resistance sweep: wick > level, close < level (bearish sweep for short setup)
-        const swept = lookbackCandles.some(c => {
-          const high = new Decimal(c.high);
-          const close = new Decimal(c.close);
-          return high.gt(levelPrice) && close.lt(levelPrice);
-        });
-        if (swept) {
-          sweptLevel = { price: levelPrice, name: level.name, direction: 'BEARISH' };
-          break;
-        }
-      } else {
-        // Support sweep: wick < level, close > level (bullish sweep for long setup)
-        const swept = lookbackCandles.some(c => {
-          const low = new Decimal(c.low);
-          const close = new Decimal(c.close);
-          return low.lt(levelPrice) && close.gt(levelPrice);
-        });
-        if (swept) {
-          sweptLevel = { price: levelPrice, name: level.name, direction: 'BULLISH' };
+
+      // Scan newest -> oldest: the first hit is the most recent sweep of THIS level.
+      for (let i = lookbackCandles.length - 1; i >= 0; i--) {
+        const candle = lookbackCandles[i];
+        const high = new Decimal(candle.high);
+        const low = new Decimal(candle.low);
+        const close = new Decimal(candle.close);
+
+        const isSweep = resistance
+          ? high.gt(levelPrice) && close.lt(levelPrice)
+          : low.lt(levelPrice) && close.gt(levelPrice);
+
+        if (isSweep) {
+          // Keep the LATEST sweep across ALL macro levels.
+          if (candle.timestamp > sweptAt) {
+            sweptAt = candle.timestamp;
+            sweptLevel = {
+              price: levelPrice,
+              name: level.name,
+              direction: resistance ? 'BEARISH' : 'BULLISH',
+            };
+          }
           break;
         }
       }
@@ -100,27 +106,28 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Detect structure breaks and order blocks on 1m candles
-    const { structures } = this.detectStructureBreaksAndOBs(candles1m, atr1m);
-    
+    // Detect structure breaks on 1m candles
+    const structures = this.detectStructureBreaks(candles1m, atr1m);
+
     // Filter out already mitigated structures (ghost signal prevention)
     const mitigatedStructures = (patternData as any).mitigatedStructures || [];
-    const isMitigated = (s: Structure) => 
-      mitigatedStructures.some((ms: any) => 
+    const isMitigated = (s: Structure) =>
+      mitigatedStructures.some((ms: any) =>
         ms.timestamp === s.timestamp
       );
 
-    // Filter for fresh CHoCH in the expected direction (after the sweep)
-    // Look at last 30 1m candles, and exclude already mitigated structures
-    const recentStructures = structures.filter(s => 
-      s.type === 'CHOCH' && 
+    // Fresh CHoCH in the expected direction, STRICTLY AFTER the latest sweep.
+    // Look at last 30 1m candles, and exclude already mitigated structures.
+    const recentStructures = structures.filter(s =>
+      s.type === 'CHOCH' &&
       s.direction === direction &&
+      s.timestamp > sweptAt &&
       s.timestamp >= (candles1m[candles1m.length - 30]?.timestamp ?? 0) &&
       !isMitigated(s)
     );
 
     if (recentStructures.length === 0) {
-      this.logRejection(`No ${direction} CHoCH found after sweep of ${sweptLevel.name}`);
+      this.logRejection(`No ${direction} CHoCH after latest ${sweptLevel.name} sweep`);
       return false;
     }
 
@@ -132,14 +139,14 @@ export class Scenario12_SniperTouch extends BaseScenario {
     // OB is the last opposite-direction candle before the CHoCH break
     const chochIndex = candles1m.findIndex(c => c.timestamp === choch.timestamp);
     let entryOB: { top: Decimal; bottom: Decimal } | null = null;
-    
+
     if (chochIndex > 0) {
       // Look backwards for the OB candle (opposite color to CHoCH direction)
       for (let i = chochIndex - 1; i >= Math.max(0, chochIndex - 5); i--) {
         const c = candles1m[i];
         const isBullishCandle = new Decimal(c.close).gt(c.open);
         const isOB = direction === 'BULLISH' ? !isBullishCandle : isBullishCandle;
-        
+
         if (isOB) {
           entryOB = {
             top: new Decimal(c.high),
@@ -150,16 +157,39 @@ export class Scenario12_SniperTouch extends BaseScenario {
       }
     }
 
-    // Fallback: if no OB found, use recent local extreme
+    // Fallback: if no OB found, use recent local extreme.
+    // Raw Decimals only — no toFixed() precision overrides.
     if (!entryOB) {
       const recent1m = candles1m.slice(-15);
       if (direction === 'BULLISH') {
         const low = Decimal.min(...recent1m.map(c => new Decimal(c.low)));
-        entryOB = { top: low.plus(low.mul('0.001')), bottom: low };
+        entryOB = { top: low.plus(low.mul(FALLBACK_OB_WIDTH_PCT)), bottom: low };
       } else {
         const high = Decimal.max(...recent1m.map(c => new Decimal(c.high)));
-        entryOB = { top: high, bottom: high.minus(high.mul('0.001')) };
+        entryOB = { top: high, bottom: high.minus(high.mul(FALLBACK_OB_WIDTH_PCT)) };
       }
+    }
+
+    // === FILTER 3.1: SPATIAL PROXIMITY TO THE SWEPT MACRO LEVEL ===
+    // The entry OB is the actual POI, so its MIDPOINT (the real entry price) must sit
+    // near the liquidity that was just swept. Nearest-edge distance is misleading for
+    // wide blocks: an OB can straddle the level while its midpoint is far away.
+    // Tolerance = max(1 ATR(15m), 0.3%).
+    // The CHoCH close is measured for observability (a strong displacement may
+    // close further away while the pullback OB remains at the level).
+    const atr15m = this.resolveAtr15m(patternData);
+    const proximityTolerance = Decimal.max(atr15m, sweptLevel.price.mul(MIN_PROXIMITY_PCT));
+    const chochDistance = chochPrice.minus(sweptLevel.price).abs();
+    const obMidpoint = entryOB.top.plus(entryOB.bottom).div(2);
+    const obDistance = obMidpoint.minus(sweptLevel.price).abs();
+
+    if (obDistance.gt(proximityTolerance)) {
+      this.logRejection(
+        `Entry too far from swept ${sweptLevel.name} (${sweptLevel.price.toFixed(4)}): ` +
+        `CHoCH=${chochDistance.toFixed(4)}, OB_MID=${obDistance.toFixed(4)}, ` +
+        `tolerance=${proximityTolerance.toFixed(4)} (1xATR15m / 0.3%)`
+      );
+      return false;
     }
 
     // idealEntry = 0.5 of the Order Block (midpoint)
@@ -183,7 +213,6 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Calculate ATR for 1m candles (already done above)
     // Use standard calculateLevels from BaseScenario
     const levels = this.calculateLevels(
       idealEntry,
@@ -204,7 +233,10 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return false;
     }
 
-    // Set levels and details
+    // Set levels and details.
+    // NOTE: Scenario 12 intentionally emits ONLY structureDetails (the 1m CHoCH).
+    // Emitting a synthetic zone at the macro level would let burnSetup() add the
+    // macro pool to mitigatedZones, violating Invariant 21 (macro pools are never burned).
     this.setLevels({
       entry: levels.entry,
       stopLoss: levels.stopLoss,
@@ -212,15 +244,6 @@ export class Scenario12_SniperTouch extends BaseScenario {
     });
 
     this.setReason(`Sniper: ${direction} CHoCH at ${chochPrice.toFixed(4)} after ${sweptLevel.name} sweep, entry from 1m OB midpoint`);
-
-    this.setZoneDetails({
-      type: 'MITIGATION',
-      top: sweptLevel.price,
-      bottom: sweptLevel.price,
-      timeframe: 'D',
-      direction,
-      timestamp: lastCandle1m.timestamp,
-    });
 
     this.setStructureDetails({
       type: 'CHoCH',
@@ -230,6 +253,46 @@ export class Scenario12_SniperTouch extends BaseScenario {
     });
 
     return true;
+  }
+
+  /**
+   * Resolve the 15m ATR used for the proximity tolerance.
+   *
+   * patternData.atr15m is the canonical, router-computed value and MUST be preferred.
+   * A local ATR(14) recomputation is only a defensive fallback — it is explicitly
+   * logged as such so a missing ATR never silently masquerades as the canonical one.
+   */
+  private resolveAtr15m(patternData: PatternData): Decimal {
+    const provided = patternData.atr15m;
+    if (provided instanceof Decimal && provided.gt(0)) {
+      return provided;
+    }
+
+    logger.warn(
+      `[Scenario 12] patternData.atr15m is missing or invalid (${String(provided)}) — ` +
+      `FALLBACK ATR will be computed from candles15m. Proximity tolerance may differ from the canonical ATR.`,
+    );
+
+    const candles15m = patternData.candles15m;
+    if (Array.isArray(candles15m) && candles15m.length >= 15) {
+      const atr = this.calculateATR(candles15m, 14);
+      if (atr.gt(0)) {
+        logger.warn(`[Scenario 12] FALLBACK LTF ATR(14) = ${atr.toString()} used for proximity tolerance.`);
+        return atr;
+      }
+      logger.error(
+        `[Scenario 12] FALLBACK ATR(14) computed to ${atr.toString()} from ${candles15m.length} candles — unusable.`,
+      );
+    } else {
+      logger.error(
+        `[Scenario 12] FALLBACK ATR unavailable: candles15m has ${Array.isArray(candles15m) ? candles15m.length : 0} candles (need >= 15).`,
+      );
+    }
+
+    logger.error(
+      '[Scenario 12] No usable ATR — proximity tolerance collapses to the 0.3% percentage floor only.',
+    );
+    return new Decimal(0);
   }
 
   // Helper: Calculate ATR
@@ -248,12 +311,11 @@ export class Scenario12_SniperTouch extends BaseScenario {
     return trSum.dividedBy(period);
   }
 
-  // Helper: Detect structure breaks (CHoCH/BOS) AND Order Blocks on 1m candles
-  private detectStructureBreaksAndOBs(candles: any[], atr: Decimal): { structures: Structure[]; orderBlocks: { top: Decimal; bottom: Decimal; timestamp: number; direction: 'BULLISH' | 'BEARISH' }[] } {
+  // Helper: Detect structure breaks (CHoCH/BOS) on 1m candles
+  private detectStructureBreaks(candles: any[], atr: Decimal): Structure[] {
     const structures: Structure[] = [];
-    const orderBlocks: { top: Decimal; bottom: Decimal; timestamp: number; direction: 'BULLISH' | 'BEARISH' }[] = [];
     const swingLookback = 3;
-    const displacementMult = this.config.sniperDisplacementMultiplier 
+    const displacementMult = this.config.sniperDisplacementMultiplier
       ? new Decimal(this.config.sniperDisplacementMultiplier)
       : new Decimal('0.5');
 
@@ -271,7 +333,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
       if (isLow) swings.push({ type: 'LOW', price: low, index: i, timestamp: candles[i].timestamp });
     }
 
-    // Detect breaks and OBs
+    // Detect breaks
     for (let i = 0; i < candles.length; i++) {
       const close = new Decimal(candles[i].close);
       const body = close.minus(candles[i].open).abs();
@@ -279,7 +341,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
 
       for (const swing of swings) {
         if (swing.index >= i - 3) continue; // Swing must be confirmed (3 candles ago)
-        
+
         const bullishBreak = swing.type === 'HIGH' && close.gt(swing.price);
         const bearishBreak = swing.type === 'LOW' && close.lt(swing.price);
 
@@ -294,22 +356,10 @@ export class Scenario12_SniperTouch extends BaseScenario {
             isValidated: true,
             impulseFactor: body.div(atr),
           });
-
-          // Create Order Block from the candle BEFORE the break (opposite direction)
-          if (i > 0) {
-            const obCandle = candles[i - 1];
-            const obTop = new Decimal(obCandle.high);
-            const obBottom = new Decimal(obCandle.low);
-            orderBlocks.push({
-              top: obTop,
-              bottom: obBottom,
-              timestamp: obCandle.timestamp,
-              direction: dir,
-            });
-          }
         }
       }
     }
-    return { structures, orderBlocks };
+
+    return structures;
   }
 }

@@ -71,7 +71,9 @@ describe('StrategyEngine', () => {
       getUsdtBalance: jest.fn().mockResolvedValue(new Decimal('10000')),
       placeMarketOrderWithTpsl: jest.fn().mockResolvedValue('order123'),
       placeLimitOrderWithTpsl: jest.fn().mockResolvedValue('order123'),
+      placeReduceOnlyMarketOrder: jest.fn().mockResolvedValue('panic-order-1'),
       getOpenOrders: jest.fn().mockResolvedValue([]),
+      cancelOrder: jest.fn().mockResolvedValue(undefined),
       setTradingStop: jest.fn().mockResolvedValue(undefined),
     } as any;
 
@@ -192,6 +194,7 @@ describe('StrategyEngine', () => {
         smartEntryThresholdPct: '0.0015',
         limitExpirationCandles: 6,
         cooldownCandles: 16,
+        preflightBufferPct: '0.0005',
       } as any,
       activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
     });
@@ -542,6 +545,229 @@ describe('StrategyEngine', () => {
         symbol: 'BTCUSDT',
         stopLoss: '100',
       });
+    });
+  });
+
+  describe('Post-fill pipeline (IN_TRADE before bookkeeping)', () => {
+    const stagedPlan = {
+      symbol: 'BTCUSDT',
+      side: 'Buy',
+      entryPrice: '50050',
+      stopLoss: '49950',
+      takeProfit: '50350',
+      qty: '0.1',
+      slDistance: '100',
+      riskAmount: '100',
+      riskPercentApplied: '2',
+      balanceUsdt: '10000',
+      scenarioId: 1,
+      zoneDetails: null,
+      orderType: 'Market',
+      limitPrice: null,
+    } as any;
+
+    it('auto: transitions to IN_TRADE before db.openTrade and records the actual avgPrice', async () => {
+      (engine as any).plan = stagedPlan;
+      (engine as any).latestTickPrice = '50050';
+      mockClient.getOpenPositions.mockResolvedValue([
+        { symbol: 'BTCUSDT', size: new Decimal('0.1'), avgPrice: new Decimal('50060') },
+      ] as any);
+
+      let stateAtDbWrite: StrategyState | null = null;
+      mockDb.openTrade.mockImplementation(async () => {
+        stateAtDbWrite = engine.getState();
+        return 'trade123';
+      });
+
+      await (engine as any).executeStagedEntry();
+
+      expect(stateAtDbWrite).toBe(StrategyState.IN_TRADE);
+      expect(engine.getState()).toBe(StrategyState.IN_TRADE);
+      expect(mockDb.openTrade).toHaveBeenCalledWith(
+        expect.objectContaining({ entry_price: '50060' }),
+      );
+      // No Assumed Fill: positions must be fetched before the DB row is written
+      expect(mockClient.getOpenPositions.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDb.openTrade.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('auto: DB failure after a live fill panic-closes the orphan, then burns and resets', async () => {
+      (engine as any).plan = stagedPlan;
+      (engine as any).latestTickPrice = '50050';
+      const burnSpy = jest.spyOn(engine as any, 'burnSetup');
+      mockDb.openTrade.mockRejectedValue(new Error('DB down'));
+      mockClient.getOpenPositions
+        .mockResolvedValueOnce([
+          { symbol: 'BTCUSDT', side: 'Buy', size: new Decimal('0.1'), avgPrice: new Decimal('50060') },
+        ] as any)
+        .mockResolvedValueOnce([
+          { symbol: 'BTCUSDT', side: 'Buy', size: new Decimal('0.1'), avgPrice: new Decimal('50060') },
+        ] as any)
+        .mockResolvedValueOnce([] as any);
+
+      await (engine as any).executeStagedEntry();
+
+      expect(mockClient.placeReduceOnlyMarketOrder).toHaveBeenCalledWith({
+        symbol: 'BTCUSDT',
+        side: 'Sell',
+        qty: '0.100',
+        orderLinkId: expect.stringContaining('BTCUSDT_panic_'),
+      });
+      expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
+        'CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close executed.',
+      );
+      expect(burnSpy).toHaveBeenCalledTimes(1);
+      expect(engine.getState()).toBe(StrategyState.SCANNING);
+      burnSpy.mockRestore();
+    });
+
+    it('auto: failed panic close keeps the engine IN_TRADE and does NOT burn the setup', async () => {
+      (engine as any).plan = stagedPlan;
+      (engine as any).latestTickPrice = '50050';
+      const burnSpy = jest.spyOn(engine as any, 'burnSetup');
+      mockDb.openTrade.mockRejectedValue(new Error('DB down'));
+      mockClient.getOpenPositions.mockResolvedValue([
+        { symbol: 'BTCUSDT', side: 'Buy', size: new Decimal('0.1'), avgPrice: new Decimal('50060') },
+      ] as any);
+      mockClient.placeReduceOnlyMarketOrder.mockRejectedValue(new Error('circuit breaker OPEN'));
+
+      await (engine as any).executeStagedEntry();
+
+      expect(mockClient.placeReduceOnlyMarketOrder).toHaveBeenCalled();
+      expect(burnSpy).not.toHaveBeenCalled();
+      expect(engine.getState()).toBe(StrategyState.IN_TRADE);
+      expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
+        expect.stringContaining('Emergency Market Close FAILED'),
+      );
+      burnSpy.mockRestore();
+    });
+
+    it('auto: DB failure on an unfilled LIMIT order cancels the order instead of flattening', async () => {
+      // Premium setup for a Long (live 50050 > ideal 49500 by >0.15%) resolves to a Limit order.
+      (engine as any).plan = {
+        ...stagedPlan,
+        entryPrice: '49500',
+        stopLoss: '49400',
+        takeProfit: '50500',
+      };
+      (engine as any).latestTickPrice = '50050';
+      const burnSpy = jest.spyOn(engine as any, 'burnSetup');
+      mockDb.openTrade.mockRejectedValue(new Error('DB down'));
+      mockClient.getOpenOrders.mockResolvedValue([
+        {
+          orderId: 'order123',
+          orderLinkId: 'link123',
+          symbol: 'BTCUSDT',
+          side: 'Buy',
+          orderType: 'Limit',
+          price: '49500',
+          qty: '0.1',
+          stopLoss: '49400',
+          takeProfit: '50500',
+          createdAt: Date.now(),
+          status: 'New',
+        },
+      ] as any);
+
+      await (engine as any).executeStagedEntry();
+
+      expect(mockClient.cancelOrder).toHaveBeenCalledWith('BTCUSDT', 'order123');
+      expect(mockClient.placeReduceOnlyMarketOrder).not.toHaveBeenCalled();
+      expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
+        'CRITICAL DB FAILURE: Orphan LIMIT order detected. Emergency Order Cancel executed.',
+      );
+      expect(burnSpy).toHaveBeenCalledTimes(1);
+      expect(engine.getState()).toBe(StrategyState.SCANNING);
+      burnSpy.mockRestore();
+    });
+
+    it('manual: fetches avgPrice, writes it to DB and enters IN_TRADE before the DB write', async () => {
+      (engine as any).transition(StrategyState.ENTRY_STAGED);
+      (engine as any).plan = stagedPlan;
+      (engine as any).latestTickPrice = '50050';
+      mockPendingTradeManager.handleApproval.mockReturnValue({
+        approved: true,
+        orderType: 'Market',
+      } as any);
+      mockClient.getOpenPositions.mockResolvedValue([
+        { symbol: 'BTCUSDT', size: new Decimal('0.1'), avgPrice: new Decimal('50065') },
+      ] as any);
+
+      let stateAtDbWrite: StrategyState | null = null;
+      mockDb.openTrade.mockImplementation(async () => {
+        stateAtDbWrite = engine.getState();
+        return 'trade123';
+      });
+
+      await engine.handleTradeApproval('trade-manual-1', true);
+
+      expect(stateAtDbWrite).toBe(StrategyState.IN_TRADE);
+      expect(engine.getState()).toBe(StrategyState.IN_TRADE);
+      expect(mockDb.openTrade).toHaveBeenCalledWith(
+        expect.objectContaining({ entry_price: '50065' }),
+      );
+    });
+
+    it('manual: DB failure after a live fill panic-closes the orphan, then burns and resets', async () => {
+      (engine as any).transition(StrategyState.ENTRY_STAGED);
+      (engine as any).plan = stagedPlan;
+      (engine as any).latestTickPrice = '50050';
+      mockPendingTradeManager.handleApproval.mockReturnValue({
+        approved: true,
+        orderType: 'Market',
+      } as any);
+      const burnSpy = jest.spyOn(engine as any, 'burnSetup');
+      mockDb.openTrade.mockRejectedValue(new Error('DB down'));
+      mockClient.getOpenPositions
+        .mockResolvedValueOnce([
+          { symbol: 'BTCUSDT', side: 'Buy', size: new Decimal('0.1'), avgPrice: new Decimal('50060') },
+        ] as any)
+        .mockResolvedValueOnce([
+          { symbol: 'BTCUSDT', side: 'Buy', size: new Decimal('0.1'), avgPrice: new Decimal('50060') },
+        ] as any)
+        .mockResolvedValueOnce([] as any);
+
+      await engine.handleTradeApproval('trade-manual-2', true);
+
+      expect(mockClient.placeReduceOnlyMarketOrder).toHaveBeenCalledWith({
+        symbol: 'BTCUSDT',
+        side: 'Sell',
+        qty: '0.100',
+        orderLinkId: expect.stringContaining('BTCUSDT_panic_'),
+      });
+      expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
+        'CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close executed.',
+      );
+      expect(burnSpy).toHaveBeenCalledTimes(1);
+      expect(engine.getState()).toBe(StrategyState.SCANNING);
+      burnSpy.mockRestore();
+    });
+
+    it('manual: failed panic close keeps the engine IN_TRADE and does NOT burn the setup', async () => {
+      (engine as any).transition(StrategyState.ENTRY_STAGED);
+      (engine as any).plan = stagedPlan;
+      (engine as any).latestTickPrice = '50050';
+      mockPendingTradeManager.handleApproval.mockReturnValue({
+        approved: true,
+        orderType: 'Market',
+      } as any);
+      const burnSpy = jest.spyOn(engine as any, 'burnSetup');
+      mockDb.openTrade.mockRejectedValue(new Error('DB down'));
+      mockClient.getOpenPositions.mockResolvedValue([
+        { symbol: 'BTCUSDT', side: 'Buy', size: new Decimal('0.1'), avgPrice: new Decimal('50060') },
+      ] as any);
+      mockClient.placeReduceOnlyMarketOrder.mockRejectedValue(new Error('circuit breaker OPEN'));
+
+      await engine.handleTradeApproval('trade-manual-3', true);
+
+      expect(mockClient.placeReduceOnlyMarketOrder).toHaveBeenCalled();
+      expect(burnSpy).not.toHaveBeenCalled();
+      expect(engine.getState()).toBe(StrategyState.IN_TRADE);
+      expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
+        expect.stringContaining('Emergency Market Close FAILED'),
+      );
+      burnSpy.mockRestore();
     });
   });
 });
