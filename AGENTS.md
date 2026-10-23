@@ -1,8 +1,9 @@
-# CRYPTO BOT SMC — ARCHITECTURAL BIBLE (v2026-10-02)
+# CRYPTO BOT SMC — ARCHITECTURAL SPECIFICATION (v2026-10-21)
 
-> **Single source of truth for any AI agent working on this codebase.**
-> Every architectural decision, invariant, convention, and lesson learned in blood is documented here.
-> If it's not in this file, it doesn't exist.
+> **Single source of truth for any agent or engineer working on this codebase.**
+> Every architectural decision, invariant, and convention is documented here.
+> Every failure mode that cost real money is recorded in §16 as Root Cause → Fix → Rule.
+> If it is not in this file, it does not exist.
 
 ---
 
@@ -22,19 +23,17 @@
 
 **Invariant**: All financial values (prices, qty, PnL, balance) are **strings in DB**, **`Decimal` in memory**, **strings on wire**. Never `number`.
 
-### 1.1 V5 Matrix — Sniper Mode (Two-Loop Architecture)
+### 1.1 V5 Matrix — Sniper Mode (Single-Pass Execution)
 
 | Layer | Technology | Description |
 |-------|------------|-------------|
-| **Radar (LTF)** | 15m/4H candles | Scans for macro POI (Order Blocks, FVGs, HTF Sweeps, SMS) via existing 11 scenarios |
-| **Sniper (1m)** | 1m candles | Once POI found, switches to `SNIPER_MODE` state; waits for 1m CHoCH inside the zone |
-| **Execution** | Smart Pullback | On 1m CHoCH: `idealEntry = midpoint of CHoCH impulse`; SL under 1m extreme; uses existing Market/Limit logic |
+| **Radar (LTF)** | 15m/4H candles | Builds macro context (PDH/PDL/PWH/PWL, HTF sweeps) consumed by Scenario 12 |
+| **Sniper (1m)** | 1m candles | Every 1m close re-evaluates Scenario 12 (Sniper Touch): per-CHoCH sweep pairing → 1m CHoCH → OB proximity |
+| **Execution** | Smart Pullback | On a valid 1m CHoCH: `idealEntry = OB midpoint`; SL under the 1m extreme; standard Market/Limit logic |
 
-**State Machine Extension** (`types.ts:26`):
-- `StrategyState.SNIPER_MODE` — new state between `SCANNING` and `ENTRY_STAGED`
-- `activeSniperZone` in `StrategyEngine` (live) and `BacktestState` (backtest): `{ top, bottom, direction, scenarioId, scenarioName }`
+**State**: the live engine enters `ENTRY_STAGED` directly from `SCANNING` — Scenario 12 performs the radar and sniper checks in a single router pass. `StrategyState.SNIPER_MODE` and `_activeSniperZone` exist in `types.ts` / `StrategyEngine` as **reserved scaffolding** for a future two-phase split and are never entered by the current live path.
 
-**Invariant**: Only scenarios 1, 5, 6, 10 (HTF Continuation, HTF Sweep, SMS, Breaker) can trigger Sniper Mode — they produce high-probability zones with clear direction.
+**Invariant**: Scenario 12 is the only producer of 1m Sniper entries. It requires the macro level to have been swept **before** the triggering CHoCH (causality) and measures OB proximity from the OB midpoint (Invariant 51).
 
 ### 1.2 Dual-Mode Architecture (V4 Classic & V5 Sniper)
 
@@ -42,15 +41,17 @@ The codebase now supports **two distinct operational modes** running from the sa
 
 | Aspect | **V4 Classic (ENABLE_SNIPER_MODE=false)** | **V5 Sniper (ENABLE_SNIPER_MODE=true)** |
 |--------|-------------------------------------------|-----------------------------------------|
-| **Timeframes** | 15m LTF / 4H HTF | 1m Sniper / 15m Radar / 4H Macro |
-| **Entry Logic** | Close of 15m signal candle | 1m CHoCH inside 15m macro zone |
-| **Scenarios** | 1-11 (all classic SMC) | **12 only** (Sniper Touch) |
-| **State Machine** | SCANNING → ENTRY_STAGED → IN_TRADE | SCANNING → SNIPER_MODE → ENTRY_STAGED |
+| **Timeframes** | 15m LTF / 4H HTF | 1m entry / 15m + 4H macro context |
+| **Entry Logic** | Close of 15m signal candle | 1m CHoCH after a macro sweep, near its OB midpoint |
+| **Scenarios** | 1-11 (all classic SMC) | **12** (Sniper Touch) |
+| **State Machine** | SCANNING → ENTRY_STAGED → IN_TRADE | SCANNING → ENTRY_STAGED → IN_TRADE (Scenario 12 on 1m closes) |
 | **WS Subscription** | 15m, 240m | 1m, 15m, 240m |
 | **Killzone** | London/NY only | London/NY only (enforced in Scenario 12) |
 | **Cooldown** | After SL only (loss) | After SL only (loss) |
 
 **Critical Invariant**: V4 and V5 **MUST NOT** run on the same process/instance. The `IN_TRADE` state machine is per-symbol and mutually exclusive. Running both modes simultaneously would cause state conflicts, double position risk, and `IN_TRADE` blocking.
+
+> **Scenario 13 is ARCHIVED** (v2026-10-23): the Top-Down Order Flow implementation moved to `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` and is no longer registered in the router. `ACTIVE_SCENARIOS` / `SCENARIOS_<SYMBOL>` accept **1–12** only; a `13` in a per-symbol override is dropped during parsing, and in `ACTIVE_SCENARIOS` it fails validation. Why: the multi-timeframe cascade produced fee-dominated results at 1m granularity, so effort moved to Scenario 12 frequency (per-CHoCH sweep pairing + opt-in sweep sources). The archived module still compiles and its test suite still runs (`tests/scenarios/archive/`), so the design remains available for future revival.
 
 ### 1.3 Deployment Strategy (Sub-accounts)
 
@@ -118,10 +119,14 @@ src/
 │   └── database.ts        # pg.Pool, NUMERIC(24,8), connection leak proof
 ├── engine/           # Strategy orchestration
 │   ├── strategyEngine.ts  # State machine per symbol
-│   ├── scenarioRouter.ts  # Evaluates 11 scenarios, filters mitigatedZones
+│   ├── scenarioRouter.ts  # Evaluates 12 scenarios, filters mitigatedZones/Structures
 │   ├── pendingTradeManager.ts  # Manual approval queue + Slippage Guard
 │   ├── baseScenario.ts    # Shared calculateLevels() — single SL source of truth
-│   └── scenarios/         # 11 scenario implementations (S1–S11)
+│   ├── tpResolver.ts      # Brain Module 3: structural TP resolution (major/minor)
+│   ├── brain/
+│   │   ├── htfRoadmap.ts      # Brain Module 1: 4H range, bias, primary target
+│   │   └── volumeExhaustion.ts # Brain Module 2: 15m pullback exhaustion + reaction
+│   └── scenarios/         # 12 scenario implementations (S1–S12) + archive/ (S13)
 ├── execution/
 │   └── executionEngine.ts # Market order + TP/SL placement
 ├── feed/
@@ -178,10 +183,12 @@ All REST calls wrapped in `executeWithRetry()`:
 
 - Runs every **10 minutes**.
 - **Step 1**: For each `IN_TRADE` engine → `getOpenPositions()` → if gone, force `SCANNING`.
-  - **Limit Order Awareness** (`v2026-10-06`): Before force-reset `IN_TRADE → SCANNING`, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`) via `getActiveOrders()`. If active Limit orders exist, **skips force-reset** to prevent Race Condition and signal duplication.
-  - **Limit Order Expiration & Cancellation** (`v2026-10-13`): Checks for expired Limit orders using dynamic timeframe (1m for Sniper Mode, LTF for Classic). Expired orders are **cancelled via API** and immediately closed in DB with `closeTrade(orderId, '0', price, now, 'CANCELLED')`. This prevents Step 2 from hallucinating PnL.
+  - **Limit Order Awareness** (`v2026-10-06`): Before force-reset `IN_TRADE → SCANNING`, checks for active Limit orders (`status === 'New' | 'PartiallyFilled'`) via `getOpenOrders()` (the client wrapper over REST `getActiveOrders`). If active Limit orders exist, **skips force-reset** to prevent race conditions and signal duplication.
+  - **Limit Order Expiration & Cancellation** (`v2026-10-13`, hardened `v2026-10-21`): Checks for expired Limit orders using a dynamic timeframe (1m for Sniper Mode, LTF for Classic).
+    - `status === 'New'` (never filled) → cancel on the exchange, then `closeTrade(orderId, '0', price, now, 'CANCELLED')`. This prevents Step 2 from hallucinating PnL.
+    - `status === 'PartiallyFilled'` → cancel only the **resting remainder**; the filled portion MUST remain `IN_TRADE` and be managed by Adaptive Fractioning (Invariant 53). Closing the whole record as `CANCELLED` is forbidden.
 - **Step 2**: `db.getAllOpenTrades()` → for each, check exchange position → if missing, `reconcileWithTrade()` with zoneDetails for mitigatedZones tracking.
-  - **Limit Order Silent Skip**: If active Limit order found, silently skips force-reset (already logged in Step 1 to prevent duplicate logs).
+  - **Limit Order Silent Skip**: If an active Limit order is found, silently skips force-reset (already logged in Step 1 to prevent duplicate logs).
 - **Limit Fallback Prevention** (`v2026-10-13`): In `reconcileWithTrade()`, if `getClosedPnl` returns empty and `trade.order_type === 'Limit'`, the system **MUST assume it was cancelled unfilled** and record `0` PnL with `CANCELLED` reason. Mathematical PnL fallback is **strictly reserved for Market orders**.
 - Idempotent, safe to run concurrently with WS events.
 
@@ -226,7 +233,7 @@ if (isZeroSize || isClosedSide) {
 
 **Rule**: Always parse Bybit V5 position sizes using `Decimal.isZero()` with fallback — never rely on `Number()` alone.
 
-### 3.6 Guaranteed State Reset on Position Close — `src/engine/strategyEngine.ts:447-556` — **NEW v2026-10-08**
+### 3.6.1 Guaranteed State Reset on Position Close — `src/engine/strategyEngine.ts:447-556` — **NEW v2026-10-08**
 
 **Problem**: When `onExchangePositionClosed` processes a position close event (WS execution), any failure in `getClosedPnl()`, DB writes, or Telegram notifications would leave the engine stuck in `IN_TRADE` until the ReconciliationLoop forcibly reset it (up to 10 minutes).
 
@@ -419,8 +426,6 @@ this.bot.use(async (ctx, next) => {
 | `|idealEntry - livePrice| / idealEntry ≤ 0.15%` | **Market** (IOC) | — |
 | `|idealEntry - livePrice| / idealEntry > 0.15%` | **Limit** (GTC) | `idealEntry` |
 
-**Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
-
 **Implementation** (`src/engine/pendingTradeManager.ts`):
 - `queueTrade()` stores `idealEntry` alongside setup.
 - `handleApproval()` fetches live price via `priceProvider()` (injected from `StrategyEngine` → `candleFeed.getCurrentLivePrice()`).
@@ -441,8 +446,6 @@ In auto-trading mode (`executeStagedEntry`), the logic order was corrected to el
 
 **Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
 
-**Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
-
 ### 4.4.1 Discount Trap Fix — **NEW v2026-10-14**
 
 **Problem**: When the live price is BETTER than the ideal entry (a "discount"), the old logic could still place a Limit order at the ideal entry price. This caused the Limit order to be immediately filled at the current market price (which is better than the limit price), but the attached Stop-Loss was calculated based on the ideal entry price, not the actual fill price. This violated Stop-Loss geometry and caused Bybit Error `[10001]` (StopLoss set for Buy position should be lower than base_price).
@@ -451,7 +454,7 @@ In auto-trading mode (`executeStagedEntry`), the logic order was corrected to el
 
 1. **Discount Check (FIRST)**: If live price is BETTER than ideal entry (discount), ALWAYS use **Market** order — never Limit.
 2. **Threshold Check (SECOND)**: If no discount, apply the 0.15% threshold — Market if within threshold, Limit if beyond.
-4. **Pre-flight SL/TP checks**: Remain UNCONDITIONAL for all orders.
+3. **Pre-flight SL/TP checks**: Remain UNCONDITIONAL for all orders.
 
 ```typescript
 // Check if current price is BETTER than ideal entry (discount)
@@ -547,7 +550,7 @@ The new system uses milestone-based management:
 
 The legacy `BREAKEVEN_RR_TRIGGER` config variable has been **removed** from codebase and `.env` files. It no longer affects Live or Backtest behavior.
 
-### 4.6 Telegram UI Reflection on Order Failure — **NEW v2026-10-08**
+### 4.7 Telegram UI Reflection on Order Failure — **NEW v2026-10-08**
 
 **Problem**: If `executionEngine.execute()` returns an error (order rejected by exchange), Telegram still showed `[ ✅ APPROVED ]` because `handleTradeApproval` did not propagate the failure to the UI handler.
 
@@ -774,11 +777,11 @@ This ensures the state machine is never corrupted by concurrent candle processin
 
 **Problem**: `PendingTradeManager` used the last closed 15m candle close price as "live price" for slippage guard and pre-flight checks. In volatile markets, this price can be minutes stale, causing the bot to approve setups that are already invalid.
 
-**Solution**: New `getLivePrice()` method on `StrategyEngine` that returns the live tick price from the LTF candle feed:
+**Solution**: `getLivePrice()` on `StrategyEngine` returns the **global tick memory** (`latestTickPrice`), written at the top of `handleKline()` from every incoming WS tick — before the `confirmed` guard and before any processing:
 
 ```typescript
 getLivePrice(): string | null {
-  return this.feedLtf.getCurrentLivePrice()?.toString() || null;
+  return this.latestTickPrice; // never coupled to a single timeframe feed
 }
 ```
 
@@ -790,7 +793,7 @@ pendingTradeManager.setPriceProvider((symbol: string) => {
 });
 ```
 
-**Impact**: Slippage Guard and Pre-flight Check now use real-time tick price instead of stale candle close.
+**Impact**: Slippage Guard, Pre-flight Check and Adaptive Fractioning all evaluate against the freshest tick — including Sniper Mode, where an LTF feed read can be up to 14 minutes stale (Invariant 38).
 
 ### 5.7 Guaranteed Ghost Signal Burning via `structureDetails` — **NEW v2026-10-06**
 
@@ -808,7 +811,7 @@ pendingTradeManager.setPriceProvider((symbol: string) => {
 
 **Result**: Ghost signals in Scenario 12 are now permanently burned — the CHoCH timestamp is preserved end-to-end.
 
-> **Addendum v2026-10-16 — Burn Trigger Structure on Trade Open (Live)**: Previously, live structures were burned ONLY via `burnSetup()` (abort paths) and after position close — a successful entry left the trigger CHoCH unburned until the trade closed. Fixed: BOTH live entry paths (`executeStagedEntry()` auto and `handleTradeApproval()` manual) push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (standard 100-entry cap). This mirrors backtester burn-on-entry (Invariant 15).
+> **Addendum v2026-10-21 — Burn Trigger Structure on Trade Open (Live)**: Live structures used to be burned ONLY via `burnSetup()` (abort paths) and after position close — a successful entry left the trigger CHoCH unburned until the trade closed. This is now prevented: BOTH live entry paths (`executeStagedEntry()` auto and `handleTradeApproval()` manual) push `this.plan.structureDetails` into `mitigatedStructures` **immediately after the exchange confirms the order — before `transition(StrategyState.IN_TRADE)` and before the `avgPrice` / DB bookkeeping** (standard 100-entry cap). Burning after `db.openTrade()` is forbidden: a post-fill DB failure would then leave a live position whose trigger structure is still re-detectable. This mirrors backtester burn-on-entry (Invariant 15) and satisfies Invariant 39.
 
 ### 5.8 Zero-NULL Database Guarantee for Closed Trades — **NEW v2026-10-06**
 
@@ -1078,24 +1081,26 @@ Only **London/NY** valid for entry (Scenario 5, 7, etc.).
 
 > **Bypass (v2026-10-18)**: Killzone gates can be disabled globally via `ENFORCE_KILLZONES=false` (e.g., for backtesting without session constraints). The bypass covers BOTH the `BaseScenario.isInKillzone()` helper (Scenarios 1, 3, 6, 10, 11) AND the direct `patternData.currentKillzone` checks (Scenarios 2, 4, 5, 7, 8, 9, 12). Entry filter ONLY — active trade management is never affected.
 
-### 7.4 V5 Sniper Mode (1m Execution) — **NEW v2026-09-30**
+> **Scenario 13 (Top-Down Order Flow) is ARCHIVED** — see §8.6 and `src/engine/scenarios/archive/`. Scenario 12 is the only 1m producer registered in the live router.
 
-**Architecture**: Two-loop system — Radar (15m/4H) scans for macro POI, Sniper (1m) waits for precise entry inside zone.
+### 7.4 V5 Sniper Mode (1m Execution) — v2026-09-30 (single-pass since v2026-10-21)
+
+**Architecture**: One scenario, one pass. `Scenario 12 (Sniper Touch)` performs radar and trigger selection inside a single `ScenarioRouter.evaluate()` call on each **1m close** — there is no intermediate state transition and no cached active zone.
 
 | Phase | Timeframe | Action |
 |-------|-----------|--------|
-| **Radar** | 15m/4H | Scenarios 1, 5, 6, 10 evaluate 15m candles; on valid zone → store in `activeSniperZone`, state → `SNIPER_MODE` |
-| **Sniper** | 1m | Each 1m candle: check zone invalidation (price breaks through zone); run `detectStructureBreaks()` on last 200 1m candles |
-| **Trigger** | 1m | Fresh CHoCH in zone direction (after zone entry) with displacement ≥ 1.5 ATR → calculate `idealEntry` = midpoint of CHoCH impulse |
-| **Execute** | 1m | Smart Pullback: Market if `|idealEntry - currentPrice|/idealEntry ≤ 0.15%`, else Limit @ `idealEntry` |
+| **Macro context** | 15m/4H | PDH/PDL/PWH/PWL levels are maintained by the macro refresher and read by Scenario 12; 15m ATR is used for proximity tolerance. Opt-in sources (`S12_SESSION_SWEEPS`, `S12_EQH_EQL_SWEEPS`) add the newest ASIAN high/low and 15m EQH/EQL pools |
+| **Sweep pairing** | 1m lookback (50 min) | Each swept level keeps its **own** `sweptAt`; `pairChochsWithSweeps()` pairs a CHoCH only with same-direction sweeps that happened strictly **before** it. A later sweep of an unrelated level cannot invalidate an earlier CHoCH |
+| **Trigger** | 1m | Fresh CHoCH (`detectStructureBreaks()`, displacement ≥ 1.5 ATR) from a valid pair, matched to an Order Block whose **midpoint** is within the source-aware band — `max(1.0 × atr15m, 0.3%)` for macro levels, `max(0.5 × atr15m, 0.3%)` for intraday sources (Invariant 51) |
+| **Execute** | 1m | `idealEntry` = OB midpoint; take-profit resolved structurally (`tpResolver`, fixed `3R` when `ENABLE_DYNAMIC_TP=false`); Smart Pullback: Market if within 0.15% or at a discount, else Limit @ OB midpoint |
 
-**State Machine** (`types.ts:26`):
-- `StrategyState.SNIPER_MODE` — between `SCANNING` and `ENTRY_STAGED`
-- `activeSniperZone` in `StrategyEngine` (live) and `BacktestState` (backtest): `{ top, bottom, direction, scenarioId, scenarioName }`
+**State Machine** (`types.ts:26`): the live path is `SCANNING → ENTRY_STAGED → IN_TRADE`. `StrategyState.SNIPER_MODE` and `_activeSniperZone` remain in `types.ts` / `StrategyEngine` as reserved scaffolding for a future two-phase split (marked `@ts-expect-error` in the engine) and are **never entered** by the current live path.
 
-**Zone Invalidation**: Long → `candle.low < zone.bottom`; Short → `candle.high > zone.top` → reset to `SCANNING`.
+**No-zone settlement**: Scenario 12 emits `structureDetails` only — it never calls `setZoneDetails()`. Macro liquidity pools are never burned; spam protection is exclusively 1m CHoCH structure burning (Invariant 21).
 
-**Backtester** (`src/backtest/run.ts`): Main loop iterates 1m candles; 15m candles synthesized via timestamp sync; `ScenarioRouter` evaluates on 15m closes only.
+**Backtester** (`src/backtest/run.ts`): Main loop iterates 1m candles; 15m candles synthesized via timestamp sync; `ScenarioRouter` evaluates Scenario 12 on 1m closes.
+
+> **Scenario 13 is ARCHIVED** (Top-Down Order Flow Matrix, documented in §8.6 for reference only). It is not registered in the router, so `process()` has no 1m scenario besides Scenario 12.
 
 ---
 
@@ -1278,11 +1283,11 @@ loadCachedOrFetch(client, symbol, timeframe, fromMs, toMs, config.useLocalCacheO
 | **Source** | Bybit V5 `getTickers({ category: 'linear' })` |
 | **Poll Interval** | 30 minutes (`FUNDING_POLL_INTERVAL_MS = 30 * 60 * 1000`) |
 | **Tracked Symbols** | `FUNDING_MONITOR_SYMBOLS` (default: BTCUSDT,ETHUSDT,SOLUSDT) |
-| **Alert Threshold** | `FUNDING_ALERT_THRESHOLD=0.0` — rate ≤ 0 triggers alert |
-| **Restore Threshold** | `FUNDING_RESTORE_THRESHOLD=0.0001` — rate ≥ +0.01% triggers restore |
+| **Alert Threshold** | `FUNDING_ALERT_THRESHOLD_PCT=0.0` — rate ≤ 0% triggers alert |
+| **Restore Threshold** | `FUNDING_RESTORE_THRESHOLD_PCT=0.015` — rate ≥ +0.015% triggers restore |
 | **State Tracking** | Per-symbol `isAlerted` boolean to prevent spam |
-| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nМонета: {symbol}\nСтавка: {rate*100}%\nРекомендуется закрыть арбитраж!` |
-| **Telegram Alert (Restore)** | `🟢 [FUNDING RESTORED]\nМонета: {symbol}\nСтавка: +{rate*100}% (APY: ~{rate*3*365*100}%)\nМожно снова открывать арбитраж!` |
+| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]` — symbol, current rate, recommendation to close the arbitrage |
+| **Telegram Alert (Restore)** | `🟢 [FUNDING RESTORED]` — symbol, rate and projected APY, recommendation to re-open the arbitrage |
 | **Public API** | `getCurrentRates(): Map<string, Decimal>` for `/status` command |
 
 **Integration Points:**
@@ -1436,7 +1441,7 @@ interface MitigatedStructure {
 
 4. **ScenarioRouter** (`scenarioRouter.ts`):
    - New `evaluate()` param: `mitigatedStructures: MitigatedStructure[] = []`
-   - `filterMitigatedStructures()` — filters `patternData.structures` by **timestamp ONLY** (updated v2026-10-16; direction/type matching removed to comply with Invariant 16.16 — those fields may be lost or defaulted during mapping):
+   - `filterMitigatedStructures()` — filters `patternData.structures` by **timestamp ONLY** (updated v2026-10-16; direction/type matching removed per §16.4.3 — those fields may be lost or defaulted during mapping):
    ```typescript
    private filterMitigatedStructures(structures: any[], mitigatedStructures: MitigatedStructure[]): any[] {
      if (!mitigatedStructures.length) return structures;
@@ -1501,7 +1506,7 @@ interface MitigatedStructure {
    });
    ```
 
-4. **Engine burns structure on trade OPEN (Live) — v2026-10-16**: BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)`, with the standard 100-entry cap:
+4. **Engine burns structure on trade OPEN (Live) — v2026-10-21**: BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) push `this.plan.structureDetails` into `mitigatedStructures` **immediately after the exchange confirms the order — before `transition(StrategyState.IN_TRADE)` and before the `avgPrice` / DB bookkeeping**, with the standard 100-entry cap:
    ```typescript
    if (this.plan.structureDetails && this.plan.structureDetails.timestamp) {
      this.mitigatedStructures.push({
@@ -1515,7 +1520,7 @@ interface MitigatedStructure {
      }
    }
    ```
-   The CHoCH is consumed the moment the trade is opened — not only on abort (`burnSetup`) or close. Mirrors backtester burn-on-entry (Invariant 15).
+   The CHoCH is consumed the moment the exchange confirms the fill — not only on abort (`burnSetup`) or close. Burning after `db.openTrade()` is forbidden: a post-fill DB failure would otherwise leave a live position whose trigger structure is still re-detectable. Mirrors backtester burn-on-entry (Invariant 15).
 
 5. **Engine auto-mitigates on trade close** (`executionSimulator.ts:626-631`, `strategyEngine.ts:363-365`):
    - Trade closes → `structureDetails` passed to DB
@@ -1528,15 +1533,88 @@ interface MitigatedStructure {
 
 **Problem**: The sweep scan returned only a boolean, so a CHoCH that formed *before* the macro sweep could trigger a Sniper entry (causality inversion). Scenario 12 also accepted a 1m CHoCH/OB that formed far from the swept level, producing entries disconnected from the liquidity that justified the setup. Finally, it emitted a fake zero-width `MITIGATION` zone at the macro level, letting `burnSetup()` add PDH/PDL/PWH/PWL to `mitigatedZones` — a direct Invariant 21 violation.
 
-**Implementation** (`src/engine/scenarios/Scenario12_SniperTouch.ts`):
+**Implementation** (`src/engine/scenarios/Scenario12_SniperTouch.ts`) — **superseded by §7.13.2 for the causality anchor**:
 
-1. **Latest-sweep causality anchor**: For each macro level, scan the 50-minute lookback newest → oldest; the first hit is that level's most recent sweep. Across all four levels, keep the greatest timestamp as `sweptAt`.
-2. **Strict causality**: `recentStructures` requires `s.timestamp > sweptAt` — a CHoCH on or before the sweep candle is rejected.
-3. **Spatial proximity (midpoint-based)**: `tolerance = max(atr15m, sweptPrice × 0.003)`; `obMidpoint = (OB.top + OB.bottom) / 2`; `distance = |obMidpoint − sweptPrice|`. Reject if `distance > tolerance`. **The measurement is STRICTLY from the Order Block midpoint, never from its edges** (Invariant 51) — a wide OB can straddle the level while its midpoint sits far away, so nearest-edge distance would approve disconnected entries. The CHoCH close distance is logged for observability but not gated (a strong displacement can close further away while the pullback OB stays at the level).
+1. **Latest-sweep causality anchor** *(legacy — replaced in v2026-10-23)*: A single global `sweptAt` is no longer used. See §7.13.2.
+2. **Strict causality** *(still true)*: a CHoCH must form after the sweep that justifies it.
+3. **Spatial proximity (midpoint-based)**: `obMidpoint = (OB.top + OB.bottom) / 2`; `distance = |obMidpoint − sweptPrice|`. Reject if `distance > tolerance` (band now source-aware, §7.13.2). **The measurement is STRICTLY from the Order Block midpoint, never from its edges** (Invariant 51) — a wide OB can straddle the level while its midpoint sits far away, so nearest-edge distance would approve disconnected entries. The CHoCH close distance is logged for observability but not gated (a strong displacement can close further away while the pullback OB stays at the level).
 4. **No macro-pool burning**: `setZoneDetails()` is not called at all; Scenario 12 emits only `structureDetails` (the 1m CHoCH). Ghost-signal protection is structure-only, satisfying Invariant 21.
-5. **Dead code removed**: `detectStructureBreaksAndOBs` → `detectStructureBreaks` (returns `Structure[]`); the unused OB extraction is gone. The fallback OB uses raw `Decimal` percentages (`0.1%`), never `toFixed()`.
+5. **Dead code removed**: `detectStructureBreaksAndOBs` → `detectStructureBreaks` (returns `Structure[]`); the unused OB extraction is gone.
 
 **Tests**: `tests/scenarios/scenario12_sniper_touch.test.ts` covers valid entry, causality rejection, ATR/percentage proximity rejection, CHoCH-near/OB-far rejection, and mitigated-structure rejection.
+
+---
+
+#### 7.13.2 Scenario 12 Revival — Per-CHoCH Pairing & Opt-in Sweep Sources — **NEW v2026-10-23**
+
+**Problem (frequency)**: the global `sweptAt = max(all levels)` rule made a *later* sweep of an unrelated level invalidate an *earlier* CHoCH. A valid PDL reversal at 10:05 was discarded because PDH was poked at 10:12 — the trigger existed, but the causality anchor had moved past it. Scenario 12 also only hunted four macro levels, so intraday liquidity (session extremes, equal highs/lows) could never trigger a sniper entry.
+
+**Implementation** (`src/engine/scenarios/Scenario12_SniperTouch.ts`):
+
+1. **Per-level sweep detection** — `detectLevelSweeps()` still scans the 50-minute 1m lookback newest → oldest per level, but records each swept level's **own** `sweptAt` instead of collapsing them into one maximum. `levelTouched` and the `weakWick` break-out semantics are unchanged.
+2. **Per-CHoCH pairing** — `pairChochsWithSweeps()` builds `{ choch, swept }` pairs where `swept.direction === choch.direction` and `swept.sweptAt < choch.timestamp` (strict: a CHoCH on the sweep candle itself is ambiguous and rejected). A later sweep of another level simply produces no pair with an earlier CHoCH and cannot invalidate it.
+3. **Winner selection (deterministic)** — newest CHoCH → nearest OB distance → most recent sweep. Rejection buckets stay exclusive: no pair → `noChoch`; all pairs fail HTF bias → `htfContradiction`; no pair passes body-close → `bodyClose`; no OB → `noOb`; any measured miss → `proximity`.
+4. **Opt-in sweep sources** (`BotConfig.s12SessionSweeps?` / `s12EqhEqlSweeps?`, env `S12_SESSION_SWEEPS` / `S12_EQH_EQL_SWEEPS`, both default **false**):
+   - `SESSION`: the newest ASIAN range's high (BEARISH) and low (BULLISH) from `patternData.sessionRanges`. Older Asian sessions are stale context and are ignored.
+   - `EQH_EQL`: 15m-derived `EQH`/`EQL` pools (`EQH` → BEARISH, `EQL` → BULLISH).
+5. **Price dedupe with source priority** — when two sources print the same price (exact `Decimal.eq()`), `MACRO` owns it over `SESSION`, and `SESSION` over `EQH_EQL` (`SWEEP_SOURCE_PRIORITY`, applied via a stable sort before dedupe). Without this, a macro level duplicated by a session extreme would be judged against the tighter intraday band.
+6. **Source-aware proximity band** — macro levels keep `max(1.0 × atr15m, 0.3% of level)`; intraday sources use `max(0.5 × atr15m, 0.3% of level)`. The 0.3% floor is unconditional, so the gate stays meaningful when ATR collapses. The proximity rejection message names the band (`1xATR15m` / `0.5xATR15m`) and reports the CHoCH close distance and the OB-midpoint distance.
+7. **Invariants preserved** — no `setZoneDetails()` (macro pools are never burned, Invariant 21), midpoint-only proximity (Invariant 51), mitigation filtered by timestamp alone (Invariant 25), and `structureDetails` still carries the triggering CHoCH for burn-on-entry (Invariant 39).
+
+**Tests**: `tests/scenarios/scenario12_sniper_touch.test.ts` adds pairing (later unrelated sweep), per-source opt-in defaults, EQH/EQL and session triggering, macro-over-session dedupe, the 1.0 vs 0.5 ATR band split, and the 0.3% floor under near-zero ATR.
+
+#### 7.13.3 Verified S12 "1C" Profile — 60-Day, 4-Symbol Baseline — **NEW v2026-10-23**
+
+The reference S12 profile used for portfolio validation enables both opt-in sweep sources and structural take-profits, and keeps the Sniper limit lifetime at its documented 15 × 1m default:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `ENABLE_SNIPER_MODE` | `true` | Arms the single-pass 1m path |
+| `ACTIVE_SCENARIOS` | `12` | Only S12 may produce 1m entries |
+| `S12_SESSION_SWEEPS` | `true` | Adds the newest ASIAN high/low as sweepable liquidity |
+| `S12_EQH_EQL_SWEEPS` | `true` | Adds 15m EQH/EQL pools |
+| `ENABLE_DYNAMIC_TP` | `true` | Structural TP resolution via `tpResolver` |
+| `DYNAMIC_TP_MIN_RR` / `DYNAMIC_TP_MAX_RR` | `1.5` / `6.0` | Structural target bounds |
+| `SNIPER_LIMIT_EXPIRATION_CANDLES` | `15` | 15 × 1m = 15 min (not the Classic 6 × LTF) |
+| `ENFORCE_KILLZONES` | `false` (backtest only) | Isolates S12 geometry; live keeps `true` |
+
+**Measured baseline** (`USE_LOCAL_CACHE_ONLY=true`, `BACKTEST_DAYS=60`, 2026-08-24 → 2026-10-23, $1,000 per symbol):
+
+| Symbol | Net | Trades | W/L | Win rate | PF | Max DD | Fees |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| NEARUSDT | +$203.86 (+20.39%) | 16 | 9/7 | 56.25% | 2.51 | 6.84% | $111.08 |
+| AVAXUSDT | +$16.12 (+1.61%) | 10 | 5/5 | 50.00% | 1.25 | 5.18% | $79.74 |
+| LINKUSDT | +$7.06 (+0.71%) | 14 | 7/7 | 50.00% | 1.06 | 5.48% | $135.48 |
+| SUIUSDT | −$58.84 (−5.88%) | 15 | 6/9 | 40.00% | 0.69 | 11.95% | $125.68 |
+| **Portfolio** | **+$168.20 (+4.21%)** | **55** | **27/28** | **49.09%** | — | — | **$451.98** |
+
+> **Config-drift warning**: an ambient `.env` that sets `SNIPER_LIMIT_EXPIRATION_CANDLES=6` silently reproduces the Classic 6-candle lifetime in 1m units (6 minutes). The same 60-day run at 6 minutes produced **+$110.26** and AVAX **−$32.59**; at the documented 15 minutes it produced **+$168.20** and AVAX **+$16.12**. Always resolve the Sniper lifetime through `resolveLimitExpirationCandles()` and verify the resolved value in the run log.
+
+#### 7.13.4 S12 Production Refinements — Persistent 4H Trend + Fee-Aware TP Floor — **NEW v2026-10-23**
+
+Two hard gates close the audit's two largest loss sources: counter-trend shorts in an expanding 4H market and fee-dominated micro-targets.
+
+| Gate | Rule | Rejection key |
+| --- | --- | --- |
+| **Persistent 4H trend (SMA50)** | `sma50 = mean(last min(50, len) closed 4H closes)` from `patternData.candles4h`. Shorts require the last 4H close `≤ sma50 × 1.002`; longs require `≥ sma50 × 0.998`. The only exception is price at the unmitigated opposing 4H POI (`isAtOpposingHtfZone`). Fewer than **20** closed 4H candles fails closed. The existing 4H BOS/CHoCH check remains as a secondary confirmation. | `htfContradiction` |
+| **Fee-aware target floor** | After `resolveTakeProfit()` succeeds: `targetDistancePct = \|target − idealEntry\| / idealEntry`. If it is below `MIN_TP_DISTANCE_PCT` (default `0.0035` = 0.35%) the setup is rejected. Applies to structural and fixed-R targets alike. | `insufficientRoom` |
+
+**Config**: `MIN_TP_DISTANCE_PCT` is parsed into `BotConfig.minTpDistancePct` as a `Decimal`, must be `> 0` and `< 0.1`; an absent value defaults to `0.0035`. `SNIPER_LIMIT_EXPIRATION_CANDLES` remains `15`.
+
+**Measured result** (same 60-day window and 1C flags as §7.13.3, NEAR/AVAX/LINK, `USE_LOCAL_CACHE_ONLY=true`):
+
+| Symbol | Net | Trades | W/L | Win rate | PF | Max DD | Fees |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| NEARUSDT | +$271.20 (+27.12%) | 12 | 8/4 | 66.67% | 4.35 | 5.17% | $88.92 |
+| AVAXUSDT | +$19.19 (+1.92%) | 3 | 2/1 | 66.67% | 1.70 | 2.69% | $23.20 |
+| LINKUSDT | −$20.54 (−2.05%) | 6 | 2/4 | 33.33% | 0.74 | 7.49% | $49.81 |
+| **Portfolio (3 symbols)** | **+$269.85 (+9.00%)** | **21** | **12/9** | **57.14%** | — | — | **$161.93** |
+
+Against the 3-symbol subset of the §7.13.3 baseline (**+$227.04 / 40 trades / 52.50% WR / $326.30 fees**), the refinements add **+$42.81** net while cutting trades by **47.5%** and fees by **50.4%**. LINK is the only regression (−$27.60 vs +$7.06): the fee floor removed a micro-target short winner (2026-10-16, 0.192% target) and the SMA50 gate removed a counter-trend long winner (2026-10-18, 4H close 6.9% below SMA50), while the surviving losses clustered. The gates are behaving as designed — they trade frequency for directional and fee alignment.
+
+> **Boundary note**: the fee floor is measured against `idealEntry` (as specified). A Market fill at a premium can realize a slightly shorter target distance; the LINK 2026-10-22 trade is the observed edge case (planned 0.353%, realized 0.287%). Extending the floor to the actual fill is a deliberate future decision, not a silent clamp.
+
+---
 
 ---
 
@@ -1776,13 +1854,22 @@ const limitPrice = useMarketOrder ? null : idealEntry.toFixed(8);
 
 #### 7.20.2 Smart Cancellation — Limit Order Lifecycle
 
-**Expiration**: `LIMIT_EXPIRATION_CANDLES=6` (default 6 × 15m = 1.5 hours).
+**Expiration** is **mode-aware**, because the candle count is measured in the *execution* timeframe:
+
+| Mode | Knob | Default lifetime |
+|------|------|------------------|
+| **V4 Classic** | `LIMIT_EXPIRATION_CANDLES` (LTF candles) | 6 × 15m = **90 min** |
+| **V5 Sniper** | `SNIPER_LIMIT_EXPIRATION_CANDLES` (1m candles) | 15 × 1m = **15 min** |
+
+Resolve both through `resolveLimitExpirationCandles()` / `resolveLimitExpirationMs()` (`src/config/env.ts`) — the live reconciliation loop and the backtest simulator MUST use the same helper so they cannot drift.
+
+> **Why the split (v2026-10-22)**: 6 candles meant 90 minutes in Classic but only **6 minutes** in Sniper Mode, silently inheriting the LTF count. Measured on 60d 1m backtests, a 1m OB-midpoint pullback routinely needs 7–15 minutes: with a 6-minute lifetime SOL filled 1 placed limit and expired 4, while at 15 minutes it filled 3 and expired 1. The lifetimes are now independent, and Classic behaviour is unchanged.
 
 **ReconciliationLoop** (`src/bootstrap/reconciliation.ts`): Every 10 min, calls `getOpenOrders(symbol)` → for each active Limit order:
-- If `orderAge > LIMIT_EXPIRATION_CANDLES × LTF_TIMEFRAME` → **cancel** on exchange (`cancelOrder`).
-- Log: `Cancelled expired LIMIT order ${orderId} (age: X min, limit: 6 candles)`.
+- If `orderAge > resolveLimitExpirationMs(config)` → **cancel** on exchange (`cancelOrder`).
+- Log: `Cancelled expired LIMIT order ${orderId} (age: X min, limit: N candles)` — `N` is the *resolved* count, not the raw Classic knob.
 
-**Rationale**: If limit order hasn't filled in 6 candles, the setup context is stale — price action has moved on.
+**Rationale**: If a Limit order has not filled within its mode's lifetime, the setup context is stale — price action has moved on.
 
 #### 7.20.3 Backtester Simulation (`src/backtest/executionSimulator.ts`)
 
@@ -1836,7 +1923,7 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 
 **Problem**: Scenario 12 (Sniper Touch) was generating mathematically impossible trades (invalid SL level for Buy side: entry=2722.00, sl=2726.16) because it used manual inline SL/TP calculation instead of the centralized `BaseScenario.calculateLevels()`.
 
-**Root Cause**: Violation of **Anti-Pattern 15.2** — inline SL/TP calculation instead of using `BaseScenario.calculateLevels()`.
+**Root Cause**: Violation of §16.5.1 — inline SL/TP calculation instead of using `BaseScenario.calculateLevels()`.
 
 **Fix**: Removed manual SL/TP calculation in `Scenario12_SniperTouch.ts`. Now uses:
 1. Creates `obZone` from Order Block (top, bottom, direction)
@@ -1888,32 +1975,33 @@ ENFORCE_KILLZONES=false              # bypass London/NY killzone gates
 
 ---
 
-## 8. THE 12 SCENARIOS — `src/engine/scenarios/`
+## 8. THE SCENARIOS (1–12 ACTIVE, 13 ARCHIVED) — `src/engine/scenarios/`
 
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| **1**  | HTF Continuation    | 4H BOS → 15m OB retest in direction                        | 4H trend alignment                                                            |
+| **1**  | HTF Continuation    | Tested 4H OB → 15m CHoCH at/after the touch → 15m FVG at/after the CHoCH (both inside the 4h window) | 4H OB direction defines the side; 16-candle causality window; displacement + dynamic TP |
 | **2**  | FVG Fill            | 15m FVG → retest at 50%                                    | **Liquidity Context**: sweep/CHoCH in prior 10-15 candles (`NoLiqCtx`)        |
 | **3**  | IDM (Inducement)    | Local extreme swept → true OB beyond                       | Swing detection                                                               |
 | **4**  | Mitigation Chain    | OB → BOS within 24h → retest                               | **Strength Context**: OB must make BOS (`NoBOS`)                              |
-| **5**  | HTF Liquidity Sweep | PDH/PDL/BSL/SSL sweep in London/NY                         | Killzone + SFP (wick pierce, close inside)                                    |
+| **5**  | HTF Liquidity Sweep | PDH/PDL/PWH/PWL/BSL/SSL sweep in the last 16 LTF candles → CHoCH at/after the sweep | Killzone + sweep wick (SFP) + deterministic pool priority (`PDH > PDL > PWH > PWL > BSL > SSL`) + dynamic TP |
 | **6**  | SMS (Failure Swing) | Failed HH/LL → CHoCH opposite                              | Displacement ≥ 1.5 ATR on CHoCH candle                                        |
 | **7**  | AMD (Asian Range)   | Asian 20:00-24:00 high/low → sweep → reversal              | `detectSessionRanges()` per day                                               |
 | **8**  | Range Deviation     | Range High/Low deviation → reclaim                         | Wick back inside, equilibrium target                                          |
 | **9**  | Turtle Soup         | Range High sweep (EQH) → short                             | EQH tolerance + SFP on range boundary                                         |
 | **10** | Breaker Block       | OB broken with displacement → retest                       | Body close beyond OB + FVG nearby                                             |
 | **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`). **FRESHNESS**: Always takes newest SMS (`smsList[smsList.length-1]`), newest CHoCH after SMS (`validChochs[validChochs.length-1]`), newest OB before SMS (`mbObs[mbObs.length-1]`). **RETEST**: Current 15m candle must test MB zone with wicks, close inside zone in trade direction, within 12h of CHoCH. **P/D**: Entry close tested against SMS→CHoCH impulse equilibrium (Long=Discount, Short=Premium). |
-| **12** | Sniper Touch        | 1m CHoCH inside 15m macro zone (PDH/PDL/PWH/PWL)           | Killzone (London/NY) + latest-sweep causality + proximity (1 ATR/0.3%) + 1m CHoCH + 1m OB entry |
+| **12** | Sniper Touch        | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
+| **13** | ~~Top-Down Order Flow~~ | **ARCHIVED** — `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts`, not registered | Kept for reference; `ACTIVE_SCENARIOS` accepts 1–12 |
 
 ### 8.1 Scenario Overview
 
-The table above lists all 12 scenarios implemented in `src/engine/scenarios/`. Scenarios 1–11 are classic SMC patterns (15m/4H), Scenario 12 is V5 Sniper Mode (1m execution inside 15m macro zones). Each scenario has dedicated rejection statistics for observability.
+The table above lists all 12 active scenarios implemented in `src/engine/scenarios/`. Scenarios 1–11 are classic SMC patterns (15m/4H) and Scenario 12 is V5 Sniper Mode (single-pass 1m evaluation against swept levels). Scenario 13 (Top-Down Order Flow) is archived in `src/engine/scenarios/archive/` and is not registered; its §8.6 documentation is retained as a design reference. Each active scenario has dedicated rejection statistics for observability.
 
 ### 8.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
-- Scenarios setting `zoneDetails`: **1, 2, 4, 5, 7, 8, 10, 11, 12**.
+- Scenarios setting `zoneDetails`: **1, 2, 3, 4, 5, 6, 7, 8, 10, 11**. Scenario 9 deliberately omits it (its `structureDetails` carries the sweep candle as the burn anchor) and Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21).
 
 ### 8.3 Contextual Quality Filters (Confluence)
 
@@ -1962,7 +2050,7 @@ All Scenarios 1–11 were overhauled to eliminate array access hazards, enforce 
 #### 1. Freshness Guarantee (No `array[0]`)
 Scenarios MUST NEVER access the 0-th index or use a forward `.find()` when looking for OBs, FVGs, or CHoCHs — this fetches the oldest, stale structures. They MUST use `array[array.length - 1]` or `[...array].reverse().find(...)` to guarantee trading on the most recent market data.
 
-> **Why**: `structures`, `zones`, `fvgs`, and `sessionRanges` arrays are timestamp-ascending (oldest first). Trading `array[0]` means trading a days-old zone. This hazard was present in 10 of 11 scenarios and eliminated in the v2026-10-16 pass (see 16.41).
+> **Why**: `structures`, `zones`, `fvgs`, and `sessionRanges` arrays are timestamp-ascending (oldest first). Trading `array[0]` means trading a days-old zone. This hazard was present in 10 of 11 scenarios and eliminated in the v2026-10-16 pass (see §16.5.4).
 
 #### 2. SL/TP Single Source of Truth
 Inline math for stop-loss or take-profit (e.g., `zone.bottom - offset`) is strictly forbidden. Every scenario must call `this.calculateLevels(...)` — the single source of truth for level geometry in `BaseScenario` — to ensure protection against inverted zones (`Decimal.min/max` of top, bottom, and entry) and to enforce the 0.1% minimum spread offset floor.
@@ -1973,6 +2061,92 @@ Inline math for stop-loss or take-profit (e.g., `zone.bottom - offset`) is stric
 Every scenario MUST populate `structureDetails` in its `RouterResult` — the trigger structure (`CHoCH`/`BOS`/`SMS` with `{ type, timestamp, price, direction }`). This allows `burnSetup()` and the live execution engine to instantly burn the trigger structure upon entry or abort, preventing Ghost Signal loops across all 11 classic patterns.
 
 > **Why**: Structures without `structureDetails` are never added to `mitigatedStructures` — the same trigger CHoCH can be re-detected on the next scan, producing infinite ghost re-entries. Zones are additionally tagged via `zoneDetails` (Scenarios 1–8, 10, 11). Scenario 9 intentionally omits `zoneDetails`: its `structureDetails` carries the sweep candle timestamp as the burn anchor.
+
+---
+
+### 8.6 Scenario 13 — Top-Down Order Flow Matrix — **ARCHIVED v2026-10-23**
+
+> **ARCHIVED — not registered, not tradeable.** As of v2026-10-23 Scenario 13 lives in `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` and is no longer constructed by `ScenarioRouter`. `ACTIVE_SCENARIOS` / `SCENARIOS_<SYMBOL>` accept **1–12** only: a `13` in a per-symbol override is silently dropped during parsing, and a `13` in `ACTIVE_SCENARIOS` fails validation. The module still compiles and its test suite still runs (`tests/scenarios/archive/scenario13_top_down.test.ts`), and the rest of this section is retained as design reference for a possible revival. **Why archived**: the multi-timeframe cascade produced fee-dominated results at 1m granularity; effort moved to Scenario 12 frequency (per-CHoCH sweep pairing + opt-in sweep sources, §7.13.2).
+
+**File**: `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` (archived)
+**Brain modules**: `src/engine/brain/htfRoadmap.ts`, `src/engine/brain/volumeExhaustion.ts`, `src/engine/tpResolver.ts`. The brain modules and `tpResolver` remain in the live tree — `tpResolver.resolveTakeProfit()` is used by Scenarios 1 and 5 for structural take-profit resolution.
+**Runtime requirement (historical)**: `ENABLE_SNIPER_MODE=true` — the live engine forwards `candles1m` to the router only under that flag (`strategyEngine.ts:925`), and the backtester did the same. With the flag off, or with fewer than 15 1m candles, S13 failed closed with the `disabled` bucket; there was no blind 15m fallback. S13 and S12 could never share a symbol: both are 1m producers on the same per-symbol `IN_TRADE` slot.
+
+**Premise**: S13 traded only when three independent timeframes agree **in a strict causal order**. The 4H answers *where* price is going, the 15m answers *whether the pullback is exhausted*, the 1m supplies *the trigger and the precision stop*. No timeframe is allowed to substitute for another, and every gate fails closed.
+
+#### 8.6.1 Gate Funnel
+
+| Gate | Timeframe | Question | Rejection keys |
+| --- | --- | --- | --- |
+| **1. Roadmap** | 4H | Is there a directional bias (`BULLISH`/`BEARISH`, never `NEUTRAL`) and a valid structural draw? | `noHtfRoadmap`, `htfNeutral` |
+| **2. POI selection** | 15m | Which zone sits between current price and the 4H target, inside the `3 × atr15m` proximity band? Iterated **proximity-ranked** (R1) so the newest zone cannot shadow a closer testable one. | `noPoi` |
+| **3. Volume exhaustion** | 15m | Did counter-pressure decay into the touch, and did the touch print a reaction surge? | `volumeInvalid`, `noPullbackOrigin`, `insufficientPullbackCandles`, `pullbackVolumeHeavy`, `poiViolated`, `noPoiTouch`, `noReaction`, `insufficientAsymmetry` |
+| **4. Micro trigger** | 1m | Fresh CHoCH/BOS **strictly after** the touch minute (R2 causality) + precision stop layout. | `noReaction` |
+| **5. TP resolution** | Structure | Is there a structural target beyond entry that clears `DYNAMIC_TP_MIN_RR`? | `tpInvalid` |
+| **6. Mitigation tagging** | — | Emit `zoneDetails` + `structureDetails` so the trigger structure is burned on entry (Invariant 39). | `triggered` |
+
+#### 8.6.2 Brain Module 1 — `htfRoadmap.ts`
+
+A pure, read-only lens over the 4H market. It returns the active **dealing range** (bounded by the last validated 4H swing extremes), the dominant **institutional bias** and the **primary liquidity draw** (target).
+
+- `Decimal`-only math; no I/O, no logger, no config mutation, no input mutation (sorting/filtering happens on shallow copies).
+- Degenerate data **fails closed** (`isValid = false`) instead of fabricating a range or a target.
+- `NEUTRAL` means *no trade allowed* — S13 rejects the setup at Gate 1 rather than guessing a direction.
+
+#### 8.6.3 Brain Module 2 — `volumeExhaustion.ts`
+
+A pure diagnostic layer over 15m candles that answers two questions:
+
+1. **Did the pullback actually exhaust?** Average pullback volume is compared to a baseline SMA (`volumeSmaPeriod`, default 20) via `maxPullbackVolumeRatio` (default 1.5).
+2. **Did the POI touch print an institutional reaction?** The touch candle's volume is compared to the same baseline via `minReactionVolumeRatio` (default 1.0).
+
+**Volume Baseline Causality (Invariant 56)**: the baseline window ends **before the pullback origin** —
+`baselineCandles = parsedCandles.slice(baselineStart, correctiveStart)` with `correctiveStart = origin.index + 1`. The impulse candle that created the pullback is therefore excluded from its own baseline; otherwise the average would be contaminated by the very volume it is supposed to judge, and every impulse would pass as "exhausted".
+
+`failureCode` partitions the outcome (`NO_PULLBACK_ORIGIN`, `INSUFFICIENT_PULLBACK_CANDLES`, `PULLBACK_VOLUME_HEAVY`, `POI_VIOLATED`, `NO_POI_TOUCH`, `INVALID_VOLUME_SMA_PERIOD`, `ZERO_BASELINE_VOLUME`, …) so the funnel stays truthful instead of collapsing into one "not exhausted" bucket.
+
+#### 8.6.4 Brain Module 3 — `tpResolver.ts`
+
+Replaces the blind `k × R` target of `calculateLevels()` with a **structural** one. `calculateLevels()` derives TP arithmetically and never consults the market; on 1m entries two mechanisms make that negative-expectancy (fee-to-stop explosion in R units, and the MFE distribution).
+
+- **Candidate set**: macro pools (PDH/PDL/PWH/PWL, session extremes), HTF/15m swings, range boundaries/equilibrium, zones, plus the roadmap target injected as a synthetic pool.
+- **`major` classification**: each candidate is flagged `major` or not — `MAJOR_POOL_TYPES` (macro liquidity) and injected `majorTargets` are always major; internal swings are minor.
+- **`skipMinorObstacles: true`** (used by archived S13): a *minor* swing inside the RR floor is skipped and resolution continues to the next candidate, while a **major** barrier (macro pool / HTF level) is treated as a genuine wall and blocks the candidate instead of being ignored.
+- **`skipMinorObstacles: false`** (Scenarios 1 and 5 explicitly, Scenario 12 by omission): the nearest structural candidate is a hard wall — if it does not clear the floor the resolution fails with `Insufficient room` instead of drilling through minor structure.
+- **Bounds**: `DYNAMIC_TP_MIN_RR` (default 1.5) is the floor; `DYNAMIC_TP_MAX_RR` (default 6.0) caps the target. S1, S5 and S12 resolve structurally only when `ENABLE_DYNAMIC_TP=true` — otherwise `resolveTakeProfit()` returns the fixed `FIXED_TP_RR × R` target. The archived S13 forced dynamic resolution regardless of the switch — a fixed `k × R` target contradicted its premise.
+
+#### 8.6.5 Stop Anchoring — full reaction window (D5 reverted)
+
+The stop is anchored to the **entire 1m reaction window**, including the minute that first touched the POI:
+
+```typescript
+const microExtreme = reaction.reduce(...); // min low (long) / max high (short)
+```
+
+The touch minute is not noise: its wick is part of the structure that must be violated before the reaction is invalid. Excluding it (the experimental D5 slice) pulled the stop **inside** the real invalidation and let a normal mitigation wick clip it. `BaseScenario.calculateLevels()` still enforces the **0.1% offset floor** and the inverted-zone defense.
+
+**Invariant**: the stop reference MUST include the POI touch candle. Locked by two regression tests (`tests/scenarios/archive/scenario13_top_down.test.ts`): a bullish sweep wick to 102.20 produces `SL = 102.09595`, and a bearish spike to 108.60 produces `SL = 108.70675`.
+
+**No blind 15m fallback**: S13 required `ENABLE_SNIPER_MODE=true` and **>= 15** 1m candles; otherwise it failed closed with the `disabled` funnel bucket. The midpoint-on-confirmed-15m-close experiment produced a fee-dominated **-$268.62** across the same three symbols and was removed.
+
+#### 8.6.6 Verified Portfolio Baseline (strict 1m Sniper)
+
+60-day 1m-cache runs, `ENABLE_SNIPER_MODE=true`, `ACTIVE_SCENARIOS=13` (historical — S13 is archived and `13` is no longer accepted), `ENABLE_DYNAMIC_TP=true`, `DYNAMIC_TP_MIN_RR=1.5`, `DYNAMIC_TP_MAX_RR=6.0`, `SMC_SWEEP_MIN_WICK_RATIO=0.25`, `SNIPER_LIMIT_EXPIRATION_CANDLES=6`:
+
+| Symbol | Net | Trades | Win rate | PF | Max DD | Fees |
+| --- | --- | --- | --- | --- | --- | --- |
+| BTCUSDT | −$17.37 | 5 | 40.0% | 0.76 | 2.61% | $26.37 |
+| SOLUSDT | +$0.13 | 3 | 33.3% | 1.01 | 2.60% | $10.52 |
+| NEARUSDT | +$88.25 | 8 | 50.0% | 2.21 | 4.45% | $21.18 |
+| **Combined** | **+$71.01** | 16 | 43.75% | — | **< 4.5%** | **$58.07** |
+
+NEAR is identical to the earlier baseline (+8.83%, PF 2.21, 4.45% DD, $21.18 fees). BTC matches the documented pre-D5 −$17.37; SOL is +$0.13 vs the post-D5 +$0.47 (a single stop difference). The portfolio is net positive **+$71.01**, no symbol below −1.8%, and fee drag is **$58.07** — 75% lower than the removed blind 15m run ($231.79).
+
+#### 8.6.7 Backtester Fidelity Notes
+
+- **Cooldown gate**: the router is not evaluated while a cooldown is active (`run.ts`), so a rejected scan cannot emit phantom triggers.
+- **Mitigation filter**: `mitigatedStructures` is passed to `router.evaluate()`; S13 filtered by **timestamp only** (Invariant 25).
+- **Copy-on-write**: the router filters copies of `structures`/`zones`, never the cached `patternData` (Invariant 50).
 
 ---
 
@@ -2037,13 +2211,15 @@ CREATE TABLE symbol_state (
 
 ## 10. BACKTEST ENGINE — `src/backtest/`
 
-- **State Machine**: `openTrade()` / `checkAndCloseTrade()` in `executionSimulator.ts`.
+- **State Machine**: `openTrade()` / `checkAndCloseTrade()` in `executionSimulator.ts`, guided by Hybrid Smart Entry (Market fill at `candle.close`, or a `PENDING` Limit that must be touched by a later wick).
+- **Fees**: `TAKER_FEE_RATE = 0.00055` / `MAKER_FEE_RATE = 0.00020`. Entry fees accrue to a ledger and are settled **once** at closure — never debited from the running balance at open.
 - **Drawdown Guard**: `consecutiveLosses` increments on loss → feeds `RiskManager.getEffectiveRiskPercent()`.
-- **Max Drawdown**: Calculated correctly (not `TODO%`).
-- **HTML Equity Curve**: `writeBacktestArtifacts()` writes `data/Backtest_Chart_<SYMBOL>.html` (self-contained Chart.js + Lightweight Charts) with Balance / Running Peak / Closed Drawdown % / Max Floating Drawdown % and an OHLC candlestick panel with trade entry/exit markers — see §7.18.1.
+- **Max Drawdown**: continuous equity sampling, including intra-trade excursion — reported next to the closed-trade drawdown series (see §7.18.1).
+- **Adaptive Fractioning**: `initializeTradeManagement(entry, sl, tp, qty)` captures the true `TotalR` before open, so milestones are simulated exactly as in live.
+- **History window**: `BACKTEST_DAYS` (default 60) → `getTimeRangeForDays(config.backtestDays)` shared by the 1m/LTF/HTF loaders (see §7.7, Invariant 42).
 - **CLI**: `npm run backtest -- BTCUSDT` (single symbol filter via `parseArgs`).
-- **History window**: `BACKTEST_DAYS` (default 60) → `getTimeRangeForDays(config.backtestDays)` shared by 1m/LTF/HTF loaders (see §7.7, Invariant 42).
-- **Performance**: ~25s for 17,280 15m candles (180-day window, 3 symbols); scales with `BACKTEST_DAYS`.
+- **Performance**: linear in `BACKTEST_DAYS` and symbol count; the hot loop is 1m-driven with LTF/HTF state rebuilt only on timeframe boundaries. Timing is environment-dependent and intentionally not documented as a fixed figure.
+- **Artifacts**: `data/Backtest_Report_<SYMBOL>.txt` + `data/Backtest_Chart_<SYMBOL>.html` (equity curve, drawdown, candlestick trade overlay).
 
 ---
 
@@ -2058,58 +2234,81 @@ DATABASE_URL=postgresql://...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 
-# Risk
-RISK_PERCENT=2
-REDUCED_RISK_PERCENT=1
+# Risk & capacity
+RISK_PERCENT=2                     # required, > 0
+REDUCED_RISK_PERCENT=1             # must be <= RISK_PERCENT
 LEVERAGE=10
+MAX_WORKING_CAPITAL=20000          # unset = unlimited; a literal 0 fails validation
 
-# Trading Mode
-DEMO_TRADING=true          # false = mainnet (testnet ignored)
-AUTO_TRADING=false         # true = auto-execute, false = manual approval
+# Trading mode
+DEMO_TRADING=false                 # true = Bybit Demo (forces TESTNET=false)
+TESTNET=true                       # ignored when DEMO_TRADING=true; false = mainnet
+AUTO_TRADING=false                 # true = auto-execute, false = manual approval
 TRADE_APPROVAL_TIMEOUT_MINUTES=5
 
 # Data
-HISTORY_CANDLES=200        # 15m/4H history (max 1000)
-MACRO_CANDLES=1000         # 1W/1D for macro context (max 1000)
+HISTORY_CANDLES=200                # LTF/HTF history (max 1000)
+MACRO_CANDLES=1000                 # 1W/1D macro context (max 1000)
 LTF_TIMEFRAME=15
 HTF_TIMEFRAME=240
+DATA_DIR=data
 
 # Backtest
-BACKTEST_DAYS=60           # History window for ALL backtest loaders (1m/LTF/HTF), 1m requires a 1m cache
+BACKTEST_DAYS=60                   # Shared window for 1m/LTF/HTF loaders
 ENABLE_SNIPER_MODE=false
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5
-USE_LOCAL_CACHE_ONLY=false # true = offline backtest, cache only, zero Bybit API calls
+USE_LOCAL_CACHE_ONLY=false         # true = offline backtest, cache only, zero API calls
+BACKTEST_CSV_PATH=                 # optional local CSV source
+ENABLE_HEALTHCHECK_SERVER=false    # required true on Render
 
-# Features
+# Scenarios
+ACTIVE_SCENARIOS=1,2,3,4,5,6,7,8,9,10,11,12   # unset = all 12 active (13 is ARCHIVED)
+SCENARIOS_BTCUSDT=1,5,6            # optional per-symbol override (1–12; 13 is dropped)
 ENABLE_LIVE_TEST_ORDERS=false
-ACTIVE_SCENARIOS=1,2,3,4,5,6,7,8,9,10,11
+
+# Dynamic take-profit (structural targets instead of blind k * R)
+# Scenarios 1, 5 and 12 use these bounds when ENABLE_DYNAMIC_TP=true
+ENABLE_DYNAMIC_TP=true
+FIXED_TP_RR=3.0                    # fallback target when dynamic resolution is disabled
+DYNAMIC_TP_MIN_RR=1.5              # structural target floor (R multiples)
+DYNAMIC_TP_MAX_RR=6.0              # hard cap on structural targets
+DYNAMIC_TP_REQUIRE_TARGET=false    # true = reject the setup when no structural target exists
 
 # Cooldown after SL hit (in LTF candles, default 16 = 4h for 15m timeframe)
 COOLDOWN_CANDLES=16
 
-# SMC Parameters
-SMC_SL_ATR_OFFSET=0.5              # ATR multiplier for SL offset (default 0.5)
-SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR (default 1.5)
+# SMC parameters
+SMC_SL_ATR_OFFSET=0.5              # ATR multiplier for SL offset
+SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR
+SMC_SWEEP_MIN_WICK_RATIO=0.25      # S12: min rejection wick share of candle range (0 < x < 1)
 
-# Entry Filters (day-of-week + killzone)
+# S12 sweep sources (opt-in; macro PDH/PDL/PWH/PWL is always armed)
+S12_SESSION_SWEEPS=false           # true = newest ASIAN high/low becomes a sweepable level
+S12_EQH_EQL_SWEEPS=false           # true = 15m EQH/EQL pools become sweepable levels
+MIN_TP_DISTANCE_PCT=0.0035         # S12 fee floor: reject targets < 0.35% from idealEntry (must be > 0 and < 0.1)
+
+# Entry filters (day-of-week + killzone)
 ALLOWED_DAYS_OF_WEEK=1,2,3,4,5     # ISO weekdays in UTC (1=Mon ... 7=Sun) allowed for NEW entries
 ENFORCE_KILLZONES=true             # false = bypass all killzone gates globally (backtesting)
 
-# Notifications
-ENABLE_TRADE_NOTIFICATIONS=true    # false = mute routine trade messages; logger.error alerts still delivered
+# Entry physics
+SMART_ENTRY_THRESHOLD_PCT=0.15     # Market vs Limit threshold (%)
+LIMIT_EXPIRATION_CANDLES=6         # Limit lifetime in LTF candles (Classic)
+SNIPER_LIMIT_EXPIRATION_CANDLES=15 # Limit lifetime in 1m candles (Sniper Mode)
+PREFLIGHT_BUFFER_PCT=0.05          # Pre-flight SL spread buffer (%)
 
-# Hybrid Smart Entry
-SMART_ENTRY_THRESHOLD_PCT=0.15     # Market vs Limit threshold in % (default 0.15 = 0.15%)
-LIMIT_EXPIRATION_CANDLES=6         # Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)
+# Notifications & backup
+ENABLE_TRADE_NOTIFICATIONS=true    # false = mute routine trades; logger.error alerts still delivered
+BACKUP_PASSWORD=...                # AES-256-CBC key for /backup
 
-# Funding Monitor (delta-neutral arbitrage)
+# Funding monitor (delta-neutral arbitrage)
 ENABLE_FUNDING_MONITOR=false
 FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
-FUNDING_ALERT_THRESHOLD=0.0
-FUNDING_RESTORE_THRESHOLD=0.0001
+FUNDING_ALERT_THRESHOLD_PCT=0.0    # % — alert when rate <= this value
+FUNDING_RESTORE_THRESHOLD_PCT=0.015 # % — restore alert when rate >= this value
 
 # Logging
-LOG_LEVEL=info             # debug, info, warn, error
+LOG_LEVEL=info                     # debug, info, warn, error
 ```
 
 ---
@@ -2118,7 +2317,7 @@ LOG_LEVEL=info             # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (261 tests, all green)
+npm test             # jest (558 tests / 36 suites, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -2130,12 +2329,28 @@ docker compose up -d
 
 ## 13. CRITICAL INVARIANTS (DO NOT BREAK)
 
+> **Normative status**: this section is the single source of truth for architecture-level constraints. §16 documents *why* each rule exists (Root Cause → Fix → Rule); where the two ever disagree, **§13 wins**. Invariant numbers are a stable API — they are cited by `README.md`, source comments and tests, so they are never renumbered. New invariants are appended.
+
+### Index by Domain
+
+| Domain | Invariants |
+| --- | --- |
+| **Money, Precision & Capacity** | 1, 30, 34, 55 |
+| **Execution Physics** (pre-flight → fill → bookkeeping) | 6, 18, 23, 24, 29, 31, 33, 34, 38, 39, 47, 49, 52, 54 |
+| **Exchange Truth & Reconciliation** | 7, 26, 27, 28, 35, 40, 53 |
+| **State Machine & Concurrency** | 6, 16, 23, 36, 37, 47, 49 |
+| **Ghost Signals & Mitigation** | 4, 5, 14, 15, 19, 21, 25, 36, 39 |
+| **SMC Mathematics** | 2, 3, 11, 18, 51, 56, 57 |
+| **Adaptive Fractioning** | 26, 41, 53, 55 |
+| **Backtester Fidelity** | 12, 13, 14, 15, 16, 17, 20, 42, 46, 48, 50 |
+| **Infrastructure & Observability** | 8, 9, 10, 22, 32, 43, 44, 45 |
+
 1. **No `number` for money** — only `Decimal` + string serialization.
 2. **Single `PatternRecognizer`** instance shared across all engines.
 3. **Macro context initialized ONCE** at bootstrap (live), **DYNAMICALLY UPDATED** in backtester — never static in hot path.
-4. **`mitigatedZones`** is the ONLY re-entry protection (no "freshness" hacks).
+4. **Zone and structure mitigation are the ONLY re-entry protection** — `mitigatedZones` burns consumed zones, `mitigatedStructures` burns consumed CHoCH/SMS/BOS triggers (timestamp-only matching). No "freshness" heuristics. Macro liquidity pools (Invariant 21) are the sole exception.
 5. **`reconcileWithTrade`** receives `zoneDetails` for mitigation tracking.
-6. **Slippage Guard** runs at approval time, not order time.
+6. **Slippage Guard evaluates at the live tick, in BOTH entry paths** (manual `handleApproval` + auto `executeStagedEntry`), applies to **Market orders only**, and is **directional** (Invariant 52). A signal-time price is never trusted for execution.
 7. **ClosedPnL** fetched after 2.5s delay on every close.
 8. **Global 429 circuit breaker** pauses ALL REST for 5 min.
 9. **WS Watchdog** 3-min silence = force reconnect.
@@ -2148,8 +2363,8 @@ docker compose up -d
 16. **Same-candle SL/TP resolution** — SL checked first; if both hit → `BOTH` = LOSS at SL price (conservative).
 17. **DB `reason` field persisted on close** — `closeTrade()` accepts `reason` parameter ('TP'|'SL'|'RECONCILIATION'), all callers updated.
 18. **Hybrid Smart Entry** — `idealEntry` always from scenario geometry (zone equilibrium), never `candle.close`. Market vs Limit decision uses `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%) against `|idealEntry - currentPrice| / idealEntry`.
-19. **Limit Order Cancellation** — ReconciliationLoop cancels Limit orders older than `LIMIT_EXPIRATION_CANDLES × LTF_TIMEFRAME` minutes. Zone burned immediately on Limit placement (not on fill).
-20. **Backtester Limit Simulation** — State machine: SCANNING → PENDING (limitPrice, placedAt, candlesWaited) → IN_TRADE (on wick touch) OR CANCELLED (after LIMIT_EXPIRATION_CANDLES). Filled at exact `limitPrice`, not candle close.
+19. **Limit Order Cancellation** — ReconciliationLoop cancels Limit orders older than `resolveLimitExpirationMs(config)`: `LIMIT_EXPIRATION_CANDLES` in **LTF candles** for Classic, `SNIPER_LIMIT_EXPIRATION_CANDLES` in **1m candles** for Sniper (defaults 6 × 15m = 90 min vs 15 × 1m = 15 min). Both live and backtest resolve through the same helper. In the backtester the zone is burned on Limit **placement**, not on fill.
+20. **Backtester Limit Simulation** — State machine: SCANNING → PENDING (limitPrice, placedAt, candlesWaited) → IN_TRADE (on wick touch) OR CANCELLED (after the mode-resolved expiration count). Filled at exact `limitPrice`, not candle close.
 21. **Macro liquidity pools (PDH/PDL/PWH/PWL) are NEVER burned** — they may be swept multiple times. Adding them to `mitigatedZones` is forbidden. Spam protection works exclusively via burning 1m CHoCH structures via `mitigatedStructures`.
 
 22. **DB Pool Safety** — All DB calls MUST use `const client = await pool.connect(); try {...} finally { client.release(); }`. Connection leaks are forbidden. Every method in `PostgresDatabase` follows this pattern.
@@ -2166,7 +2381,7 @@ docker compose up -d
 
 28. **Position Size Zero-Check** — WebSocket position closure detection MUST parse `item.size` using `Decimal.isZero()` with fallback to handle Bybit V5 formatted strings (`"0"`, `"0.0000"`, `""`). Prevents lingering `IN_TRADE` states.
 
-29. **Live Price Fallback** — Before any pre-flight check, bot MUST fetch `getLivePrice()` with fallback to `feedLtf.getLastClosed()?.close`. If live tick unavailable, last closed candle close is used so guards NEVER silently skip validation.
+29. **Live Price Resolution** — `getLivePrice()` returns `latestTickPrice` only (global tick memory written on every WS tick, before the `confirmed` guard). If it is null, the pre-flight path falls back to the **execution-context** feed: 1m in Sniper Mode, LTF otherwise. If that is also null, the setup is burned and the entry aborted — guards never silently skip validation.
 
 30. **Limit Price Precision** — Limit order prices MUST be formatted using `formatPrice(idealEntry, instrument.tickSize)` from `utils/precision.ts`. NEVER use `toFixed()` or hardcoded decimal places. Instrument's `tickSize` is the single source of truth for price precision.
 
@@ -2176,7 +2391,7 @@ docker compose up -d
 
 33. **`positionIdx: 0` Mandatory for TP/SL Orders** — Every `submitOrder()` call with `tpslMode: 'Full'` MUST explicitly include `positionIdx: 0` for One-Way Mode. Omission causes order rejection or TP/SL attachment failure on Bybit V5.
 
-34. **No Assumed Fill** — Database entry price MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. After `executionEngine.execute()`, bot MUST wait 500ms, fetch `getOpenPositions()`, and use `avgPrice` for `db.openTrade()`. **Enforced in BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) — the manual path previously wrote `updatedPlan.entryPrice`.**
+34. **No Assumed Fill** — Database entry price MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. After `executionEngine.execute()` confirms, the bot waits 500 ms, fetches `getOpenPositions()`, and uses `avgPrice` for `db.openTrade()`. **Enforced in BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual).**
 
 35. **Dual-Channel Closure Detection** — The engine MUST monitor BOTH `Position` and `Execution` WS topics to reliably detect position closures. Relying solely on `Position` channel will miss SL/TP closures.
 
@@ -2186,7 +2401,7 @@ docker compose up -d
 
 38. **Context-Aware Slippage Guard** — The >0.2% slippage guard must never be applied to Limit orders, as it would cause valid pullback setups to be aborted. Slippage guard is strictly for Market orders; Limit orders wait for pullback by design.
 
-39. **Burn Trigger Structure on Trade Open (Live)** — BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) MUST push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (standard 100-entry cap). This mirrors backtester burn-on-entry (Invariant 15) and closes the live ghost-signal gap — never rely solely on `burnSetup()` (abort paths) or trade-close mitigation.
+39. **Burn Trigger Structure on Trade Open (Live)** — BOTH `executeStagedEntry()` (auto) and `handleTradeApproval()` (manual) MUST push `this.plan.structureDetails` into `mitigatedStructures` **immediately after the exchange confirms the order — before `transition(IN_TRADE)` and before the `avgPrice` / `db.openTrade()` bookkeeping** (standard 100-entry cap). Burning after the DB write is forbidden: a post-fill DB failure would leave a live position whose trigger structure is still re-detectable. This mirrors backtester burn-on-entry (Invariant 15) and never relies solely on `burnSetup()` (abort paths) or trade close.
 
 40. **Bybit V5 Demo Account Balance Fetching** — Bybit Demo accounts act exclusively as Unified Trading Accounts (UTA). When fetching wallet balances in demo mode, the system MUST ONLY query `accountType: 'UNIFIED'` to prevent masking real errors with `[10001] accountType only support UNIFIED` errors from legacy `CONTRACT` queries.
 
@@ -2208,11 +2423,25 @@ docker compose up -d
 
 49. **Panic Close & Strict Recovery State** — If `db.openTrade()` fails AFTER the exchange confirms the order, the engine MUST invoke `panicCloseOrphan(orderId, orderType)` (cancel resting Limit order + reduce-only Market flatten + flatness verification). It may `burnSetup()` and return to `SCANNING` ONLY after the exchange is verified flat (`true`). If the emergency close fails or flatness cannot be verified (`false`), the engine MUST remain `IN_TRADE` — an unverified position is never abandoned by a state reset, so Reconciliation and manual supervision can still see it. **Transition to `SCANNING` while an uncontrolled position exists is strictly forbidden.** See §5.12.
 
-50. **Copy-on-Write for the Pattern Cache** — `ScenarioRouter.evaluate()` MUST NEVER mutate the cached `patternData` in place. `filterMitigatedStructures()` / `filterMitigatedZones()` are applied ONLY to shallow copies (`[...baseStructures]`, `[...baseZones]`), and the result is assembled into a new `evaluationData` object (`{ ...basePd, zones: safeZones, structures: safeStructures }`). The backtester reuses one `PatternData` object across every 1m iteration — in-place filtering would permanently strip structures/zones from the cache until the next LTF rebuild, destroying historical context and changing later results. See Anti-Pattern 16.45.
+50. **Copy-on-Write for the Pattern Cache** — `ScenarioRouter.evaluate()` MUST NEVER mutate the cached `patternData` in place. `filterMitigatedStructures()` / `filterMitigatedZones()` are applied ONLY to shallow copies (`[...baseStructures]`, `[...baseZones]`), and the result is assembled into a new `evaluationData` object (`{ ...basePd, zones: safeZones, structures: safeStructures }`). The backtester reuses one `PatternData` object across every 1m iteration — in-place filtering would permanently strip structures/zones from the cache until the next LTF rebuild, destroying historical context and changing later results. See §16.6.3.
 
 51. **Sniper Midpoint Proximity** — In Scenario 12 (Sniper Touch), the spatial gap between the swept macro level and the entry Order Block MUST be measured from the **OB midpoint** (`(top + bottom) / 2`), never from `top`/`bottom` edges: `obDistance = |obMidpoint − sweptPrice|`, `tolerance = max(atr15m, sweptPrice × 0.003)`. Nearest-edge distance is forbidden — a wide OB can straddle the level while its midpoint is far away, producing entries disconnected from the swept liquidity. The same midpoint is the entry anchor (`idealEntry`). The CHoCH close distance is logging-only and MUST NOT gate the setup.
 
 52. **Directional Slippage Guard** — The >0.2% slippage guard MUST be vectorial: `movedTowardTp = isLong ? currentPrice − plannedEntry : plannedEntry − currentPrice`, gated by `movedTowardTp.gt(0)`. `Math.abs()` / `.abs()` is **FORBIDDEN** here — an absolute deviation would reject favorable discounts (Discount Trap) and cannot distinguish adverse movement from progress. The guard applies to Market orders only (Limit orders wait for a pullback — Invariant 38) and MUST be semantically identical in the manual (`pendingTradeManager.handleApproval`) and auto (`executeStagedEntry`) paths. See §4.4.3.
+
+53. **PartiallyFilled Limit Safety** — A `PartiallyFilled` limit order MUST NEVER be closed in the DB as `CANCELLED` by the Reconciliation sweep. The resting portion may be cancelled on the exchange, but the already-filled portion MUST remain `IN_TRADE` so it is managed by Adaptive Fractioning and audited by Reconciliation. Closing the whole record as `CANCELLED` would orphan live exposure and hallucinate a zero-PnL trade.
+
+54. **Ambiguous Execution Pre-Submit Key** — `orderLinkId` is the ultimate source of truth for ambiguous submissions. If `execute()` returns `ok: false` while an `orderLinkId` was issued, the engine MUST poll `getActiveOrders` / `getOpenPositions` (via `panicCloseOrphan()`) before concluding anything. The engine may transition to `SCANNING` ONLY once the exchange is verifiably flat and no live order remains; otherwise it stays `IN_TRADE` (Invariant 49).
+
+55. **Live Capacity Sizing** — `RiskManager` MUST always receive `maxWorkingCapital` from the config in `src/index.ts`. Position sizing (`marginBuffer`, `riskAmount`, leverage cap) and Drawdown Guard risk calculations MUST be strictly capped against this working balance in both live and backtest modes. A missing/zero cap means "unlimited" only when explicitly configured as `0`; an omitted wiring is a configuration bug, not a silent fallback.
+
+56. **Volume Baseline Causality** — The volume-exhaustion baseline SMA MUST exclude the impulse candle. `baselineCandles = parsedCandles.slice(baselineStart, correctiveStart)` with `correctiveStart = origin.index + 1`, i.e. the window ends strictly **before** the pullback origin that created the move being judged. Including the impulse contaminates the baseline with the very volume it is supposed to classify, so every impulse would pass as "exhausted". Corollary: the pullback-origin candle is never part of its own reference distribution.
+
+57. **Bidirectional Construction** — Every scenario MUST evaluate **both directions**. A scenario that only builds a long setup (or infers `side` from a label) is incomplete: the `direction` is derived from structure/geometry, the POI search runs for `BULLISH` and `BEARISH`, and `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` is decided at the RiskManager boundary (Invariant §16.5.3). Scenario 1 is the live reference implementation (the tested 4H OB decides the direction, then the identical CHoCH → FVG continuation funnel runs for the mirrored case); the archived Scenario 13 follows the same rule, and both suites lock the mirrored side.
+
+58. **Persistent 4H Trend Gate (S12)** — Scenario 12 MUST require the last **closed** 4H close to be aligned with the reversal via a causal SMA50 of `patternData.candles4h`: shorts need `close ≤ sma50 × 1.002`, longs need `close ≥ sma50 × 0.998`, unless price is at the unmitigated opposing 4H POI (`isAtOpposingHtfZone`). With fewer than **20** closed 4H candles the gate fails closed. The SMA is the primary gate; the 4H BOS/CHoCH direction check remains secondary. The SMA is never recomputed from the forming 4H candle.
+
+59. **Fee-Aware TP Distance Floor (S12)** — After `resolveTakeProfit()` succeeds, Scenario 12 MUST reject any setup whose resolved target sits closer than `MIN_TP_DISTANCE_PCT` (default `0.35%`) from `idealEntry`: `|target − idealEntry| / idealEntry`. The floor applies to structural and fixed-R targets alike, uses `Decimal`, and rejects with the `insufficientRoom` bucket. `MIN_TP_DISTANCE_PCT` is parsed as `Decimal` and validated in `(0, 0.1)`.
 
 ---
 
@@ -2364,7 +2593,9 @@ docker compose up -d --build
 
 ---
 
-## 15. BACKTEST RESULTS (Reference)
+## 15. LEGACY BACKTEST BENCHMARK (Pre-V5.1 Execution Physics)
+
+> **Historical reference only.** These figures were produced before the V5.1 Execution Physics overhaul. Current simulations apply exact Bybit Taker/Maker fees, zero-latency slippage, limit-order expiration, burn-on-entry mitigation and true `TotalR` initialization — a deliberately pessimistic environment used for strict quantitative tuning. Do not treat the numbers below as a performance forecast.
 
 | Symbol      | Final Balance | Net Profit | Trades | Win Rate | Max DD |
 | ----------- | ------------- | ---------- | ------ | -------- | ------ |
@@ -2377,395 +2608,278 @@ docker compose up -d --build
 
 ---
 
-## 16. CRITICAL ANTI-PATTERNS & LESSONS LEARNED (BLOOD-SIGNED)
-
-> These rules exist because we **lost money, time, or sanity** discovering them. Do NOT "optimize" them away.
-
-### 16.1 ❌ FORBIDDEN: O(N²) and `while` loops in Math Hot Paths
-**Root Cause**: `detectEqualLevels()` used nested `for` loops on 17,000 candles → 100% CPU, event loop blocked.
-**Fix**: All candle iteration is **strictly `for (let i = 0; i < n; i++)`** with index pointers. Macro context builds in <10ms via single linear passes.
-**Rule**: No nested loops over candles. No `while (true)` with break conditions. Use pre-computed arrays + pointer advancement.
-
-### 16.2 ❌ FORBIDDEN: Inline Stop-Loss Calculations in Scenarios
-**Root Cause**: `invalid SL level` errors — zone `top`/`bottom` ordering was arbitrary (not guaranteed `top > bottom`). `zone.bottom - offset` produced SL *above* entry for Longs when zone was inverted.
-**Fix**: **ONLY** `BaseScenario.calculateLevels()` — single source of truth.
-- **Long**: `Decimal.min(zone.bottom, entry).minus(offset)` — SL *always* below entry
-- **Short**: `Decimal.max(zone.top, entry).plus(offset)` — SL *always* above entry
-**Rule**: Zero inline SL math in scenarios. Call `this.calculateLevels(...)` and use returned levels.
-
-### 16.3 ❌ FORBIDDEN: `toFixed(2)` or Hardcoded Decimal Places for Prices
-**Root Cause**: Forex pairs (JPY) and crypto with 4-5 decimals got truncated. Bybit rejected orders with `Invalid price precision`.
-**Fix**: `utils/precision.ts` — `formatPrice(price, tickSize, 'nearest')` and `formatQuantity(qty, qtyStep, 'down')`. Rounding uses instrument's actual `tickSize`/`qtyStep`.
-**Rule**: Never hardcode decimal places. Always format via instrument precision.
-
-### 16.4 ❌ FORBIDDEN: `fs.writeFileSync` / Local File I/O in Telegram Backup
-**Root Cause**: Node 26 + Telegraf `sendDocument({ source: buffer })` → `socket hang up` / `ECONNRESET`. Telegraf's internal `form-data` + `fs.createReadStream` from Buffer is broken on Node 26.
-**Fix**: Convert Buffer → `Uint8Array` → **Web API `Blob`** → `fetch` + `FormData` to `api.telegram.org/bot<token>/sendDocument`. **Zero disk I/O**.
-**Rule**: No `fs` in Telegram file sending. Use native `fetch` + `Blob` + `FormData`.
-
-### 16.5 ❌ FORBIDDEN: Local Time for Daily Schedulers
-**Root Cause**: `new Date().setHours(0,0,0,0)` uses **local timezone**. On Render (UTC) vs dev machine (local) → macro refresh at wrong hour, clock drift unnoticed.
-**Fix**: `new Date().setUTCHours(0,0,0,0); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1)` — **strictly UTC**.
-**Rule**: All time calculations use `DateTime.setZone('UTC')` or `setUTCHours`/`setUTCDate`. Never `Date.now()` + local offsets.
-
-### 16.6 ❌ FORBIDDEN: Multiple Concurrent Trades per Symbol
-**Root Cause**: Missing `IN_TRADE` guard in `ScenarioRouter` → 400 trades/day on choppy market (machine gun). Account blown.
-**Fix**: `ScenarioRouter` **hard-blocked** if `engine.openTrade !== null` (or `state === IN_TRADE`). Strictly **1 trade per symbol**.
-**Rule**: State machine must be `SCANNING` → `ENTRY_STAGED` → `IN_TRADE` → `SCANNING`. No parallel entries.
-
-### 16.7 ❌ FORBIDDEN: Static Macro Context in Backtester (Lookahead Bias)
-**Root Cause**: `initializeMacroContext()` called once before backtest loop loaded daily levels (PDH/PDL, PWH/PWL) from **end of history** (e.g., September 2026). During simulation of March–August, the bot used future levels — Scenarios 5, 7, 8, 9 missed valid sweeps.
-**Fix**: Dynamic macro context in `runBacktestForSymbol()`:
-- Track `currentDayUtc` / `currentWeekUtc` per candle
-- Running ATH/ATL updated with each candle (historical only)
-- On new day (00:00 UTC): PDH/PDL from yesterday's **closed** candles (`slice(0, i)`)
-- On new week (Monday): PWH/PWL from last 7 days of closed candles
-- Atomic `recognizer.setMacroContext()` update
-**Rule**: Never call `initializeMacroContext()` before backtest loop. Macro levels must be computed on-the-fly from data strictly before current candle.
-
-### 16.8 ❌ FORBIDDEN: Zero Stop-Loss Offset (Division by Zero in RiskManager)
-**Root Cause**: In low volatility, ATR ≈ 0 → offset = 0 → SL = Entry → `slDistance = 0` → division by zero in RiskManager position sizing.
-**Fix**: Minimum offset floor in `BaseScenario.calculateLevels()`: `offset = max(atr * 0.5, entry * 0.1%)`. SL always at least 0.1% from entry.
-**Rule**: Always enforce minimum offset in SL calculation. Never allow SL == Entry.
-
-### 16.9 ❌ FORBIDDEN: Inverted Zone Stop-Loss (Stop Inside Entry Block)
-**Root Cause**: Zone objects can have `top < bottom` (not guaranteed `top > bottom`). `min(zone.bottom, entry)` for Long fails when zone is inverted — SL ends up *above* entry.
-**Fix**: `Decimal.min(zone.top, zone.bottom, entry)` for Long, `Decimal.max(zone.top, zone.bottom, entry)` for Short — min/max of ALL THREE guarantees correct SL side.
-**Rule**: Always use min/max of top, bottom, AND entry for SL. Never assume zone ordering.
-
-### 16.10 ❌ FORBIDDEN: Hardcoded Trade Directions and String-Based Side Determination
-**Root Cause**: Using `side: 'Buy'` or `zoneDetails.direction === 'BULLISH'` to determine trade side leads to fatal errors when setup logic is complex (e.g., Sweep scenarios where sweep direction ≠ zone direction). The `invalid SL level for Buy side` error in Live was caused by hardcoded `side: 'Buy'` while SL geometry implied Short.
-
-**Fix**: Trade side (Buy/Sell) MUST be determined EXCLUSIVELY by geometry: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'`. Math never lies.
-
-**Rule**: Never hardcode `side`. Never derive side from text labels (`zoneDetails.direction`, `sweepDirection`, `BULLISH`/`BEARISH` strings). Always compute from Entry vs SL geometry at the point of RiskManager call.
-
-### 16.11 ❌ FORBIDDEN: Timeframe Asymmetry (The 100R Illusion)
-
-**Root Cause**: Attempting to use dynamic macro targets (PDH/PDL/PWH/PWL) on the 1-minute timeframe generated massive R:R ratios (1:15+). With micro-stops (0.15%), natural market noise stopped out positions at breakeven before targets were reached, while commissions consumed micro-profits on partial closes.
-
-**Fix**: Hard-capped Take-Profit at 3R for 1-minute Sniper. This guarantees 100% position closure before the first major pullback, maximizing win-rate and covering commissions.
-
-**Rule**: Never target macro structure when scalping with micro-stops. Scalping math demands fast takes (3R).
-
-### 16.12 ❌ FORBIDDEN: Using `getOpenOrders` for Bybit V5
-
-**Root Cause**: Bybit V5 API does not have `getOpenOrders` method. Code that called this non-existent method crashed at runtime. The correct method is `getActiveOrders`.
-
-**Fix**: All order queries use `getActiveOrders` exclusively. Removed all references to `getOpenOrders`.
-
-**Rule**: Never assume API methods exist. Always verify against official Bybit V5 documentation. Use `getActiveOrders` for querying active orders.
-
-### 16.13 ❌ FORBIDDEN: Running Scenario 12 (Sniper) and Scenarios 1–11 (Classic) in Same Process
-
-**Root Cause**: V4 Classic (15m/4H) and V5 Sniper (1m/15m/4H) share the same `IN_TRADE` state machine per symbol. Running both modes in the same process causes state conflicts, double position risk, `IN_TRADE` blocking, and DB conflicts from concurrent `trades` table writes.
-
-**Fix**: Complete infrastructure separation via Docker Compose — separate Node.js processes, separate Supabase databases, separate Telegram bots, separate Bybit sub-accounts.
-
-**Rule**: V4 Classic and V5 Sniper **MUST NOT** run on the same process/instance. Deploy as separate services with separate `.env` files pointing to the same Docker image.
-
-### 16.14 ❌ FORBIDDEN: Recomputing Macro Context on Every 1m Candle in Backtester
-
-**Root Cause**: Backtester was recomputing heavy macro context (PDH/PDL, PWH/PWL, ATH/ATL) on every 1m candle, causing massive redundant computation and incorrect state propagation.
-
-**Fix**: In `runBacktestForSymbol()`, `PatternData` is computed **only on 15m candle close**. The 1m loop only passes cached macro context to `ScenarioRouter`. Macro context updates only on 15m boundaries via `recognizer.setMacroContext()`.
-
-**Rule**: In backtester, heavy macro context updates ONLY on LTF (15m) candle close. 1m candles reuse cached context — no recomputation.
-
-### 16.15 ❌ FORBIDDEN: Using `amendOrder` for Position Stop-Loss/Take-Profit Updates
-
-**Root Cause**: Bybit V5 requires `setTradingStop` (position-level) for modifying SL/TP on open positions. `amendOrder` is for pending/conditional orders only. Using `amendOrder` for live positions fails silently or rejects.
-
-**Fix**: All SL/TP updates on open positions (breakeven, trailing, post-partial-close) use `client.setTradingStop()` with `positionIdx: 0` (One-Way Mode).
-
-**Rule**: **NEVER** use `amendOrder` for `IN_TRADE` positions. Only `setTradingStop` with `positionIdx: 0` for open position SL/TP management.
-
-### 16.16 ❌ FORBIDDEN: Checking `direction` in Ghost Signal Mitigation (`isMitigated` / `filterMitigatedStructures`)
-
-**Root Cause**: When structures are burned via `PendingTradeManager`, the `direction` field may be undefined (lost during `PendingTrade` mapping). Checking `direction` in `isMitigated` caused valid structures to not be filtered, allowing ghost re-entries. The same class of bug existed at the Router level: `filterMitigatedStructures()` matched `type` + `timestamp` + `direction`, while burned structures carried defaulted fields (`type: 'CHoCH'`, `direction: 'BULLISH'`) — the match failed and the same CHoCH stayed in circulation.
-
-**Fix**: `isMitigated` checks **ONLY timestamp** — 1m candle timestamps are globally unique. The Router's `filterMitigatedStructures()` was aligned on **v2026-10-16** — it now matches by timestamp ONLY (direction and type matching removed entirely). `structureDetails` flows through Telegram pipeline end-to-end.
-
-**Rule**: `isMitigated` and `filterMitigatedStructures` check ONLY timestamp. Direction is NOT checked (may be lost during mapping). `structureDetails` must flow through Telegram approval pipeline end-to-end.
-
-### 16.17 ❌ FORBIDDEN: Blind Order Execution After Human Approval (Latency Slippage)
-
-**Root Cause**: Bot received a setup, waited for user to click "Approve" in Telegram (5–60 seconds), and blindly submitted the order. On 1m timeframe, price moved enough to cross the calculated Stop-Loss. Bybit rejected the order with error [10001] "StopLoss should be greater/lower than base_price".
-
-**Fix**: Implemented Pre-flight Check. At the moment of "Approve" click, bot fetches `getLivePrice()`. If live price is already worse than the Stop-Loss — setup marked as DEAD, burned in DB, and order is not sent.
-
-**Rule**: Never trust a price from the past. Always validate SL against Live Price immediately before calling `submitOrder`.
-
-### 16.18 ❌ FORBIDDEN: Unprotected Concurrent `process()` Execution (Race Conditions)
-
-**Root Cause**: When 1m and 15m candles closed simultaneously, WebSockets triggered `process()` twice in the same millisecond. Bot created two clones of the same trade, sent duplicate buttons to Telegram, and when one was rejected — reset state to SCANNING, forgetting about the open position.
-
-**Fix**: Added mutex `private isProcessing: boolean` with try/finally lock around `process()`. Added State Guard: ignore Telegram clicks if bot is no longer in `ENTRY_STAGED`.
-
-**Rule**: Main strategy evaluation loop MUST be locked against parallel execution. State machine must strictly verify current status before any mutations.
-
-### 16.19 ❌ FORBIDDEN: Using `.find()` or `closedTime` for Bybit PnL Fetching
-
-**Root Cause**: With Adaptive Fractioning (partial closes), a trade generates multiple PnL records. Using `.find()` picked only the first record (losing remaining profit). Using non-existent `closedTime` field broke Bybit V5 API filter, returning empty array and falling back to fake local PnL calculation.
-
-**Fix**: Strictly use `p.createdTime`. Use `.filter().reduce()` to sum all PnL records where time >= `trade.openedAt`.
-
-**Rule**: PnL from partial closes is ALWAYS summed (reduce). Time field in Bybit V5 API (closed-pnl endpoint) is `createdTime` and `updatedTime`, never `closedTime`.
-
-### 16.20 ❌ FORBIDDEN: Force-Resetting State Without Checking Limit Orders
-
-**Root Cause**: ReconciliationLoop saw `IN_TRADE` status, saw position size = 0 on exchange, and forcibly reset bot to SCANNING. It ignored that a live Limit Order was still pending on exchange. This caused "amnesia" and duplicate signal spam.
-
-**Fix**: ReconciliationLoop first calls `getActiveOrders`. If any Limit order exists (status `New` or `PartiallyFilled`), state reset is blocked.
-
-**Rule**: Absence of position (size = 0) does NOT mean absence of trade. ALWAYS check active Limit orders before force-resetting state machine.
-
-### 16.21 ❌ FORBIDDEN: Unformatted QTY in Partial Closes (Adaptive Fractioning)
-
-**Root Cause**: Closing 25% of position produced fractional quantities (e.g., 0.7875). Bybit rejected Market Reduce-Only orders with "Invalid quantity precision", leaving position unmanaged and unprotected.
-
-**Fix**: Any calculated close quantity is strictly passed through `formatQuantity(qty, instrument.qtyStep)`. Added check: if qty < minOrderQty, round up to minimum lot size.
-
-**Rule**: NO trade or partial close is sent to exchange without formatting against instrument's `qtyStep` and checking `minOrderQty`.
-
-### 16.22 ❌ FORBIDDEN: Bypassing Pre-flight, TP proximity, or burnSetup in AUTO_TRADING mode
-
-**Root Cause**: In auto-trading mode (`AUTO_TRADING=true`), `executeStagedEntry()` was executing orders without a pre-flight SL check, TP proximity guard, slippage guard, or dynamic Market/Limit re-evaluation at the live tick. This caused a rejection loop: Bybit rejected orders with error [10001] "StopLoss should be greater/lower than base_price", the bot didn't burn the setup, and on the next 1m candle the same dead setup was re-detected and re-submitted. On 2026-10-10, LINKUSDT generated 60+ rejected orders in 5 minutes.
-
-**Fix**: Added full pre-execution validation suite in `executeStagedEntry()` (`src/engine/strategyEngine.ts`):
-1. Pre-flight SL breach check — abort if live price already breached SL
-2. Pre-flight TP reached check — abort if live price already reached TP  
-3. Slippage Guard (>0.2% toward TP) — abort if price moved too far toward TP
-4. Dynamic Market vs Limit re-evaluation at live tick using `smartEntryThresholdPct`
-5. Fail-fast `burnSetup()` on any execution rejection or exception
-
-**Rule**: In AUTO_TRADING mode, ALWAYS run full pre-flight validation suite before `executionEngine.execute()`. On ANY failure, call `burnSetup()` and transition to `SCANNING` — never retry a dead setup.
-
-### 16.23 ❌ FORBIDDEN: Native Number/Loose equality for Bybit V5 WS Position Size
-
-**Root Cause**: Bybit V5 WebSocket position updates send position sizes as strings (`"0"`, `"0.000"`, `"0.0000"`, `""`) or side `'None'`. Native `Number()` comparison can fail due to precision or string falsiness (e.g., `Number("0.0000")` is `0` but string truthiness checks may fail). This caused position closure events to be missed, leaving the engine stuck in `IN_TRADE` for up to 5 minutes until ReconciliationLoop forced a reset.
-
-**Fix**: In `parseClosedPositions()` (`src/engine/strategyEngine.ts:42-55`), position closure is detected using `Decimal.isZero()` with fallback:
+## 16. CRITICAL ANTI-PATTERNS & LESSONS LEARNED
+
+> Each entry below records a failure that cost real money, uptime or debugging time. Format is **Root Cause → Fix → Rule**. The rules are already enforced by the current architecture; they are documented so no future refactor silently reintroduces the failure. Where wording differs from §13, §13 wins.
+
+### 16.1 Execution Physics & Fill Truth
+
+#### 16.1.1 Pre-flight validation is mandatory on BOTH entry paths
+**Root Cause**: Manual approval waited 5–60 seconds while price crossed the SL → Bybit `[10001]`. Auto-trading originally skipped the suite entirely and re-submitted the same dead setup every 1m candle (LINKUSDT: 60+ rejections in 5 minutes).
+**Fix**: `handleTradeApproval()` and `executeStagedEntry()` share one live-tick suite: SL-breach check with the `PREFLIGHT_BUFFER_PCT` spread buffer, TP-reached check, discount-aware Market/Limit re-decision, directional slippage guard, and fail-fast `burnSetup()`.
+**Rule**: No order reaches `submitOrder()` without the full suite. Any failure burns the setup and returns to `SCANNING` — never retry a dead setup.
+
+#### 16.1.2 Discount Trap
+**Root Cause**: A Limit placed at `idealEntry` while price was already **better** filled immediately at market, while TP/SL stayed anchored to the ideal entry — the SL ended on the wrong side of the fill (`[10001]`).
+**Fix**: The decision checks for a discount first — `isDiscount = isLong ? livePrice <= idealEntry : livePrice >= idealEntry`. A discount always routes to **Market**; only a premium beyond `SMART_ENTRY_THRESHOLD_PCT` uses Limit.
+**Rule**: A better-than-planned price is never filled with a Limit order.
+
+#### 16.1.3 Slippage Guard is Market-only
+**Root Cause**: The 0.2% guard was applied uniformly, so valid pullback Limits were aborted precisely because price had moved away — the condition they exist to exploit. This is the Slippage Guard Paradox.
+**Fix**: The guard runs only when `useMarketOrder` is true. Pre-flight SL/TP checks remain unconditional for every order type.
+**Rule**: Limit orders wait for a pullback by design; Market constraints must never gate them.
+
+#### 16.1.4 No assumed fills
+**Root Cause**: Persisting `plan.entryPrice` for a Market order recorded a price that never traded. Adaptive Fractioning then measured R-multiples from a fiction and could trail the SL into losing territory.
+**Fix**: After confirmation, wait 500 ms, read `avgPrice` from `getOpenPositions()` and persist that as `entry_price`. Fall back to the plan only if the read fails. Both entry paths are identical.
+**Rule**: The database records exchange truth, never intent.
+
+#### 16.1.5 `positionIdx: 0` on every TP/SL order
+**Root Cause**: One-Way Mode requires `positionIdx: 0`; omitting it caused rejections or silently unattached TP/SL.
+**Fix**: `placeMarketOrderWithTpsl()` and `placeLimitOrderWithTpsl()` both send `positionIdx: 0` alongside `tpslMode: 'Full'`.
+**Rule**: Every `submitOrder()` with attached TP/SL carries `positionIdx: 0`.
+
+#### 16.1.6 `amendOrder` never touches an open position
+**Root Cause**: Bybit V5 keeps pending orders and live positions on different endpoints. `amendOrder` against a filled position fails silently or rejects.
+**Fix**: Position-level SL/TP management (breakeven, trailing, post-partial-close) uses `client.setTradingStop({ positionIdx: 0 })`.
+**Rule**: `amendOrder` = pending orders. `setTradingStop` = open positions.
+
+#### 16.1.7 Zero-latency hot path
+**Root Cause**: Awaiting `notifySetupFound()` before `execute()` injected Telegram latency — and a new failure mode — ahead of order submission.
+**Fix**: Notifications are fire-and-forget **after** the exchange confirms: `notifySetupFound(...).catch(...)`.
+**Rule**: No blocking messenger I/O before `executionEngine.execute()`.
+
+### 16.2 Closure Detection & PnL Truth
+
+#### 16.2.1 Both WS channels are mandatory
+**Root Cause**: Bybit often omits a `Position` update on SL/TP, sending only `execution` (`execType: 'Trade'`, `closedSize > 0`). A Position-only listener stayed `IN_TRADE` until reconciliation.
+**Fix**: `ws.onExecution` → `handleExecutionPayload()` detects `closedSize > 0` and triggers `onExchangePositionClosed()`.
+**Rule**: Closure detection consumes BOTH `Position` and `Execution`.
+
+#### 16.2.2 Sum PnL, filter on `createdTime`
+**Root Cause**: `.find()` kept only the first record and silently discarded partial-close PnL; filtering on the non-existent `closedTime` returned an empty set and forced a fake local calculation.
+**Fix**: `filter(symbol matches && createdTime >= trade.openedAt).reduce(...)`, with the exit price taken from the record with the latest `createdTime`.
+**Rule**: Partial closes are always summed. The V5 field is `createdTime`.
+
+#### 16.2.3 Fallback exit price is the WS `execPrice`
+**Root Cause**: Using `getLivePrice()` as the fallback exit price, seconds after the fill, hallucinated PnL and corrupted both DB integrity and Adaptive Fractioning.
+**Fix**: `handleExecutionPayload()` forwards `item.execPrice` into `onExchangePositionClosed(null, execPrice)`; that value is authoritative whenever `getClosedPnl` is delayed or empty.
+**Rule**: Live price is never an exit price.
+
+#### 16.2.4 Missing exchange PnL on a Limit means CANCELLED
+**Root Cause**: The mathematical fallback invented profit (e.g. $67) for a limit that never filled.
+**Fix**: `reconcileWithTrade()`: empty `getClosedPnl` + `order_type === 'Limit'` → `pnl = 0`, `reason = 'CANCELLED'`.
+**Rule**: Mathematical PnL fallback is reserved for Market orders.
+
+#### 16.2.5 Parse WS position size as `Decimal`
+**Root Cause**: V5 sends sizes as `"0"`, `"0.0000"`, `""` with `side: 'None'`; truthiness or bare `Number()` checks missed closures and stranded the engine `IN_TRADE`.
+**Fix**:
 ```typescript
 const sizeStr = String(item.size ?? '0');
 let isZeroSize = false;
-try {
-  isZeroSize = new Decimal(sizeStr).isZero();
-} catch {
-  isZeroSize = Number(sizeStr) === 0;
-}
+try { isZeroSize = new Decimal(sizeStr).isZero(); } catch { isZeroSize = Number(sizeStr) === 0; }
 const isClosedSide = item.side === 'None' || !item.side;
 if (isZeroSize || isClosedSide) { /* position closed */ }
 ```
+**Rule**: `Decimal.isZero()` plus `side === 'None'` — never bare `Number()`.
 
-**Rule**: Never use `Number()` alone for Bybit V5 position sizes. Always parse via `Decimal.isZero()` with fallback. Treat `side === 'None'` or missing side as closed.
+### 16.3 State Machine & Orphan Safety
 
-### 16.24 ❌ FORBIDDEN: Hardcoding decimal precision (toFixed) for Limit order prices
+#### 16.3.1 Serialize `process()`
+**Root Cause**: Simultaneous 1m/15m closes fired `process()` twice in the same millisecond. The second pass staged a duplicate trade, and a later rejection reset the state while the first position was live.
+**Fix**: `isProcessing` mutex with `try/finally`, plus an `ENTRY_STAGED` guard on every Telegram callback.
+**Rule**: One evaluation at a time; verify state before mutating it.
 
-**Root Cause**: Limit order prices were formatted using `idealEntry.toFixed(8)`, which hardcodes 8 decimal places. This violates Bybit's per-instrument `tickSize` precision requirements (anti-pattern 16.3). For instruments with different tick sizes (e.g., 0.01, 0.001, 0.0001), hardcoded 8 decimals either truncates valid precision or produces invalid prices rejected by the exchange.
+#### 16.3.2 One trade per symbol
+**Root Cause**: A missing `IN_TRADE` guard produced 400 trades/day on a choppy market.
+**Fix**: `ScenarioRouter` hard-blocks unless the engine is `SCANNING`.
+**Rule**: `SCANNING → ENTRY_STAGED → IN_TRADE → SCANNING`. No parallel exposure.
 
-**Fix**: Use `formatPrice(idealEntry, instrument.tickSize)` from `src/utils/precision.ts` which respects the instrument's `tickSize` for proper rounding:
+#### 16.3.3 A zero position is not a closed trade
+**Root Cause**: Reconciliation reset `IN_TRADE` while a Limit order was still working — amnesia followed by duplicate entries.
+**Fix**: `getOpenOrders()` runs first; `New` / `PartiallyFilled` blocks the reset. An expired `New` order is cancelled and closed as `CANCELLED`; a `PartiallyFilled` order only has its remainder cancelled and stays `IN_TRADE` (Invariant 53).
+**Rule**: Absence of position does not mean absence of trade.
+
+#### 16.3.4 No unhandled WS rejections
+**Root Cause**: A single unhandled rejection in a high-frequency stream kills the process — unacceptable for a burn-in deployment.
+**Fix**: Every `onKline` / `onPosition` / `onExecution` registration uses `.catch()`; every internal handler uses `try/catch` and logs.
+**Rule**: No async WS callback is ever left unguarded.
+
+#### 16.3.5 Milestones update only after exchange success
+**Root Cause**: `checkAndManagePosition()` ignored `{ ok: false }`, flagged the milestone and logged success while 100% exposure remained. The failed partial close was then never retried — Silent State Desync.
+**Fix**: `if (!result.ok) { log; return; }` before any SL update or `updateTradeManagementState()`. The identical signal re-fires on the next tick, which is the natural retry.
+**Rule**: No local or DB state transition without a confirmed exchange result.
+
+#### 16.3.6 Progress is directional, never absolute
+**Root Cause**: `|currentPrice − entry|` grew as price moved toward the SL, so losing trades "reached" the 33%/66% milestones and fired SL→entry updates rejected with `[10001]`.
+**Fix**: Hard `isProfitable` guard, then directional movement (`currentPrice − entry` for longs, `entry − currentPrice` for shorts), which the guard guarantees is positive.
+**Rule**: `.abs()` is forbidden in progress math.
+
+#### 16.3.7 Live price is global, not per-timeframe
+**Root Cause**: `getLivePrice()` read the 15m feed. In 1m Sniper Mode a null feed fell back to a candle up to 14 minutes stale, bypassing pre-flight and corrupting management math.
+**Fix**: `latestTickPrice` is written on every WS tick before the `confirmed` guard. The pre-flight fallback uses the execution-context feed — 1m in Sniper Mode, LTF otherwise.
+**Rule**: Live price is never coupled to one timeframe's buffer.
+
+#### 16.3.8 V4 and V5 never share a process
+**Root Cause**: Classic (15m/4H) and Sniper (1m) share the per-symbol `IN_TRADE` state. Running both produces cross-mode blocking, double exposure and concurrent `trades` writes.
+**Fix**: Full infrastructure separation from one image: separate process, database, Telegram bot, Bybit sub-account and `.env`.
+**Rule**: One mode per instance.
+
+### 16.4 Ghost Signals & Mitigation
+
+#### 16.4.1 The router must receive `mitigatedStructures`
+**Root Cause**: `process()` passed a hardcoded `[]`, disabling structure filtering entirely and allowing rapid-fire re-entries on the same 1m CHoCH.
+**Fix**: `scenarioRouter.evaluate(..., this.mitigatedStructures, candles1m)`.
+**Rule**: Never pass an empty array to the router.
+
+#### 16.4.2 `burnSetup()` burns zone and structure independently
+**Root Cause**: Structure burning was nested inside the zone validation. An incomplete zone skipped the structure, while the log still claimed it was burned — the ghost loop survived the "fix".
+**Fix**: Zone and structure burn on separate paths; structure comes from `structureDetails`, falling back to `zoneDetails` only when absent. The log states exactly what was burned: zone only, structure only, both, or neither.
+**Rule**: An incomplete zone must never block a structure burn, and logs must never overstate what happened.
+
+#### 16.4.3 Match structures by timestamp only
+**Root Cause**: Burned structures can lose `direction` (and be defaulted to `type: 'CHoCH'`) while passing through `PendingTradeManager`. Matching on direction/type failed to filter the very structure it had just burned.
+**Fix**: `isMitigated` (Scenario 12) and `filterMitigatedStructures()` (Router) compare **timestamp only** — 1m candle timestamps are globally unique. `structureDetails` flows through the Telegram pipeline end-to-end.
+**Rule**: Timestamp is the identity of a structure.
+
+#### 16.4.4 Burn the trigger on fill, not on close
+**Root Cause**: Structures were burned only by `burnSetup()` (abort paths) and on close. A successful entry left the trigger re-detectable, so the next scan could re-enter the same CHoCH before the trade even closed.
+**Fix**: Both live paths push `structureDetails` into `mitigatedStructures` **immediately after exchange confirmation**, before `transition(IN_TRADE)` and before the `avgPrice` / DB bookkeeping (100-entry cap). Mirrors the backtester (Invariant 15).
+**Rule**: Burn before transition. Burning after `db.openTrade()` is forbidden — a DB failure would leave a live position with a re-detectable trigger.
+
+#### 16.4.5 One global sweep anchor invalidates earlier CHoCHs
+**Root Cause**: Scenario 12 collapsed every swept level into a single `sweptAt = max(all levels)`. A valid PDL reversal at 10:05 was discarded because PDH was poked at 10:12 — the trigger existed, but the causality anchor had moved past it. Setup frequency collapsed for no market reason.
+**Fix**: `detectLevelSweeps()` keeps each level's own `sweptAt`; `pairChochsWithSweeps()` pairs a CHoCH only with **same-direction** sweeps that happened strictly before it (§7.13.2). A later sweep of an unrelated level produces no pair and therefore cannot invalidate the earlier CHoCH.
+**Rule**: Causality is a property of a (sweep, CHoCH) pair, never of the scan as a whole. Never reduce per-level timestamps to a single global maximum.
+
+#### 16.4.6 Dedupe sweep sources by price with deterministic priority
+**Root Cause**: Enabling session or EQH/EQL sources made the same price appear twice (e.g. PDH equal to the Asian high). The duplicate was then judged by the tighter intraday proximity band, silently rejecting setups that the macro band allowed.
+**Fix**: `dedupeSweepLevels()` collapses exact `Decimal.eq()` duplicates after a stable sort by `SWEEP_SOURCE_PRIORITY` (`MACRO` > `SESSION` > `EQH_EQL`), so the macro identity — and its wider band — always wins.
+**Rule**: When two sources print the same price, the higher-priority source owns the level and its tolerance.
+
+### 16.5 SMC Mathematics & Geometry
+
+#### 16.5.1 No inline SL/TP math
+**Root Cause**: Scenarios computed stops inline (`zone.bottom − offset`). Because zone `top`/`bottom` ordering is arbitrary, an inverted zone put the SL *above* the entry for a long → `invalid SL level`.
+**Fix**: Every scenario calls `BaseScenario.calculateLevels()`.
+**Rule**: Zero inline SL/TP math. One implementation, one source of truth.
+
+#### 16.5.2 Offset floor and inverted-zone defense
+**Root Cause**: Two independent failures — ATR ≈ 0 produced a zero offset, SL = entry and a division by zero in position sizing; and `min(zone.bottom, entry)` placed the stop on the wrong side whenever the zone was inverted.
+**Fix**: `offset = max(atr × multiplier, entry × 0.1%)`, then `SL = min(top, bottom, entry) − offset` for longs and `max(top, bottom, entry) + offset` for shorts.
+**Rule**: The stop is always at least 0.1% from entry and always on the correct side, regardless of zone ordering.
+
+#### 16.5.3 Side comes from geometry
+**Root Cause**: Hardcoded `side: 'Buy'`, or deriving it from `direction` labels, broke whenever sweep direction ≠ zone direction — producing `invalid SL level for Buy side` with short geometry.
+**Fix**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'`, computed at the point of the RiskManager call.
+**Rule**: Math decides direction; text labels never do.
+
+#### 16.5.4 Freshness AND timeframe filters
+**Root Cause**: Arrays are timestamp-ascending, so `array[0]` and forward `.find()` selected days-old structures (present in 10 of 11 scenarios). The same arrays also merge 15m and 4H objects, so `[length−1]` alone could return a 4H structure where a 15m one was required.
+**Fix**: The v2026-10-16 refactor replaced every such access with `[length−1]` or `[...arr].reverse().find(...)`, always after an explicit `.timeframe` filter. Standards live in §8.5.
+**Rule**: Freshness and timeframe are two separate filters — apply both before selecting a structure.
+
+#### 16.5.5 Timeframe asymmetry (the 100R illusion)
+**Root Cause**: Applying macro targets (PDH/PDL/PWH/PWL) to 1m scalps produced 1:15+ R:R. Micro-stops were noise-stopped before targets, while commissions ate the partial profits.
+**Fix**: Scenario 12 resolves every target through `tpResolver.resolveTakeProfit()`: the fixed fallback is 3R (`FIXED_TP_RR`), and structural targets are bounded by `DYNAMIC_TP_MIN_RR` / `DYNAMIC_TP_MAX_RR`, so a macro pool cannot become the target of a micro-stop.
+**Rule**: Never target macro liquidity with micro-stops. Scalping math demands fast takes.
+
+#### 16.5.6 Linear scans only
+**Root Cause**: `detectEqualLevels()` used nested loops over 17,000 candles → 100% CPU and a blocked event loop.
+**Fix**: Single-pass indexed `for` loops; macro context builds in milliseconds.
+**Rule**: No nested candle loops, no `while (true)` scan loops. Pre-compute arrays and advance pointers.
+
+#### 16.5.7 A sweep is confirmed after the wick, not on the next candle
+**Root Cause**: Scenario 5 searched for the sweep only in the **latest** 15m candle, so a CHoCH that printed two or three candles after the wick — the normal confirmation lag — was rejected as `NoSweep`. The scenario almost never fired.
+**Fix**: The sweep scan covers the last **16 LTF candles** (4H on a 15m entry timeframe), and causality is enforced with `CHoCH.timestamp >= sweptAt`. Ties on the same candle are broken deterministically by `POOL_PRIORITY` (`PDH > PDL > PWH > PWL > BSL > SSL`) so results are reproducible.
+**Rule**: Search the setup window, not the last candle; keep the ordering explicit when several pools qualify.
+
+### 16.6 Backtester Fidelity
+
+#### 16.6.1 Macro context is causal
+**Root Cause**: `initializeMacroContext()` ran once before the loop, loading PDH/PDL/PWH/PWL from the **end** of history. Simulating earlier months used future levels, so S5/S7/S8/S9 missed or invented sweeps.
+**Fix**: Dynamic context in `runBacktestForSymbol()`: running ATH/ATL from candles seen so far, daily levels from `slice(0, i)`, weekly levels from the last 7 days of closed candles, atomically applied via `recognizer.setMacroContext()`.
+**Rule**: A backtest may only consume data strictly older than the candle being simulated.
+
+#### 16.6.2 Macro context is not recomputed per 1m candle
+**Root Cause**: Rebuilding heavy context on every 1m candle burned CPU and propagated inconsistent state.
+**Fix**: `PatternData` is rebuilt only on LTF close; the 1m loop reuses the cached context.
+**Rule**: Heavy context updates on timeframe boundaries only.
+
+#### 16.6.3 Copy-on-write for the pattern cache
+**Root Cause**: Filtering in place (`patternData.structures = ...`, `splice`, `sort`) permanently stripped mitigated objects from a `PatternData` reference reused across every 1m iteration. Later candles saw a hollowed-out market, making results iteration-order dependent.
+**Fix**:
 ```typescript
-const limitPrice = useMarket
-  ? null
-  : formatPrice(idealEntry, new Decimal(instrument.tickSize));
+const safeStructures = this.filterMitigatedStructures([...(basePd.structures ?? [])], mitigatedStructures);
+const safeZones = this.filterMitigatedZones([...(basePd.zones ?? [])], mitigatedZones);
+const evaluationData: PatternData = { ...basePd, structures: safeStructures, zones: safeZones, candles1m };
 ```
-
-**Rule**: NEVER hardcode decimal precision with `toFixed()` for prices. ALWAYS use `formatPrice(value, tickSize)` from `utils/precision.ts` which respects the instrument's `tickSize`.
-
-### 16.25 ❌ FORBIDDEN: Omitting `.catch()` or `try/catch` in WebSocket event handlers (Causes fatal Node.js crashes)
-
-**Root Cause**: High-frequency WebSocket streams (klines, positions, executions) generate thousands of async callbacks per minute. If any async handler (`onKline`, `onPosition`, `onExecution`) throws an unhandled rejection, Node.js will crash the entire process — catastrophic for a 14-day Burn-In.
-
-**Fix**: Every WebSocket callback and event handler is strictly wrapped:
-- In `src/index.ts`: `ws.onKline(...).catch(...)`, `ws.onPosition(...).catch(...)`
-- In `src/engine/strategyEngine.ts`: `handleKline()` has `try/catch` for `checkAndManagePosition()` and `process('1')`; `handlePositionPayload()` has `try/catch` for `parseClosedPositions()`
-
-**Rule**: No async WS callback is ever left without a `.catch()` or `try/catch`. Any error is logged, never crashes the process.
-
-### 16.26 ❌ FORBIDDEN: Omitting `positionIdx: 0` when placing orders with TP/SL on Bybit V5
-
-**Root Cause**: Bybit V5 requires `positionIdx: 0` in the `submitOrder()` payload for One-Way Mode when attaching TP/SL via `tpslMode: 'Full'`. Without it, the exchange may reject the order or fail to attach the TP/SL correctly.
-
-**Fix**: Both `placeMarketOrderWithTpsl()` and `placeLimitOrderWithTpsl()` in `src/api/bybitClient.ts` explicitly include `positionIdx: 0` in the `submitOrder()` payload.
-
-**Rule**: Every `submitOrder()` call with `tpslMode: 'Full'` MUST include `positionIdx: 0`.
-
-### 16.27 ❌ FORBIDDEN: Passing empty `mitigatedStructures` to ScenarioRouter
-
-**Root Cause**: `process()` called `scenarioRouter.evaluate(..., [], candles1m)` with hardcoded empty array, bypassing the ghost signal protection that tracks already-consumed CHoCH/SMS/BOS structures. This allowed rapid-fire re-entries on the same 1m CHoCH structure.
-
-**Fix**: Pass `this.mitigatedStructures` to `scenarioRouter.evaluate()` so the router filters out already-mitigated structures by timestamp.
-
-**Rule**: `scenarioRouter.evaluate()` MUST receive the engine's `mitigatedStructures` array. Never pass an empty array or hardcoded `[]`.
-
-### 16.28 ❌ FORBIDDEN: `burnSetup()` dependency on `zoneDetails` for structure burning
-
-**Root Cause**: `burnSetup()` had a hard dependency on complete `zoneDetails` — structure burning was nested inside the zone validation check. If zone was incomplete (missing type/timestamp), the structure was NOT added to `mitigatedStructures`, but the log misleadingly claimed "Setup burned: zone X mitigated, structure added". This allowed ghost re-entries on the same CHoCH.
-
-**Fix**: Split burning into independent zone and structure paths. Structure burns from `structureDetails` first, falls back to `zoneDetails` only if no structure details exist. Log exactly what was burned: "ONLY zone", "ONLY structure", "both", or "CRITICAL: neither".
-
-**Rule**: `burnSetup()` MUST burn structure independently of zone validity. Log must truthfully report what was actually burned.
-
-### 16.29 ❌ FORBIDDEN: Blocking hot path with Telegram I/O in auto-trading mode
-
-**Root Cause**: In `AUTO_TRADING=true` mode, calling `await notifier.notifySetupFound()` BEFORE `executionEngine.execute()` adds latency and risks order rejection if Telegram API is slow/unavailable. The hot path must be zero-latency.
-
-**Fix**: Telegram notification is now fire-and-forget AFTER successful execution (see `executeStagedEntry()` lines 938–945): `notifySetupFound(...).catch(err => logger.error(...))`.
-
-**Rule**: In `AUTO_TRADING=true`, NO synchronous/blocking external messenger I/O is permitted prior to order submission. `notifySetupFound` MUST be fire-and-forget AFTER `executionEngine.execute()` succeeds.
-
-### 16.30 ❌ FORBIDDEN: Recording planned entry price to the database (Assumed Fill)
-
-**Root Cause**: Market orders suffer from slippage. Writing `plan.entryPrice` (the planned price) to the database corrupts Adaptive Fractioning math — the trailing stop logic calculates distance from entry, and if the entry is wrong, the Stop-Loss can be moved into losing territory.
-
-**Fix**: After `executionEngine.execute()` succeeds, the bot MUST wait 500ms, fetch `getOpenPositions()`, and use the exchange's actual `avgPrice` for `db.openTrade()`.
-
-**Rule**: Database `entry_price` MUST reflect the exchange's `avgPrice` (actual fill price), never the planned `entryPrice`. Never record assumed fills.
-
-### 16.31 ❌ FORBIDDEN: Relying solely on the WS Position channel for trade closures
-
-**Root Cause**: Bybit V5 frequently omits `Position` channel updates when a position is closed via Stop-Loss or Take-Profit. Instead, it sends an `Execution` event (`topic: "execution", execType: "Trade", closedSize > 0`). Relying solely on `ws.onPosition` will miss SL/TP closures, leaving the engine stuck in `IN_TRADE` until ReconciliationLoop forcibly resets it.
-
-**Fix**: The bot MUST listen to `ws.onExecution` and route payloads to `engine.handleExecutionPayload()` to trigger immediate state reset and PnL fetching.
-
-**Rule**: The engine MUST monitor BOTH `Position` and `Execution` WS topics to reliably detect position closures. Relying solely on `Position` channel will miss SL/TP closures.
-
-### 16.32 ❌ FORBIDDEN: Applying Market-style slippage constraints (>0.2% toward TP) to Limit orders (Slippage Guard Paradox)
-
-**Root Cause**: The 0.2% Slippage Guard was applied uniformly to all order types. When price deviation exceeded 0.2%, valid Limit orders (which wait for a pullback by design) were incorrectly aborted. This caused mass rejection of valid pullback setups — the very orders meant to protect against slippage.
-
-**Fix**: Slippage Guard is now **context-aware** — applied ONLY to Market orders. Limit orders bypass the slippage check because they wait for a pullback by design. Pre-flight SL/TP checks remain unconditional for all orders.
-
-**Rule**: The >0.2% slippage guard must NEVER be applied to Limit orders. It must only be applied to Market orders where slippage is a real risk. Limit orders wait for a pullback by design.
-
-### 16.33 ❌ FORBIDDEN: Using mathematical PnL fallback for Limit orders when exchange PnL is missing
-
-**Root Cause**: When `getClosedPnl` returns empty for a Limit order, the system was falling back to mathematical PnL calculation, creating hallucinated PnL (e.g., fake $67 profit) for a cancelled limit order that was never filled. Limit orders without exchange PnL must be treated as CANCELLED (0 PnL).
-
-**Fix**: In `reconcileWithTrade()`, if `closedPnls.length === 0` and `trade.order_type === 'Limit'`, the system MUST assume it was cancelled unfilled and record `0` PnL with `CANCELLED` reason. Mathematical PnL fallback is strictly reserved for Market orders.
-
-**Rule**: Limit orders without exchange PnL must be treated as CANCELLED (0 PnL). Mathematical PnL fallback is strictly reserved for Market orders.
-
-### 16.34 ❌ FORBIDDEN: Hardcoding non-English (Cyrillic/Russian) strings for logs or Telegram notifications
-
-**Root Cause**: Telegram notifications contained Russian strings (e.g., "Позиция закрыта", "Найден сетап", "Критическая ошибка"). This violates the English-Only policy for all user-facing text and creates inconsistency in production logs.
-
-**Fix**: All user-facing strings in `src/telegram/notifier.ts` have been translated to English (e.g., "Position Closed", "Setup Found", "Critical Error"). Code reviews must reject any non-English strings.
-
-**Rule**: All user-facing strings, logs, and Telegram messages MUST be strictly in English. No Cyrillic/Russian strings are allowed in the codebase.
-
-### 16.35 ❌ FORBIDDEN: Using getLivePrice() as the exit price for PnL fallback calculations
-
-**Root Cause**: When `getClosedPnl` from the REST API is delayed or empty for a Market/SL close, the mathematical fallback used `getLivePrice()` (current market price) as the exit price. After a network delay of several seconds, the live price has moved significantly away from the actual Stop-Loss execution price, causing hallucinated PnL that corrupts database integrity and Adaptive Fractioning calculations.
-
-**Fix**: Extract `item.execPrice` from the Bybit Execution WebSocket payload in `handleExecutionPayload()`, pass it through `onExchangePositionClosed(null, execPrice)`, and use it as the authoritative exit price for mathematical fallback PnL calculations.
-
-**Rule**: You MUST extract `item.execPrice` from the Bybit Execution WebSocket payload. Using `getLivePrice()` after a network delay results in hallucinated PnL that destroys database integrity.
-
-### 16.36 ❌ FORBIDDEN: Hardcoding percentage buffers for spread/slippage
-
-**Root Cause**: The Pre-flight SL check used a hardcoded `0.0005` (0.05%) spread buffer. Different trading pairs have vastly different liquidity profiles — BTCUSDT might have 0.01% spread while a low-cap altcoin could have 0.5% spread. A hardcoded value either rejects valid trades on liquid pairs or fails to protect against spread on illiquid ones.
-
-**Fix**: Added configurable `PREFLIGHT_BUFFER_PCT` (default `0.05` = 0.05%) in `.env`. The buffer is now read from config: `livePrice.mul(this.deps.config.preflightBufferPct)`.
-
-**Rule**: NEVER hardcode percentage buffers for spread/slippage. Always use configurable variables (like `PREFLIGHT_BUFFER_PCT`) because different assets have different liquidity profiles.
-
-### 16.37 ❌ FORBIDDEN: Placing Limit orders when live price is better than ideal entry (Discount Trap)
-
-**Root Cause**: When the live price was BETTER than the ideal entry (a "discount"), the bot would still place a Limit order at the ideal entry price. This caused the Limit order to be immediately filled at the current market price (which is better than the limit price), but the attached Stop-Loss was calculated based on the ideal entry price, not the actual fill price. This violated Stop-Loss geometry and caused Bybit Error `[10001]` (StopLoss set for Buy position should be lower than base_price).
-
-**Fix**: In `executeStagedEntry()`, the Market vs Limit decision now checks for a discount FIRST:
-1. **Discount Check (FIRST)**: If live price is BETTER than ideal entry (discount), ALWAYS use Market order.
-2. **Threshold Check (SECOND)**: If no discount, apply 0.15% threshold.
-
-```typescript
-const isDiscount = isLong ? livePrice.lte(idealEntry) : livePrice.gte(idealEntry);
-const useMarket = isDiscount || priceDiffPct.lte(threshold);
-```
-
-**Rule**: NEVER place Limit orders when live price is better than ideal entry (a discount). Market orders MUST be used to capture the favorable price with correct SL/TP geometry.
-
-### 16.38 ❌ FORBIDDEN: Coupling `getLivePrice()` to a specific timeframe feed
-
-**Root Cause**: `getLivePrice()` relied on `this.feedLtf.getCurrentLivePrice()`. In Sniper Mode, executions happen on the 1m timeframe. If the 15m feed was slightly delayed or returned `null`, the fallback used the last closed 15m candle, which could be up to 14 minutes old. This stale price bypassed all Pre-flight SL checks and caused invalid Trade Management calculations (e.g., falsely triggering 66% progress breakeven when the trade was actually in a loss).
-
-**Fix**: Added `latestTickPrice` — global tick memory updated from every incoming WS kline tick at the very start of `handleKline()` (before the `confirmed` guard and any processing). `getLivePrice()` now strictly returns `this.latestTickPrice`. The `executeStagedEntry()` fallback uses the 1m feed in Sniper Mode and the LTF feed otherwise — never a stale 15m candle in a 1m execution context.
-
-**Rule**: Coupling live price queries (`getLivePrice`) to a specific timeframe feed (e.g., `feedLtf`) is FORBIDDEN. In multi-timeframe architectures, querying a 15m feed during a 1m execution can return prices that are 14 minutes stale. Live prices MUST be tracked globally from every incoming WS tick (`latestTickPrice`).
-
-### 16.39 ❌ FORBIDDEN: Updating trade management state (milestones) without validating the exchange execution result
-
-**Root Cause**: The partial-close branch in `checkAndManagePosition()` ignored the `{ ok: false }` result of `executePartialClose()`. On API failure (rate limit, 500, circuit breaker), the code still called `updateTradeManagementState()` and logged `Partial close executed` — marking the milestone as triggered while 100% exposure remained on the exchange. This Silent State Desync meant the failed partial close was **never retried** (milestone permanently flagged), and the DB recorded a close that never happened.
-
-**Fix**: Capture the result of `executePartialClose()`. If `!result.ok` → log a warning and `return` immediately — do NOT update the SL, do NOT call `updateTradeManagementState()`. The milestone remains untriggered in the DB, so the identical management signal re-fires on the next tick (natural retry). Failed SL updates (`setTradingStop` throwing) were already aborted by the outer `try/catch` before any DB write.
-
-**Rule**: Updating local or DB trade management state (milestones) without validating the exchange execution result is FORBIDDEN. Ignoring execution failures causes Silent State Desync, leaving the portfolio overexposed.
-
-### 16.40 ❌ FORBIDDEN: Burning the trigger structure only on abort/close paths (Live Ghost Gap)
-
-**Root Cause**: In live trading, structures were burned ONLY inside `burnSetup()` (abort paths: pre-flight DEAD, Slippage Guard, execution failure) and on position close. On a successful entry the trigger CHoCH stayed out of `mitigatedStructures` — a subsequent scan (new killzone / next 1m candle) could re-detect the same structure and generate a ghost re-entry before the trade even closed.
-
-**Fix**: Burn-on-open enforced in the live path — mirroring the backtester (Invariant 15, zone + structure burned on entry). BOTH `executeStagedEntry()` and `handleTradeApproval()` push `this.plan.structureDetails` into `mitigatedStructures` immediately after `db.openTrade()` succeeds and BEFORE `transition(StrategyState.IN_TRADE)` (100-entry cap).
-
-**Rule**: On every successful live entry, the trigger structure MUST be burned BEFORE the state machine transitions to `IN_TRADE`. Burning only on abort/close paths is FORBIDDEN.
-
-### 16.41 ❌ FORBIDDEN: Accessing the oldest elements in pattern arrays (e.g., `array[0]` or unreversed `.find()`)
-
-**Root Cause**: `structures`, `zones`, `fvgs`, and `sessionRanges` arrays are timestamp-ascending (oldest first). Scenarios accessed `array[0]` and used forward `.find(...)` when searching for OBs, FVGs, and CHoCHs — selecting the OLDEST, potentially days-old structures instead of the freshest market context. This bug class was present in 10 of 11 classic scenarios.
-
-**Fix**: The v2026-10-16 V4 Classic refactoring replaced every `array[0]` with `array[array.length - 1]` and every forward `.find(...)` with `[...array].reverse().find(...)` across Scenarios 1–11. Full standards documented in §8.5.
-
-**Rule**: Always access the freshest structures using `array[length-1]` or reversed iteration to prevent trading stale, days-old setups.
-
-### 16.42 ❌ FORBIDDEN: Blindly querying `CONTRACT` account types for balances on Bybit Demo
-
-**Root Cause**: Bybit Demo accounts are exclusively Unified Trading Accounts (UTA), and UTA 2.0 dropped the legacy `CONTRACT` account type. Querying `getWalletBalance({ accountType: 'CONTRACT' })` returns `[10001] accountType only support UNIFIED.`, which overwrote the original `UNIFIED` failure and surfaced a misleading error in the `process()` loop.
-
-**Fix**: `getUsdtBalance()` in `src/api/bybitClient.ts` queries ONLY `accountType: 'UNIFIED'` when `config.demoTrading` is true. For non-demo accounts the legacy `CONTRACT` fallback is preserved, but its expected `[10001] "only support unified"` rejection is ignored and never masks the original `UNIFIED` error.
-
-**Rule**: Blindly querying `CONTRACT` account types for balances on Bybit Demo environments is FORBIDDEN. This triggers `[10001]` errors that can mask genuine API failures. Filter queries by `UNIFIED` when demo trading is active.
-
-### 16.43 ❌ FORBIDDEN: Measuring trade progress with an absolute value (|current − entry|)
-
-**Root Cause**: `evaluateTradeManagement()` computed `priceMovement = |currentPrice − entry|`. When price moved **against** the position (toward SL), the absolute distance kept growing and was divided by the TP distance — so a losing trade "reached" 33%/66% "progress" and the bot attempted `move_sl_to_entry` / partial closes while price was on the wrong side of entry. Bybit rejected the SL update with `[10001]` (StopLoss should be lower/higher than base_price), and milestones could be marked as triggered on a losing position.
-
-**Fix**: Hard profit-direction guard before any progress math — `isProfitable = isLong ? currentPrice.gt(entry) : currentPrice.lt(entry)`. If false → `{ action: 'none', reason: 'Trade is not in profit' }` and no exchange call is made. When true, movement is measured **directionally** (`currentPrice − entry` / `entry − currentPrice`), which is guaranteed positive by the guard.
-
-**Rule**: Never use `.abs()` for progress toward TP. Progress is only meaningful for an in-profit trade, and only in the profitable direction. Covered by `tests/tradeManager.test.ts`.
-
-### 16.44 ❌ FORBIDDEN: Hardcoding the backtest history window (180 days / "six months")
-
-**Root Cause**: `historyLoader.ts` defined `SIX_MONTHS_MS = 6 * 30 * 24 * 60 * 60 * 1000` and `getTimeRangeForSixMonths()`, which `run.ts` used for the LTF and HTF loaders — ignoring `BACKTEST_DAYS`. The 1m loader used `config.backtestDays`, so the chart/report claimed a 180-day period even when `.env` requested 60 days, and different loaders disagreed about the window.
-
-**Fix**: `getTimeRangeForDays(days)` replaces the constant; `run.ts` derives a single `{ fromMs, toMs }` from `config.backtestDays` and passes it to all three loaders (1m, LTF, HTF) plus the report/artifact period.
-
-**Rule**: All backtest loaders MUST share the window produced by `config.backtestDays`. No hardcoded day counts anywhere in the backtester. Covered by `tests/backtestRange.test.ts`.
-
-### 16.45 ❌ FORBIDDEN: In-place mutation of cached `patternData` arrays inside `ScenarioRouter.evaluate()`
-
-**Root Cause**: The router receives a `PatternData` object that may be pre-computed and **shared** — the backtester builds it once per LTF close and reuses the same reference across every 1m iteration. Filtering with a mutating call (`patternData.structures = ...`, `splice()`, `sort()`, or a filter helper that writes back into the input) permanently removes mitigated structures/zones from the cache. From that candle onward the scenarios see a progressively hollowed-out market context, and results depend on iteration order — a silent, non-reproducible backtest corruption.
-
-**Fix**: `evaluate()` reads the arrays defensively and filters **shallow copies only**, then assembles a new object:
-
-```typescript
-const baseStructures = Array.isArray(basePd.structures) ? basePd.structures : [];
-const baseZones = Array.isArray(basePd.zones) ? basePd.zones : [];
-const safeStructures = this.filterMitigatedStructures([...baseStructures], mitigatedStructures);
-const safeZones = this.filterMitigatedZones([...baseZones], mitigatedZones);
-
-const evaluationData: PatternData = {
-  ...basePd,
-  zones: safeZones,
-  structures: safeStructures,
-  candles1m,
-  mitigatedZones,
-  mitigatedStructures,
-};
-```
-
-**Rule**: `ScenarioRouter.evaluate()` is a **read-only consumer** of `patternData`. Filtering MUST target copies (`[...arr]`) and the scenarios MUST receive a freshly assembled `evaluationData` object. Mutating the cached arrays — even to "save allocations" — is FORBIDDEN (Invariant 50). `mitigatedZones` / `mitigatedStructures` are also passed by reference: scenarios must never mutate them either.
+**Rule**: `evaluate()` is a read-only consumer. Filter copies, never the cache (Invariant 50).
+
+#### 16.6.4 One history window
+**Root Cause**: `SIX_MONTHS_MS` / `getTimeRangeForSixMonths()` fed the LTF and HTF loaders while the 1m loader used `BACKTEST_DAYS` — the report claimed 180 days while `.env` requested 60, and loaders disagreed.
+**Fix**: `getTimeRangeForDays(config.backtestDays)` produces one `{ fromMs, toMs }` used by all three loaders, the report and the artifacts.
+**Rule**: No hardcoded day counts anywhere in the backtester (Invariant 42).
+
+#### 16.6.5 Fees settle exactly once
+**Root Cause**: The entry fee was debited from `state.balance` at open *and* again inside `TradeResult.pnl` at close — double-charged and inflating Max Floating Drawdown.
+**Fix**: Entry fees accrue to `trade.entryFee`; entry + exit are settled once in `netPnl` at closure.
+**Rule**: Never debit the running balance at open.
+
+#### 16.6.6 No perfect-pullback fills
+**Root Cause**: The simulator routed every entry as Market but filled at `idealEntry` — zero slippage and a 100% fill rate for pullbacks that should have been Limits and could expire.
+**Fix**: Hybrid Smart Entry is replicated: Market fills at `candle.close`; a deviation beyond the threshold creates a `PENDING` Limit that must be touched by a later wick.
+**Rule**: A Market order never receives a Limit-quality fill (Invariant 48 gate accepts `zoneDetails` OR `structureDetails`).
+
+#### 16.6.7 True `TotalR` at open
+**Root Cause**: The simulator hardcoded `initialTotalR: "0"`, so every trade fell into the Classic branch and the Sniper partial-close / trailing logic never executed.
+**Fix**: `initializeTradeManagement(entry, sl, tp, qty)` runs in both live and backtest before opening, capturing the real R:R.
+**Rule**: Never hardcode management state; derive it from geometry.
+
+### 16.7 Precision & Exchange Contracts
+
+#### 16.7.1 Instrument precision, never `toFixed`
+**Root Cause**: `toFixed(2)` / `toFixed(8)` truncated or over-specified prices for instruments with different `tickSize`, producing `Invalid price precision` rejections.
+**Fix**: `formatPrice(value, instrument.tickSize)` and `formatQuantity(qty, instrument.qtyStep)` from `utils/precision.ts` are the only formatters.
+**Rule**: Decimal places are a property of the instrument, never of the code.
+
+#### 16.7.2 Quantities are formatted and min-lot checked
+**Root Cause**: A 25% partial close produced values like `0.7875`, rejected for precision, leaving the position unmanaged and unprotected.
+**Fix**: Every calculated quantity passes through `formatQuantity(qty, qtyStep)` and is validated against `minOrderQty` before submission.
+**Rule**: No order or partial close leaves the process unformatted.
+
+#### 16.7.3 Active orders go through the client wrapper
+**Root Cause**: Code called `rest.getOpenOrders()` on the Bybit V5 SDK — that endpoint does not exist (`getActiveOrders` does), so the reconciliation sweep crashed instead of seeing pending limits.
+**Fix**: All order queries use `BybitClient.getOpenOrders()` (`src/api/bybitClient.ts:486`), a thin wrapper over `rest.getActiveOrders()`.
+**Rule**: Verify SDK surface against the V5 docs; engine code talks to the wrapper, not the raw SDK.
+
+#### 16.7.4 Demo accounts are UNIFIED-only
+**Root Cause**: Demo accounts are exclusively Unified Trading Accounts. Querying `CONTRACT` returned `[10001] accountType only support UNIFIED`, which masked the original failure and surfaced a misleading error in `process()`.
+**Fix**: `getUsdtBalance()` queries only `accountType: 'UNIFIED'` when `demoTrading` is true; the legacy fallback (non-demo) ignores the expected `[10001]` so it never masks the `UNIFIED` error.
+**Rule**: Never query `CONTRACT` on demo.
+
+#### 16.7.5 Buffers are configurable
+**Root Cause**: A hardcoded `0.0005` pre-flight buffer either rejected valid trades on liquid pairs or failed to cover the spread on illiquid ones.
+**Fix**: `PREFLIGHT_BUFFER_PCT` (default `0.05`).
+**Rule**: Liquidity-dependent percentages belong in `.env`, not in source.
+
+### 16.8 Operational Hygiene
+
+#### 16.8.1 UTC for every scheduler
+**Root Cause**: `new Date().setHours(0,0,0,0)` uses the host's local timezone, so the macro refresh fired at the wrong hour on Render versus a dev machine.
+**Fix**: `setUTCHours` / `setUTCDate`, or luxon with an explicit zone.
+**Rule**: Schedulers are defined in UTC only.
+
+#### 16.8.2 No local disk in the Telegram backup
+**Root Cause**: Node 26 + Telegraf `sendDocument({ source: buffer })` fails with `socket hang up` / `ECONNRESET`, and the container is stateless anyway.
+**Fix**: Buffer → `Uint8Array` → Web API `Blob` → `fetch` + `FormData` straight to `api.telegram.org`.
+**Rule**: No `fs` in Telegram delivery.
+
+#### 16.8.3 English only
+**Root Cause**: Legacy Telegram notifications carried Russian bodies, splitting the operational vocabulary and breaking log greps.
+**Fix**: `src/telegram/notifier.ts` and engine logs are English-only; reviews reject non-English strings. The funding-monitor alert bodies are the single documented exception, tracked as a localization item.
+**Rule**: New user-facing strings are English. No new Cyrillic is introduced anywhere.
 
 ---
 
-_Last updated: 2026-10-21. All 296 tests green. Build passes. Enterprise-ready._
+_Last updated: 2026-10-23. S12 Production Refinements (persistent 4H SMA50 trend gate + fee-aware TP distance floor, `MIN_TP_DISTANCE_PCT`), Scenario Revival (S13 archived, S12 per-CHoCH sweep pairing + opt-in sweep sources, S1 bidirectional, S5 sweep causality): invariants 1–59, anti-patterns consolidated into §16.1–§16.8. Toolchain: typecheck clean, 558 tests / 36 suites green, build passing._

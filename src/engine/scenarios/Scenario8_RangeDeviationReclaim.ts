@@ -37,7 +37,7 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     };
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     Scenario8_RangeDeviationReclaim.rejectionStats.totalEvals++;
 
     // CRITICAL: Killzone check - only London/NY (bypassable via ENFORCE_KILLZONES=false)
@@ -62,24 +62,33 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     // Reclaim: price closed back inside range
     let deviationCandle: any = null;
     let reclaimCandle: any = null;
-    
+
     const checkWindow = Math.min(6, candles15m.length);
-    let deviationFound = false;
-    for (let i = candles15m.length - checkWindow; i < candles15m.length; i++) {
-      const c = candles15m[i];
-      const high = new Decimal(c.high);
-      const close = new Decimal(c.close);
-      
-      // Deviation: wicked above range high
-      if (!deviationFound && high.gt(rangeHigh)) {
-        deviationCandle = c;
-        deviationFound = true;
-        continue; // Don't check reclaim on the same candle
-      }
-      // Reclaim: closed back inside range AFTER deviation candle
-      if (deviationFound && close.lt(rangeHigh) && close.gt(rangeLow)) {
-        reclaimCandle = c;
+    const windowStart = candles15m.length - checkWindow;
+
+    // Newest-first: the freshest deviation is the only valid manipulation anchor.
+    // `candles15m` is chronological (oldest → newest), so iterate from the end and
+    // break on the first (newest) hit — a forward scan would pick the oldest wick.
+    let deviationIndex = -1;
+    for (let i = candles15m.length - 1; i >= windowStart; i--) {
+      const high = new Decimal(candles15m[i].high);
+      if (high.gt(rangeHigh)) {
+        deviationCandle = candles15m[i];
+        deviationIndex = i;
         break;
+      }
+    }
+
+    // Reclaim: first close back inside the range AFTER the deviation candle.
+    // Forward scan is mandatory here — causality runs deviation → reclaim, so
+    // only candles with a HIGHER index can reclaim the deviation we just selected.
+    if (deviationCandle) {
+      for (let i = deviationIndex + 1; i < candles15m.length; i++) {
+        const close = new Decimal(candles15m[i].close);
+        if (close.lt(rangeHigh) && close.gt(rangeLow)) {
+          reclaimCandle = candles15m[i];
+          break;
+        }
       }
     }
 
@@ -122,6 +131,7 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     const reclaimTime = reclaimCandle.timestamp;
     const bearishChoch = [...(structures || [])].reverse().find((s: any) => 
       s.type === 'CHOCH' && s.direction === 'BEARISH' &&
+      s.timeframe === '15' &&
       s.timestamp >= reclaimTime &&
       s.timestamp <= reclaimTime + 8 * 60 * 60 * 1000 // 8 hours
     );
@@ -142,6 +152,7 @@ export class Scenario8_RangeDeviationReclaim extends BaseScenario {
     // Look for FVG in the area to define precise entry
     const fvgs = patternData.zones?.filter((z: any) => 
       z.type === 'FVG' && z.direction === 'BEARISH' &&
+      z.timeframe === '15' &&
       z.top.gte(rangeLow) && z.bottom.lte(rangeHigh)
     ) || [];
 

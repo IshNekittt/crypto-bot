@@ -33,8 +33,16 @@ const mockConfig: BotConfig = {
   smcSlAtrOffset: '0.5',
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
+  sniperLimitExpirationCandles: 15,
+  smcSweepMinWickRatio: new Decimal('0.25'),
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
@@ -332,6 +340,14 @@ describe('Scenario2: FVG Fill', () => {
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('No HTF FVG found');
     });
+
+    it('should reject a BEARISH HTF FVG (Long-only execution)', () => {
+      const data = createIdealFvgFillPatternData();
+      data.zones = [{ ...data.zones[0], direction: 'BEARISH' } as any];
+      const result = scenario.evaluate(data);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toBe('No HTF FVG found');
+    });
   });
 
   describe('negative cases - 0.5 equilibrium', () => {
@@ -356,6 +372,16 @@ describe('Scenario2: FVG Fill', () => {
       const result = scenario.evaluate(createFvgFillNoLiquidityContext());
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('liquidity context');
+    });
+
+    it('should accept a liquidity pool with isTaken=false (dead flag removed)', () => {
+      const data = createIdealFvgFillPatternData();
+      // `PatternRecognizer` always emits `isTaken: false`; the old check made this
+      // confluence gate unreachable. Pool presence in the window is the context.
+      (data.liquidityPools[0] as any).isTaken = false;
+      const result = scenario.evaluate(data);
+      expect(result).toBe(true);
+      expect(scenario.getReason()).toContain('FVG Fill');
     });
   });
 

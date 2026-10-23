@@ -37,10 +37,77 @@ export interface BotConfig {
   readonly smcSlAtrOffset: string;
   readonly smcDisplacementMultiplier: string;
   readonly limitExpirationCandles: number;
+  /**
+   * Limit-order lifetime in Sniper Mode, counted in **1m execution candles**.
+   *
+   * The Classic knob (`limitExpirationCandles`) is measured in LTF candles, so the
+   * same number means very different wall-clock lifetimes across modes: 6 candles
+   * are 90 minutes on a 15m chart but only 6 minutes on the 1m Sniper chart, which
+   * expired valid OB-midpoint pullbacks before they could complete. This knob keeps
+   * the two modes independently tunable instead of silently inheriting the LTF
+   * count. Resolve through `resolveLimitExpirationCandles()` / `resolveLimitExpirationMs()`.
+   */
+  readonly sniperLimitExpirationCandles: number;
+  /**
+   * Minimum share of the sweep candle's total range that its rejection wick must
+   * cover for a level interaction to count as absorption (Scenario 12).
+   *
+   * Scenario 12 requires a *sweep* — wick through the macro level with a close back
+   * inside it — and this ratio separates genuine absorption from a casual poke. It
+   * is a ratio in `(0, 1)`, consumed as `Decimal` (Invariant 1).
+   *
+   * Calibration (measured, 60d 1m backtest, cache-reproducible): at `0.30` the gate
+   * rejected 56.5% / 54.1% / 56.8% of every level touch on BTC / SOL / NEAR — past
+   * the point where it removes absorption rather than noise. `0.25` keeps the
+   * "rejection wick must be real" requirement while admitting the 25-30% SFPs that
+   * high-liquidity majors routinely print: on those books a deep wick is absorbed
+   * quickly, so an outsized wick is the exception, not the signature of defence.
+   */
+  readonly smcSweepMinWickRatio: Decimal;
+  /**
+   * Scenario 12 — opt-in intraday sweep sources (default `false`).
+   *
+   * With both flags off, the Sniper funnel reproduces the macro-only baseline
+   * exactly (PDH/PDL/PWH/PWL). `s12SessionSweeps` adds the most recent Asian
+   * session high/low, `s12EqhEqlSweeps` adds 15m EQH/EQL pools. Coincident
+   * prices are deduplicated with macro priority: Macro > Session > EQH/EQL.
+   *
+   * Declared optional so hand-built `BotConfig` fixtures keep compiling; an
+   * absent value is treated as `false` (baseline reproducibility).
+   */
+  readonly s12SessionSweeps?: boolean;
+  readonly s12EqhEqlSweeps?: boolean;
+  /**
+   * Scenario 12 — minimum take-profit distance from entry, as a fraction of price
+   * (default `0.0035` = 0.35%).
+   *
+   * Bybit charges ~0.11% round-trip taker fees, so a target closer than this hands
+   * 30-45% of the gross move to the exchange: the trade is fee-dominated even when
+   * it reaches TP. The gate runs on the resolved target, so it applies to both
+   * structural and fixed-R targets. Values must lie in `(0, 0.1)`; a literal `10`
+   * is almost certainly a percentage written without dividing by 100.
+   */
+  readonly minTpDistancePct: Decimal;
   readonly smartEntryThresholdPct: string;
   readonly preflightBufferPct: string;
   readonly enableSniperMode: boolean;
   readonly sniperDisplacementMultiplier?: string;
+  /**
+   * Dynamic Take-Profit (see `src/engine/tpResolver.ts`).
+   *
+   * When `true`, scenarios derive the take-profit from market structure
+   * (opposing liquidity pools, unmitigated HTF/LTF zones, range equilibrium)
+   * instead of multiplying the stop distance by a constant.
+   */
+  readonly enableDynamicTp: boolean;
+  /** Target multiple used when dynamic TP is disabled, and as the no-candidate fallback. */
+  readonly fixedTpRr: Decimal;
+  /** Nearest opposing target closer than this rejects the setup (no room to run). */
+  readonly dynamicTpMinRr: Decimal;
+  /** Hard ceiling on the resolved target, in R units. */
+  readonly dynamicTpMaxRr: Decimal;
+  /** When `true`, "no opposing target found" rejects instead of falling back to `fixedTpRr`. */
+  readonly dynamicTpRequireTarget: boolean;
   readonly backtestDays: number;
   readonly maxWorkingCapital: number;
   readonly useLocalCacheOnly: boolean;
@@ -97,7 +164,7 @@ function parseActiveScenarios(raw: string | null): number[] {
     .filter((n) => Number.isInteger(n) && n >= 1 && n <= 12);
   if (ids.length === 0) {
     throw new Error(
-      "ACTIVE_SCENARIOS must contain valid scenario IDs (1-12), e.g. ACTIVE_SCENARIOS=3,4,5,7,8,9,12",
+      "ACTIVE_SCENARIOS must contain valid scenario IDs (1-12), e.g. ACTIVE_SCENARIOS=1,2,3,5,6,7,8,9,10,11,12",
     );
   }
   return [...new Set(ids)].sort((a, b) => a - b);
@@ -153,6 +220,94 @@ function parsePositiveNumberOrDefault(
     throw new Error(`${label} must be a positive number, got: "${raw}"`);
   }
   return parsed;
+}
+
+/**
+ * Parse a strictly positive ratio into a `Decimal` (used by the dynamic TP knobs).
+ *
+ * Ratios such as R:R multiples are consumed by `tpResolver` as `Decimal` and never
+ * as `number`, so the config surface stays exact (Invariant 1). A value of `0` is
+ * rejected here rather than downstream, where it would silently produce a
+ * zero-width target.
+ */
+function parsePositiveDecimalOrDefault(
+  value: string | null,
+  defaultValue: string,
+  label: string,
+): Decimal {
+  const raw = value ?? defaultValue;
+  let parsed: Decimal;
+  try {
+    parsed = new Decimal(raw);
+  } catch {
+    throw new Error(`${label} must be a valid number, got: "${raw}"`);
+  }
+  if (!parsed.isFinite() || parsed.lte(0)) {
+    throw new Error(`${label} must be a strictly positive number, got: "${raw}"`);
+  }
+  return parsed;
+}
+
+/**
+ * Parse a proportional threshold (a share of a whole) into a `Decimal` in `(0, 1)`.
+ *
+ * A share of `0` would make the gate meaningless and a share of `1` (or more) would
+ * require the wick to cover the entire candle range, so both are configuration
+ * errors rather than clamped values. Input above 1 is a common mistake when the
+ * value is written as a percentage (`25` instead of `0.25`), and failing loudly
+ * surfaces that immediately instead of silently rejecting every setup.
+ */
+function parseRatioOrDefault(
+  value: string | null,
+  defaultValue: string,
+  label: string,
+): Decimal {
+  const raw = value ?? defaultValue;
+  let parsed: Decimal;
+  try {
+    parsed = new Decimal(raw);
+  } catch {
+    throw new Error(`${label} must be a valid number, got: "${raw}"`);
+  }
+  if (!parsed.isFinite() || parsed.lte(0) || parsed.gte(1)) {
+    throw new Error(
+      `${label} must be a ratio strictly between 0 and 1 (e.g. 0.25 for 25%), got: "${raw}"`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Effective limit-order lifetime in candles of the **execution** timeframe.
+ *
+ * Sniper Mode executes on 1m candles, Classic mode on the LTF, so the same candle
+ * count means very different wall-clock lifetimes. Every consumer (live
+ * reconciliation, backtest simulator) resolves through this single helper so the
+ * two can never drift apart.
+ */
+export function resolveLimitExpirationCandles(config: {
+  enableSniperMode: boolean;
+  limitExpirationCandles: number;
+  sniperLimitExpirationCandles: number;
+}): number {
+  return config.enableSniperMode
+    ? config.sniperLimitExpirationCandles
+    : config.limitExpirationCandles;
+}
+
+/** Effective limit-order lifetime in milliseconds (see `resolveLimitExpirationCandles`). */
+export function resolveLimitExpirationMs(config: {
+  enableSniperMode: boolean;
+  limitExpirationCandles: number;
+  sniperLimitExpirationCandles: number;
+  ltfTimeframe: string;
+}): number {
+  const executionTfMinutes = config.enableSniperMode
+    ? 1
+    : Number(config.ltfTimeframe);
+  return (
+    resolveLimitExpirationCandles(config) * executionTfMinutes * 60 * 1000
+  );
 }
 
 function parseSymbolScenarios(
@@ -325,6 +480,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     "SMC_DISPLACEMENT_MULTIPLIER",
   );
 
+  // Scenario 12 sweep-absorption threshold. Ratio in (0, 1), see BotConfig.
+  const smcSweepMinWickRatio = parseRatioOrDefault(
+    optionalEnv(env, "SMC_SWEEP_MIN_WICK_RATIO"),
+    "0.25",
+    "SMC_SWEEP_MIN_WICK_RATIO",
+  );
+
+  // Scenario 12 opt-in sweep sources. Default false = macro-only baseline.
+  const s12SessionSweeps =
+    (optionalEnv(env, "S12_SESSION_SWEEPS") ?? "false").toLowerCase() === "true";
+  const s12EqhEqlSweeps =
+    (optionalEnv(env, "S12_EQH_EQL_SWEEPS") ?? "false").toLowerCase() === "true";
+
+  // Scenario 12 fee-aware target floor. Strictly positive (enforced by the helper)
+  // and below 10% — a larger value would reject every realistic target.
+  const minTpDistancePct = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "MIN_TP_DISTANCE_PCT"),
+    "0.0035",
+    "MIN_TP_DISTANCE_PCT",
+  );
+  if (minTpDistancePct.gte(new Decimal("0.1"))) {
+    throw new Error(
+      `MIN_TP_DISTANCE_PCT must be < 0.1 (10%), got: ${minTpDistancePct.toString()}`,
+    );
+  }
+
   const limitExpirationCandles = parsePositiveNumberOrDefault(
     optionalEnv(env, "LIMIT_EXPIRATION_CANDLES"),
     "6",
@@ -333,6 +514,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   if (!Number.isInteger(limitExpirationCandles)) {
     throw new Error(
       `LIMIT_EXPIRATION_CANDLES must be an integer, got: ${limitExpirationCandles}`,
+    );
+  }
+
+  // Sniper Mode counts this in 1m candles, Classic mode in LTF candles (see BotConfig).
+  const sniperLimitExpirationCandles = parsePositiveNumberOrDefault(
+    optionalEnv(env, "SNIPER_LIMIT_EXPIRATION_CANDLES"),
+    "15",
+    "SNIPER_LIMIT_EXPIRATION_CANDLES",
+  );
+  if (!Number.isInteger(sniperLimitExpirationCandles)) {
+    throw new Error(
+      `SNIPER_LIMIT_EXPIRATION_CANDLES must be an integer, got: ${sniperLimitExpirationCandles}`,
     );
   }
 
@@ -363,6 +556,39 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     "1.5",
     "SNIPER_DISPLACEMENT_MULTIPLIER",
   );
+
+  // === Dynamic Take-Profit ===
+  // Structural targets replace the blind `k * R` constant. See tpResolver.ts.
+  const enableDynamicTp =
+    (optionalEnv(env, "ENABLE_DYNAMIC_TP") ?? "false").toLowerCase() === "true";
+
+  const fixedTpRr = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "FIXED_TP_RR"),
+    "3",
+    "FIXED_TP_RR",
+  );
+
+  const dynamicTpMinRr = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "DYNAMIC_TP_MIN_RR"),
+    "1.5",
+    "DYNAMIC_TP_MIN_RR",
+  );
+
+  const dynamicTpMaxRr = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "DYNAMIC_TP_MAX_RR"),
+    "6",
+    "DYNAMIC_TP_MAX_RR",
+  );
+
+  if (dynamicTpMaxRr.lt(dynamicTpMinRr)) {
+    throw new Error(
+      `DYNAMIC_TP_MAX_RR (${dynamicTpMaxRr.toString()}) must be >= DYNAMIC_TP_MIN_RR (${dynamicTpMinRr.toString()})`,
+    );
+  }
+
+  const dynamicTpRequireTarget =
+    (optionalEnv(env, "DYNAMIC_TP_REQUIRE_TARGET") ?? "false").toLowerCase() ===
+    "true";
 
   const backtestDays = parsePositiveNumber(
     optionalEnv(env, "BACKTEST_DAYS") ?? "60",
@@ -430,11 +656,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     backtestCsvPath,
     smcSlAtrOffset,
     smcDisplacementMultiplier,
+    smcSweepMinWickRatio,
+    s12SessionSweeps,
+    s12EqhEqlSweeps,
+    minTpDistancePct,
     limitExpirationCandles,
+    sniperLimitExpirationCandles,
     smartEntryThresholdPct,
     preflightBufferPct,
     enableSniperMode,
     sniperDisplacementMultiplier,
+    enableDynamicTp,
+    fixedTpRr,
+    dynamicTpMinRr,
+    dynamicTpMaxRr,
+    dynamicTpRequireTarget,
     backtestDays,
     maxWorkingCapital,
     useLocalCacheOnly,

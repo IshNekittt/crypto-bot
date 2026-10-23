@@ -33,8 +33,16 @@ const mockConfig: BotConfig = {
   smcSlAtrOffset: '0.5',
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
+  sniperLimitExpirationCandles: 15,
+  smcSweepMinWickRatio: new Decimal('0.25'),
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
@@ -68,12 +76,16 @@ describe('Scenario3: Inducement (IDM)', () => {
     const now = Date.now();
     const recentLowSweep = config.hasIdmSweep ? {
       type: 'CHOCH', direction: 'BULLISH',
-      brokenSwing: { type: 'LOW', price: new Decimal(100), timestamp: now - 2 * 60 * 60 * 1000, index: 10, isSwept: false },
+      price: new Decimal(100),
+      timestamp: now - 2 * 60 * 60 * 1000,
+      timeframe: '15',
+      isValidated: true,
+      impulseFactor: new Decimal(2),
     } : null;
 
     const realOb = config.hasRealOb ? {
       type: 'OB', direction: 'BULLISH', top: new Decimal(99.5), bottom: new Decimal(99),
-      timestamp: now - 100000, mitigated: false, invalidated: false,
+      timestamp: now - 100000, mitigated: false, timeframe: '15',
     } : null;
 
     const lastCandle = {

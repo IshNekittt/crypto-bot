@@ -56,7 +56,7 @@ export class Scenario4_MitigationChain extends BaseScenario {
     return !!bosAfterOb;
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     Scenario4_MitigationChain.rejectionStats.totalEvals++;
 
     if (this.config.enforceKillzones !== false && (!patternData.currentKillzone || patternData.currentKillzone === 'NONE')) {
@@ -71,9 +71,12 @@ export class Scenario4_MitigationChain extends BaseScenario {
     const { candles15m } = patternData;
     if (!candles15m.length) return false;
 
-    // Find the most recent unmitigated OB in trend direction
+    // Find the most recent OB in trend direction.
+    // NOTE: `!z.mitigated` was removed — `PatternRecognizer` hardcodes
+    // `mitigated: false`, so the predicate was a no-op. Re-entry protection is
+    // enforced exclusively by `ScenarioRouter.filterMitigatedZones`.
     const trendObs = patternData.zones?.filter((z: any) => 
-      z.type === 'OB' && z.direction === 'BULLISH' && !z.mitigated
+      z.type === 'OB' && z.direction === 'BULLISH'
     ) || [];
 
     if (!trendObs.length) {

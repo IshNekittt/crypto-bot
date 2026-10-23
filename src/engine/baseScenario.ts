@@ -35,7 +35,30 @@ export abstract class BaseScenario implements IScenario {
     this.config = config;
   }
 
-  evaluate(_patternData: any): boolean {
+  /**
+   * Single evaluation entry point for every scenario.
+   *
+   * Resets per-evaluation state BEFORE delegating to the concrete scenario. A
+   * scenario instance is reused for the lifetime of the process (one router per
+   * symbol evaluates the same 12 instances), so without this reset a successful
+   * evaluation on symbol A could leak `levels` / `zoneDetails` / `structureDetails`
+   * into a later evaluation on symbol B that returns true without setting them.
+   *
+   * Concrete scenarios MUST implement `evaluateInternal()` and MUST NOT override
+   * this method — otherwise the reset can be bypassed.
+   */
+  evaluate(patternData: any): boolean {
+    this.levels = null;
+    this.zoneDetails = null;
+    this.structureDetails = null;
+
+    return this.evaluateInternal(patternData);
+  }
+
+  /**
+   * Concrete scenario logic (Scenario 1–12). Called only through `evaluate()`.
+   */
+  protected evaluateInternal(_patternData: any): boolean {
     return false;
   }
 
@@ -124,5 +147,56 @@ export abstract class BaseScenario implements IScenario {
       : entry.minus(sl.minus(entry).mul(rr));
 
     return { entry, stopLoss: sl, takeProfit: tp };
+  }
+
+  /**
+   * Calculate trade levels where the take-profit is supplied by market structure
+   * instead of being derived from the stop.
+   *
+   * WHY: `calculateLevels(..., rr)` always returns `TP = entry +/- rr * |entry - SL|`.
+   * That target is a restatement of the stop distance — the market is never
+   * consulted. Round-trip fees expressed in R units are `f = c / s` (with
+   * `s = R / entry`), so a tight stop silently converts a nominal "3R" winner
+   * into a loser. The structural target comes from `src/engine/tpResolver.ts`.
+   *
+   * The stop geometry is still delegated to `calculateLevels()` with `rr = 1`,
+   * keeping the 0.1% offset floor and the inverted-zone defense as the single
+   * source of truth (Invariant 11). Only the target is replaced.
+   *
+   * @throws if `takeProfit` is not strictly beyond `entry` in `direction`.
+   */
+  protected calculateLevelsWithTarget(
+    entry: Decimal,
+    zone: { top: Decimal; bottom: Decimal; direction: 'BULLISH' | 'BEARISH' },
+    direction: 'BULLISH' | 'BEARISH',
+    atr: Decimal,
+    takeProfit: Decimal,
+    offsetMultiplier: Decimal = new Decimal(0.5)
+  ): TradeLevels {
+    const base = this.calculateLevels(
+      entry,
+      zone,
+      direction,
+      atr,
+      new Decimal(1),
+      offsetMultiplier
+    );
+
+    const correctSide =
+      direction === 'BULLISH'
+        ? takeProfit.gt(base.entry)
+        : takeProfit.lt(base.entry);
+
+    if (!correctSide) {
+      throw new Error(
+        `calculateLevelsWithTarget: take-profit ${takeProfit.toString()} is on the wrong side of entry ${base.entry.toString()} for ${direction}`
+      );
+    }
+
+    return {
+      entry: base.entry,
+      stopLoss: base.stopLoss,
+      takeProfit,
+    };
   }
 }

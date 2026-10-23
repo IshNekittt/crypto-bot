@@ -7,7 +7,7 @@ export class Scenario6_SMS extends BaseScenario {
     super(6, 'Failure Swing (SMS)', config);
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     // SMS can happen in any session, but CHoCH confirmation needs killzone
     if (!this.isInKillzone(patternData)) {
       this.logRejection('Not in active killzone for CHoCH confirmation');
@@ -18,7 +18,9 @@ export class Scenario6_SMS extends BaseScenario {
     if (!candles15m?.length || !structures?.length || !zones?.length) return false;
 
     // Find SMS (Smart Money Shift) - failure to make new high/low
-    const sms = [...structures].reverse().find((s: any) => s.type === 'SMS');
+    const sms = [...structures].reverse().find((s: any) =>
+      s.type === 'SMS' && s.timeframe === '15',
+    );
     if (!sms) {
       this.logRejection('No SMS (Smart Money Shift) detected');
       return false;
@@ -31,7 +33,8 @@ export class Scenario6_SMS extends BaseScenario {
 
     // CRITICAL: Verify aggressive CHoCH in SMS direction
     const choch = [...structures].reverse().find((s: any) => 
-      s.type === 'CHOCH' && 
+      s.type === 'CHOCH' &&
+      s.timeframe === '15' &&
       s.direction === expectedDirection &&
       s.timestamp > sms.timestamp
     );
@@ -52,6 +55,7 @@ export class Scenario6_SMS extends BaseScenario {
     // For bullish SMS: the last BEARISH OB before the SMS that failed
     const smsObs = zones.filter((z: any) => 
       z.type === 'OB' && 
+      z.timeframe === '15' &&
       z.direction === (sms.direction === 'BEARISH' ? 'BULLISH' : 'BEARISH') &&
       z.timestamp < sms.timestamp &&
       !z.mitigated

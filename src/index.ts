@@ -22,6 +22,10 @@ import { BackupService } from "./services/backupService";
 import { NewsService } from "./services/newsService";
 import { FundingMonitorService } from "./services/fundingMonitorService";
 
+// Module-scope handle for the self-rescheduling daily macro refresher. Kept outside main()
+// so shutdown() can always cancel the pending timer instead of leaving the event loop pinned.
+let macroTimer: NodeJS.Timeout | null = null;
+
 function setupGlobalErrorHandlers(): void {
   async function handleFatalCrash(
     type: "UNCAUGHT EXCEPTION" | "UNHANDLED REJECTION",
@@ -126,6 +130,7 @@ async function main(): Promise<void> {
     baseRiskPercent: config.riskPercent,
     reducedRiskPercent: config.reducedRiskPercent,
     leverage: config.leverage,
+    maxWorkingCapital: config.maxWorkingCapital,
   });
   const executionEngine = new ExecutionEngine(client, notifier);
 
@@ -477,7 +482,7 @@ async function main(): Promise<void> {
       `Next macro context refresh scheduled in ${Math.round(msUntilMidnight / 60000)} minutes`,
     );
 
-    const timeout = setTimeout(async () => {
+    const timer = setTimeout(async () => {
       try {
         logger.info("Starting daily macro context and news refresh...");
 
@@ -534,7 +539,9 @@ async function main(): Promise<void> {
       }
     }, msUntilMidnight);
 
-    return timeout;
+    macroTimer = timer;
+    timer.unref();
+    return timer;
   };
 
   startMacroContextRefresher();
@@ -547,6 +554,12 @@ async function main(): Promise<void> {
     logger.info(`${signal} received, starting graceful shutdown...`);
 
     try {
+      if (macroTimer) {
+        clearTimeout(macroTimer);
+        macroTimer = null;
+        logger.info("Macro context refresher timer cleared");
+      }
+
       reconciliation.stop();
       logger.info("Reconciliation loop stopped");
 

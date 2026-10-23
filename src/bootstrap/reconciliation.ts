@@ -2,7 +2,7 @@ import { PositionListSource } from '../api/bybitClient';
 import { PostgresDatabase } from '../db/database';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../config/env';
+import { BotConfig, resolveLimitExpirationCandles, resolveLimitExpirationMs } from '../config/env';
 
 export const RECONCILIATION_INTERVAL_MS = 10 * 60 * 1000;
 export const CLOCK_DRIFT_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -55,7 +55,9 @@ export class ReconciliationLoop {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.tick();
+      this.tick().catch((e) =>
+        logger.error(`Reconciliation tick failed: ${e instanceof Error ? e.message : String(e)}`),
+      );
     }, RECONCILIATION_INTERVAL_MS);
     this.timer.unref();
     logger.info(`Reconciliation loop started (every ${RECONCILIATION_INTERVAL_MS / 60000} min)`);
@@ -89,14 +91,13 @@ export class ReconciliationLoop {
       for (const engine of this.engines) {
         if (engine.getState() !== 'IN_TRADE') continue;
         try {
-          const positions = await this.source.getOpenPositions(engine.symbol);
-          
           // Check for active limit orders before force-reset
           const openOrders = await this.source.getOpenOrders(engine.symbol);
           
-          // Calculate dynamic expiration based on Sniper Mode (1m) vs Classic (LTF)
-          const executionTfMinutes = this.config.enableSniperMode ? 1 : Number(this.config.ltfTimeframe);
-          const expirationMs = this.config.limitExpirationCandles * executionTfMinutes * 60 * 1000;
+          // Expiration is mode-aware: Sniper Mode counts 1m candles, Classic counts LTF
+          // candles. Resolving through the shared helper keeps live and backtest aligned.
+          const expirationCandles = resolveLimitExpirationCandles(this.config);
+          const expirationMs = resolveLimitExpirationMs(this.config);
           const now = Date.now();
           
           const activeLimits = openOrders.filter(
@@ -108,16 +109,29 @@ export class ReconciliationLoop {
           for (const order of activeLimits) {
             const orderAgeMs = now - order.createdAt;
             if (orderAgeMs > expirationMs) {
-              logger.info(`[${engine.symbol}] Cancelling expired LIMIT order ${order.orderId} (age: ${Math.round(orderAgeMs/60000)}m, limit: ${this.config.limitExpirationCandles} candles)`);
+              logger.info(`[${engine.symbol}] Cancelling expired LIMIT order ${order.orderId} (age: ${Math.round(orderAgeMs/60000)}m, limit: ${expirationCandles} candles)`);
               try {
                 await this.source.cancelOrder(engine.symbol, order.orderId);
-                await this.db.closeTrade(order.orderId, '0', order.price || '0', Date.now(), 'CANCELLED');
-                logger.info(`[${engine.symbol}] Cancelled order closed in DB safely.`);
 
-                // Safely trigger notification — engine may be a mock without deps/notifier
-                if (engine.deps && engine.deps.notifier) {
-                  engine.deps.notifier.notifyTradeClosed(engine.symbol, '0', '0', 'CANCELLED')
-                    .catch(e => logger.error(`[${engine.symbol}] TG Cancel Notify error: ${e instanceof Error ? e.message : String(e)}`));
+                if (order.status === 'PartiallyFilled') {
+                  // A partially filled limit leaves REAL exposure on the exchange. Closing the DB
+                  // row as CANCELLED would orphan the filled portion (no OPEN row => no Adaptive
+                  // Fractioning, no reconciliation adoption). Keep IN_TRADE for management.
+                  hasValidLimit = true;
+                  logger.info(`[${engine.symbol}] Cancelled resting portion of PartiallyFilled Limit ${order.orderId}. Filled portion remains IN_TRADE for management.`);
+                } else {
+                  const dbOk = await this.db.closeTrade(order.orderId, '0', order.price || '0', Date.now(), 'CANCELLED');
+                  if (!dbOk) {
+                    logger.warn(`[${engine.symbol}] Cancelled limit not found in DB for closure.`);
+                  } else {
+                    logger.info(`[${engine.symbol}] Cancelled order closed in DB safely.`);
+
+                    // Safely trigger notification — engine may be a mock without deps/notifier
+                    if (engine.deps && engine.deps.notifier) {
+                      engine.deps.notifier.notifyTradeClosed(engine.symbol, '0', '0', 'CANCELLED')
+                        .catch(e => logger.error(`[${engine.symbol}] TG Cancel Notify error: ${e instanceof Error ? e.message : String(e)}`));
+                    }
+                  }
                 }
               } catch (err) {
                 logger.error(`[${engine.symbol}] Failed to cancel/close expired limit order: ${err instanceof Error ? err.message : String(err)}`);
@@ -131,7 +145,10 @@ export class ReconciliationLoop {
             logger.info(`[${engine.symbol}] Reconciliation: Keeping IN_TRADE state due to active Limit order`);
             continue; // Skip force-reset, limit order is still active
           }
-          
+
+          // Snapshot positions AFTER the cancellation loop: a limit cancelled above may have
+          // left a partial fill (or none at all), and reconcile() must judge the current reality.
+          const positions = await this.source.getOpenPositions(engine.symbol);
           const changed = await engine.reconcile(positions);
           if (changed) resets += 1;
         } catch (error) {
@@ -202,9 +219,9 @@ export class ReconciliationLoop {
   }
 
   private async cancelExpiredLimitOrders(): Promise<void> {
-    // Use execution timeframe: 1m for Sniper Mode, LTF for Classic
-    const executionTfMinutes = this.config.enableSniperMode ? 1 : Number(this.config.ltfTimeframe);
-    const limitExpirationMs = this.config.limitExpirationCandles * executionTfMinutes * 60 * 1000;
+    // Mode-aware lifetime: 1m candles in Sniper Mode, LTF candles in Classic.
+    const expirationCandles = resolveLimitExpirationCandles(this.config);
+    const limitExpirationMs = resolveLimitExpirationMs(this.config);
     const now = Date.now();
 
     for (const engine of this.engines) {
@@ -222,21 +239,32 @@ export class ReconciliationLoop {
             // Cancel the expired limit order
             try {
               await this.source.cancelOrder(order.symbol, order.orderId);
-              
-              // Explicitly close in DB with 0 PnL and CANCELLED reason
-              // This prevents Step 2 from hallucinating PnL
-              try {
-                await this.db.closeTrade(order.orderId, '0', order.price || '0', Date.now(), 'CANCELLED');
-                logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${this.config.limitExpirationCandles} candles)`);
-                logger.info(`[${symbol}] Cancelled order closed in DB safely.`);
 
-                // Safely trigger notification — engine may be a mock without deps/notifier
-                if (engine.deps && engine.deps.notifier) {
-                  engine.deps.notifier.notifyTradeClosed(symbol, '0', '0', 'CANCELLED')
-                    .catch((e) => logger.error(`[${symbol}] TG Cancel Notify error: ${e instanceof Error ? e.message : String(e)}`));
+              if (order.status === 'PartiallyFilled') {
+                // Resting remainder cancelled, but the filled portion is live exposure:
+                // never close the DB row as CANCELLED (see Step 1 of tick()).
+                logger.info(`[${symbol}] Cancelled resting portion of PartiallyFilled Limit ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${expirationCandles} candles). Filled portion remains IN_TRADE for management.`);
+              } else {
+                // Explicitly close in DB with 0 PnL and CANCELLED reason
+                // This prevents Step 2 from hallucinating PnL
+                try {
+                  const dbOk = await this.db.closeTrade(order.orderId, '0', order.price || '0', Date.now(), 'CANCELLED');
+                  logger.info(`[${symbol}] Cancelled expired LIMIT order ${order.orderId} (age: ${(orderAge / 60000).toFixed(1)} min, limit: ${expirationCandles} candles)`);
+
+                  if (!dbOk) {
+                    logger.warn(`[${symbol}] Cancelled limit not found in DB for closure.`);
+                  } else {
+                    logger.info(`[${symbol}] Cancelled order closed in DB safely.`);
+
+                    // Safely trigger notification — engine may be a mock without deps/notifier
+                    if (engine.deps && engine.deps.notifier) {
+                      engine.deps.notifier.notifyTradeClosed(symbol, '0', '0', 'CANCELLED')
+                        .catch((e) => logger.error(`[${symbol}] TG Cancel Notify error: ${e instanceof Error ? e.message : String(e)}`));
+                    }
+                  }
+                } catch (dbError) {
+                  logger.error(`[${symbol}] Failed to close cancelled order in DB: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
                 }
-              } catch (dbError) {
-                logger.error(`[${symbol}] Failed to close cancelled order in DB: ${dbError instanceof Error ? dbError.message : String(dbError)}`);
               }
             } catch (cancelError) {
               logger.warn(`[${symbol}] Failed to cancel expired limit order ${order.orderId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`);

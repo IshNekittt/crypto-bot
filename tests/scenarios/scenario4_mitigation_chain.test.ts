@@ -33,8 +33,16 @@ const mockConfig: BotConfig = {
   smcSlAtrOffset: '0.5',
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
+  sniperLimitExpirationCandles: 15,
+  smcSweepMinWickRatio: new Decimal('0.25'),
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
@@ -288,7 +296,7 @@ describe('Scenario4: Mitigation Chain', () => {
     });
   });
 
-  describe('negative cases - trend OB', () => {
+  describe('trend OB selection', () => {
     it('should reject when no valid OB in trend direction', () => {
       const data = createIdealMitigationChainPatternData();
       data.zones = [];
@@ -297,12 +305,15 @@ describe('Scenario4: Mitigation Chain', () => {
       expect(scenario.getReason()).toBe('No valid OB in trend direction');
     });
 
-    it('should reject when OB is mitigated', () => {
+    it('should ignore the dead mitigated flag (mitigation is enforced by ScenarioRouter)', () => {
       const data = createIdealMitigationChainPatternData();
+      // `PatternRecognizer` hardcodes `mitigated: false`, so the old `!z.mitigated`
+      // predicate was a permanent no-op. Re-entry protection lives in
+      // `ScenarioRouter.filterMitigatedZones`, not in the scenario.
       data.zones[0].mitigated = true;
       const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toContain('No valid OB');
+      expect(result).toBe(true);
+      expect(scenario.getReason()).toContain('Mitigation Chain');
     });
   });
 

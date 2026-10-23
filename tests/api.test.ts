@@ -1,4 +1,5 @@
 import { BybitClient, parseRestKlines } from '../src/api/bybitClient';
+import { Decimal } from 'decimal.js';
 import type { RestClientV5 } from 'bybit-api';
 
 function makeRest(): Record<string, jest.Mock> {
@@ -49,8 +50,16 @@ function makeClient(
     smcSlAtrOffset: '0.5',
     smcDisplacementMultiplier: '1.5',
     limitExpirationCandles: 6,
+    sniperLimitExpirationCandles: 15,
+    smcSweepMinWickRatio: new Decimal('0.25'),
     smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,

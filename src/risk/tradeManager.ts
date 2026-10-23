@@ -1,13 +1,19 @@
 import { Decimal } from "decimal.js";
 import { TradeManagementState } from "../types";
 import { InstrumentInfo } from "../types";
-import { formatQuantity } from "../utils/precision";
+import { formatPrice, formatQuantity } from "../utils/precision";
 
 export interface TradeManagementSignal {
   action: 'none' | 'move_sl_to_entry' | 'close_partial_25' | 'close_partial_50' | 'trail_sl_to_profit';
   reason: string;
   newStopLoss?: string;
   closeQty?: string;
+  /**
+   * Milestone threshold price: entry + (tp - entry) * progress. The only honest
+   * fill anchor for a partial close — never the candle extreme. The simulator
+   * may fill at the candle open instead when price gapped past the threshold.
+   */
+  triggerPrice?: string;
   updatedState: TradeManagementState;
 }
 
@@ -20,6 +26,13 @@ export interface TradeContext {
   initialQty: string;
   managementState: TradeManagementState;
   instrument: InstrumentInfo;
+  /**
+   * ORIGINAL protective stop, before any Adaptive Fractioning update.
+   * Risk distance is always measured from here. Defaults to `stopLoss` for
+   * callers that never rewrite their stop (live reads trades.sl_price, which is
+   * immutable).
+   */
+  initialStopLoss?: string;
 }
 
 function getDefaultState(): TradeManagementState {
@@ -29,6 +42,20 @@ function getDefaultState(): TradeManagementState {
     initialTotalR: '0',
     initialQty: '0',
   };
+}
+
+// Milestone progress thresholds — single source of truth for both the comparison
+// and the exact trigger price handed to the execution simulator.
+const MILESTONE_1_PROGRESS = new Decimal('0.33');
+const MILESTONE_2_PROGRESS = new Decimal('0.66');
+
+/**
+ * Exact price at which `progress` (0..1) toward TP is reached.
+ * Long: entry + (tp - entry) * progress. Valid for shorts too, because tp < entry
+ * makes the same expression produce a falling price.
+ */
+function priceAtProgress(entry: Decimal, tp: Decimal, progress: Decimal): Decimal {
+  return entry.plus(tp.minus(entry).mul(progress));
 }
 
 export function initializeTradeManagement(
@@ -62,10 +89,17 @@ export function initializeTradeManagement(
 export function evaluateTradeManagement(context: TradeContext): TradeManagementSignal {
   const state = context.managementState || getDefaultState();
   const entry = new Decimal(context.entryPrice);
-  const sl = new Decimal(context.stopLoss);
   const tp = new Decimal(context.takeProfit);
   const currentPrice = new Decimal(context.currentPrice);
   const initialQty = new Decimal(state.initialQty || context.initialQty);
+  const tickSize = new Decimal(context.instrument.tickSize);
+
+  // Risk distance MUST be measured from the ORIGINAL stop, never the live
+  // (trailing) stop. Once a milestone moves the stop to entry, |entry - sl|
+  // collapses to 0 and every later milestone becomes permanently unreachable
+  // ("Invalid risk/reward distances"). Live only hides this because
+  // trades.sl_price in the DB is never rewritten, so that is what it reads back.
+  const initialSl = new Decimal(context.initialStopLoss ?? context.stopLoss);
 
   const isLong = context.side === 'Buy';
 
@@ -88,9 +122,9 @@ export function evaluateTradeManagement(context: TradeContext): TradeManagementS
   }
 
   // Calculate distances using the Decimal variables
-  const riskDistance = isLong 
-    ? entry.minus(sl).abs() 
-    : sl.minus(entry).abs();
+  const riskDistance = isLong
+    ? entry.minus(initialSl).abs()
+    : initialSl.minus(entry).abs();
   const rewardDistance = isLong 
     ? tp.minus(entry).abs() 
     : entry.minus(tp).abs();
@@ -128,11 +162,11 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
   // For TotalR < 4 (Classic): Only move SL to entry at 66% progress
   if (!initialTotalRDecimal.gte(4)) {
     // Check milestone 1 (66%): Move SL to entry
-    if (!state.milestone1Triggered && clampedProgress.gte(0.66)) {
+    if (!state.milestone1Triggered && clampedProgress.gte(MILESTONE_2_PROGRESS)) {
       return {
         action: 'move_sl_to_entry',
         reason: 'Classic mode: 66% progress reached, moving SL to entry',
-        newStopLoss: context.entryPrice,
+        newStopLoss: formatPrice(entry, tickSize),
         updatedState: {
           ...baseUpdatedState,
           milestone1Triggered: true,
@@ -144,7 +178,7 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
 
   // For TotalR >= 4 (Sniper): More aggressive management
   // Milestone 1: 33% progress -> Close 25%, move SL to entry
-  if (!state.milestone1Triggered && clampedProgress.gte(0.33)) {
+  if (!state.milestone1Triggered && clampedProgress.gte(MILESTONE_1_PROGRESS)) {
     const rawCloseQty = initialQty.mul(0.25);
     const formattedCloseQty = formatQuantity(rawCloseQty, new Decimal(context.instrument.qtyStep));
     const minOrderQty = new Decimal(context.instrument.minOrderQty);
@@ -156,7 +190,11 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
       action: 'close_partial_25',
       reason: 'Sniper mode: 33% progress reached, closing 25% and moving SL to entry',
       closeQty: finalCloseQty,
-      newStopLoss: context.entryPrice,
+      newStopLoss: formatPrice(entry, tickSize),
+      triggerPrice: formatPrice(
+        priceAtProgress(entry, tp, MILESTONE_1_PROGRESS),
+        tickSize,
+      ),
       updatedState: {
         ...baseUpdatedState,
         milestone1Triggered: true,
@@ -165,7 +203,7 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
   }
 
   // Milestone 2: 66% progress -> Close another 25%, trail SL to entry + 33% of TP distance
-  if (state.milestone1Triggered && !state.milestone2Triggered && clampedProgress.gte(0.66)) {
+  if (state.milestone1Triggered && !state.milestone2Triggered && clampedProgress.gte(MILESTONE_2_PROGRESS)) {
     const rawCloseQty = initialQty.mul(0.25);
     const formattedCloseQty = formatQuantity(rawCloseQty, new Decimal(context.instrument.qtyStep));
     const minOrderQty = new Decimal(context.instrument.minOrderQty);
@@ -186,7 +224,11 @@ const clampedProgress = Decimal.min(Decimal.max(progress, new Decimal(0)), new D
       action: 'close_partial_50',
       reason: 'Sniper mode: 66% progress reached, closing another 25% and trailing SL to profit',
       closeQty: finalCloseQty,
-      newStopLoss: newSl.toFixed(8),
+      newStopLoss: formatPrice(newSl, tickSize),
+      triggerPrice: formatPrice(
+        priceAtProgress(entry, tp, MILESTONE_2_PROGRESS),
+        tickSize,
+      ),
       updatedState: {
         ...baseUpdatedState,
         milestone2Triggered: true,

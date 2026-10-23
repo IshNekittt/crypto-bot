@@ -10,6 +10,7 @@ import { Scenario8_RangeDeviationReclaim } from '../engine/scenarios/Scenario8_R
 import { Scenario9_TurtleSoup } from '../engine/scenarios/Scenario9_TurtleSoup';
 import { Scenario10_BreakerBlock } from '../engine/scenarios/Scenario10_BreakerBlock';
 import { Scenario11_MitigationBlock } from '../engine/scenarios/Scenario11_MitigationBlock';
+import { Scenario12_SniperTouch } from '../engine/scenarios/Scenario12_SniperTouch';
 
 export interface ScenarioStats {
   name: string;
@@ -19,6 +20,33 @@ export interface ScenarioStats {
   losses: number;
   winRate: Decimal;
   profitContribution: Decimal;
+}
+
+/** `count / base` as a one-decimal percentage. Zero/undefined base renders as 0.0%. */
+function sharePct(count: number, base: number): string {
+  if (!base || base <= 0) return '0.0%';
+  return `${((count / base) * 100).toFixed(1)}%`;
+}
+
+/**
+ * Clear every scenario's cumulative rejection counters.
+ *
+ * The counters are static (class-level), so they persist for the lifetime of the
+ * process. `printReport` is called once PER SYMBOL, which means without a reset
+ * the BTCUSDT report would include NEARUSDT's and SOLUSDT's rejections. Call this
+ * immediately before each symbol's simulation so a report only ever describes the
+ * run it was produced from.
+ */
+export function resetScenarioRejectionStats(): void {
+  Scenario2_FVGFill.resetStats();
+  Scenario4_MitigationChain.resetStats();
+  Scenario5_HTFLiquiditySweep.resetStats();
+  Scenario7_AMD.resetStats();
+  Scenario8_RangeDeviationReclaim.resetStats();
+  Scenario9_TurtleSoup.resetStats();
+  Scenario10_BreakerBlock.resetStats();
+  Scenario11_MitigationBlock.resetStats();
+  Scenario12_SniperTouch.resetStats();
 }
 
 export function generateReport(
@@ -231,7 +259,7 @@ export function generateReport(
   lines.push('   Scenario 4 (Mitigation Chain):');
   lines.push(`     Total: ${scenario4Stats.totalEvals} | Killzone: ${scenario4Stats.killzone} | NoOB: ${scenario4Stats.noValidOb} | NoTouch: ${scenario4Stats.noObTouch} | NoChoch: ${scenario4Stats.noChoch} | Disp: ${scenario4Stats.displacement} | PremDisc: ${scenario4Stats.premiumDiscount} | NoBOS: ${scenario4Stats.noBosAfterBounce}`);
   lines.push('   Scenario 5 (HTF Sweep):');
-  lines.push(`     Total: ${scenario5Stats.totalEvals} | Killzone: ${scenario5Stats.killzone} | NoPools: ${scenario5Stats.noPools} | NoSweep: ${scenario5Stats.noSweep} | NoChoch: ${scenario5Stats.noChoch} | Displacement: ${scenario5Stats.displacement} | NoFvg: ${scenario5Stats.noFvg}`);
+  lines.push(`     Total: ${scenario5Stats.totalEvals} | Killzone: ${scenario5Stats.killzone} | NoPools: ${scenario5Stats.noPools} | NoSweep: ${scenario5Stats.noSweep} | NoChoch: ${scenario5Stats.noChoch} | Displacement: ${scenario5Stats.displacement} | NoFvg: ${scenario5Stats.noFvg} | TpInvalid: ${scenario5Stats.tpInvalid}`);
   lines.push('   Scenario 7 (AMD):');
   lines.push(`     Total: ${scenario7Stats.totalEvals} | Killzone: ${scenario7Stats.killzone} | NoAsianRange: ${scenario7Stats.noAsianRange} | TooWide: ${scenario7Stats.asianRangeTooWide} | NoSweep: ${scenario7Stats.noSweep} | NoChoch: ${scenario7Stats.noChoch} | Displacement: ${scenario7Stats.displacement} | NoFvg: ${scenario7Stats.noFvg}`);
   lines.push('   Scenario 8 (Range Deviation):');
@@ -242,6 +270,17 @@ export function generateReport(
   lines.push(`     Total: ${scenario10Stats.totalEvals} | Killzone: ${scenario10Stats.killzone} | NoBreak: ${scenario10Stats.noBreak} | NoBrokenOB: ${scenario10Stats.noBrokenOb} | NoLiqSweep: ${scenario10Stats.noLiquiditySweep} | NotBOS: ${scenario10Stats.notBos} | OBNotFresh: ${scenario10Stats.obNotFresh} | NoFvg: ${scenario10Stats.noFvg} | NoRetest: ${scenario10Stats.noRetest} | Disp: ${scenario10Stats.displacement} | BodyClose: ${scenario10Stats.bodyClose}`);
   lines.push('   Scenario 11 (Mitigation Block):');
   lines.push(`     Total: ${scenario11Stats.totalEvals} | Killzone: ${scenario11Stats.killzone} | NoSms: ${scenario11Stats.noSms} | InvalidSms: ${scenario11Stats.invalidSmsPattern} | NoChoch: ${scenario11Stats.noChoch} | Displacement: ${scenario11Stats.displacement} | NoMB: ${scenario11Stats.noMitigationBlock} | NoRetest: ${scenario11Stats.noRetest} | PremDisc: ${scenario11Stats.premiumDiscount}`);
+
+  // Scenario 12 is reported as a FUNNEL rather than a flat counter line: the sweep
+  // gate is evaluated on every 1m candle, so raw counts are dominated by "no sweep
+  // right now" and hide the gates that actually decide trades. Post-sweep gates are
+  // therefore also expressed as a share of the sweeps that were found.
+  const scenario12Stats = Scenario12_SniperTouch.getRejectionStats();
+  lines.push('   Scenario 12 (Sniper Touch):');
+  lines.push(`     Total: ${scenario12Stats.totalEvals} | Triggered: ${scenario12Stats.triggered} | Killzone: ${scenario12Stats.killzone} | NoMacroLevels: ${scenario12Stats.noMacroLevels} | Disabled: ${scenario12Stats.disabled} | InsufficientCandles: ${scenario12Stats.insufficientCandles}`);
+  lines.push(`     Sweep stage: Touched: ${scenario12Stats.levelTouched} | WeakWick: ${scenario12Stats.weakWick} (${sharePct(scenario12Stats.weakWick, scenario12Stats.levelTouched)} of touches) | NoSweep: ${scenario12Stats.noSweep} | SweepFound: ${scenario12Stats.sweepFound}`);
+  lines.push(`     Post-sweep (base ${scenario12Stats.sweepFound}): HtfContradiction: ${scenario12Stats.htfContradiction} (${sharePct(scenario12Stats.htfContradiction, scenario12Stats.sweepFound)}) | NoChoch: ${scenario12Stats.noChoch} (${sharePct(scenario12Stats.noChoch, scenario12Stats.sweepFound)}) | BodyClose: ${scenario12Stats.bodyClose} (${sharePct(scenario12Stats.bodyClose, scenario12Stats.sweepFound)}) | NoOB: ${scenario12Stats.noOb} (${sharePct(scenario12Stats.noOb, scenario12Stats.sweepFound)})`);
+  lines.push(`     Entry gates (base ${scenario12Stats.sweepFound}): Proximity: ${scenario12Stats.proximity} (${sharePct(scenario12Stats.proximity, scenario12Stats.sweepFound)}) | PremDisc: ${scenario12Stats.premiumDiscount} (${sharePct(scenario12Stats.premiumDiscount, scenario12Stats.sweepFound)}) | InsufficientRoom: ${scenario12Stats.insufficientRoom} (${sharePct(scenario12Stats.insufficientRoom, scenario12Stats.sweepFound)}) | TpInvalid: ${scenario12Stats.tpInvalid} | Geometry: ${scenario12Stats.geometry} | InvalidAtr: ${scenario12Stats.invalidAtr}`);
   lines.push('');
 
   return lines.join('\n');

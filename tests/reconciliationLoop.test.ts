@@ -28,6 +28,7 @@ describe('ReconciliationLoop', () => {
 
     mockDb = {
       getAllOpenTrades: jest.fn().mockResolvedValue([]),
+      closeTrade: jest.fn().mockResolvedValue(true),
     } as unknown as jest.Mocked<PostgresDatabase>;
 
     mockEngine = {
@@ -70,8 +71,16 @@ describe('ReconciliationLoop', () => {
       smcSlAtrOffset: '0.5',
       smcDisplacementMultiplier: '1.5',
       limitExpirationCandles: 6,
+      sniperLimitExpirationCandles: 15,
+      smcSweepMinWickRatio: new Decimal('0.25'),
       smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
 maxWorkingCapital: 0,
@@ -185,6 +194,51 @@ maxWorkingCapital: 0,
       await reconciliation.tick();
       
       expect(mockEngine.reconcileWithTrade).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Limit order expiration safety', () => {
+    const expiredLimit = (status: 'New' | 'PartiallyFilled') => ({
+      orderId: 'limit_1',
+      orderLinkId: 'link_1',
+      symbol: 'SOLUSDT',
+      side: 'Buy' as const,
+      orderType: 'Limit' as const,
+      price: '100',
+      qty: '10',
+      stopLoss: '99',
+      takeProfit: '103',
+      createdAt: Date.now() - 400 * 60 * 1000, // far beyond 6 × 15m
+      status,
+    });
+
+    it('cancels an expired NEW limit order and closes it in DB as CANCELLED', async () => {
+      mockEngine.getState.mockReturnValue(StrategyState.IN_TRADE);
+      mockSource.getOpenOrders
+        .mockResolvedValueOnce([expiredLimit('New')])
+        .mockResolvedValue([]);
+
+      await reconciliation.tick();
+
+      expect(mockSource.cancelOrder).toHaveBeenCalledWith('SOLUSDT', 'limit_1');
+      expect(mockDb.closeTrade).toHaveBeenCalledWith(
+        'limit_1', '0', '100', expect.any(Number), 'CANCELLED',
+      );
+      expect(mockEngine.reconcile).toHaveBeenCalled();
+    });
+
+    it('cancels only the resting portion of a PARTIALLY FILLED limit and keeps it IN_TRADE', async () => {
+      mockEngine.getState.mockReturnValue(StrategyState.IN_TRADE);
+      mockSource.getOpenOrders
+        .mockResolvedValueOnce([expiredLimit('PartiallyFilled')])
+        .mockResolvedValue([]);
+
+      await reconciliation.tick();
+
+      expect(mockSource.cancelOrder).toHaveBeenCalledWith('SOLUSDT', 'limit_1');
+      // The filled portion is real exposure — it must NOT be closed as CANCELLED.
+      expect(mockDb.closeTrade).not.toHaveBeenCalled();
+      expect(mockEngine.reconcile).not.toHaveBeenCalled();
     });
   });
 });

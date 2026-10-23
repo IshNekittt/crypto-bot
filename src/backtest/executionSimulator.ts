@@ -1,7 +1,8 @@
 import { Decimal } from "decimal.js";
-import { Candle, SniperZone } from "../types";
+import { Candle, SniperZone, StructureType } from "../types";
 import { logger } from "../utils/logger";
-import { evaluateTradeManagement, TradeContext } from "../risk/tradeManager";
+import { evaluateTradeManagement, initializeTradeManagement, TradeContext } from "../risk/tradeManager";
+import { formatPrice, formatQuantity } from "../utils/precision";
 
 export const TAKER_FEE_RATE = new Decimal("0.00055");
 export const MAKER_FEE_RATE = new Decimal("0.00020"); // 0.020% Maker (Limit orders)
@@ -11,7 +12,6 @@ export const REDUCED_RISK_PERCENT = new Decimal("1");
 export const LEVERAGE = new Decimal("10");
 export const TAKE_PROFIT_RR = new Decimal("3");
 export const DRAWDOWN_GUARD_TRIGGER = 3; // Number of consecutive losses to trigger reduced risk
-export const MIN_SL_DISTANCE_PCT = new Decimal("0.001"); // 0.1% minimum SL distance
 
 // Debug: Track first 3 trades for detailed logging
 let debugTradeOpenCount = 0;
@@ -25,6 +25,17 @@ export interface InstrumentInfo {
   maxOrderQty: string;
 }
 
+/**
+ * Live config mirror for sizing. When supplied, the simulator uses the same
+ * leverage / risk percentages as the deployed engine instead of the historical
+ * hardcoded defaults.
+ */
+export interface BacktestRiskConfig {
+  leverage: string;
+  riskPercent: string;
+  reducedRiskPercent: string;
+}
+
 export interface TradeResult {
   entryTime: number;
   exitTime: number;
@@ -35,13 +46,15 @@ export interface TradeResult {
   qty: Decimal;
   side: "Buy" | "Sell";
   pnl: Decimal;
+  // Gross PnL across the entire trade lifecycle (including partial closes).
+  grossPnl?: Decimal;
   pnlPercent: Decimal;
   feesPaid: Decimal;
   scenarioId: number;
   scenarioName: string;
   closedBy: "TP" | "SL" | "BOTH";
   // Structure details for mitigation tracking
-  structureType?: "SMS" | "CHoCH" | "BOS";
+  structureType?: StructureType;
   structureTimestamp?: number;
   structurePrice?: Decimal;
 }
@@ -50,6 +63,12 @@ export interface OpenTrade {
   entryTime: number;
   entryPrice: Decimal;
   slPrice: Decimal;
+  /**
+   * ORIGINAL protective stop. Adaptive Fractioning may move `slPrice`
+   * (breakeven / trailing), but this value never changes — risk distance and
+   * every later milestone are measured from it.
+   */
+  initialSlPrice: string;
   tpPrice: Decimal;
   qty: Decimal;
   side: "Buy" | "Sell";
@@ -64,7 +83,7 @@ export interface OpenTrade {
   zoneDirection?: string;
   zoneTimestamp?: number;
   // Structure details for mitigation tracking (CHoCH/SMS timestamp and price)
-  structureType?: "SMS" | "CHoCH" | "BOS";
+  structureType?: StructureType;
   structureTimestamp?: number;
   structurePrice?: Decimal;
   // Limit order fields
@@ -79,6 +98,9 @@ export interface OpenTrade {
     initialTotalR: string;
     initialQty: string;
   };
+  // Realized gross PnL from partial closes (Adaptive Fractioning).
+  // Accumulated here so the final TradeResult reflects the ENTIRE trade lifecycle.
+  realizedGrossPnl?: string;
 }
 
 export interface PendingLimitOrder {
@@ -98,13 +120,13 @@ export interface PendingLimitOrder {
   zoneTimeframe?: string;
   zoneDirection?: string;
   zoneTimestamp?: number;
-  structureType?: "SMS" | "CHoCH" | "BOS";
+  structureType?: StructureType;
   structureTimestamp?: number;
   structurePrice?: Decimal;
 }
 
 export interface MitigatedStructure {
-  type: "SMS" | "CHoCH" | "BOS";
+  type: StructureType;
   timestamp: number;
   price: string;
   direction: "BULLISH" | "BEARISH";
@@ -139,44 +161,37 @@ export interface MitigatedZone {
   timestamp: number;
 }
 
-function roundDownToStep(value: Decimal, step: Decimal): Decimal {
-  const div = value.div(step).floor();
-  return div.mul(step);
-}
-
 function calculatePositionSize(
-  balance: Decimal,
+  marginBuffer: Decimal,
   entryPrice: Decimal,
   slPrice: Decimal,
   instrument: InstrumentInfo,
   riskPercent: Decimal,
-  maxWorkingCapital: Decimal,
+  leverage: Decimal,
 ): Decimal {
   const tickSize = new Decimal(instrument.tickSize);
   const qtyStep = new Decimal(instrument.qtyStep);
   const minOrderQty = new Decimal(instrument.minOrderQty);
 
-  const entry = roundDownToStep(entryPrice, tickSize);
-  const stopLoss = roundDownToStep(slPrice, tickSize);
+  const entry = new Decimal(formatPrice(entryPrice, tickSize));
+  const stopLoss = new Decimal(formatPrice(slPrice, tickSize));
 
   const slDistance = entry.minus(stopLoss).abs();
   if (slDistance.lte(0)) {
     return new Decimal("0");
   }
 
-  // Strategy Capacity Limit: Apply maxWorkingCapital if configured
-  let workingBalance = balance;
-  if (maxWorkingCapital.gt(0)) {
-    const maxCap = maxWorkingCapital;
-    if (balance.gt(maxCap)) {
-      workingBalance = maxCap;
-    }
+  // Leverage cap: max position value = marginBuffer * leverage (RiskManager parity)
+  const maxAllowedQty = marginBuffer.mul(leverage).div(entry);
+
+  // FIX: Correct risk math - qty = (marginBuffer * riskPercent / 100) / |entry - sl|
+  const riskAmount = marginBuffer.mul(riskPercent.div(100));
+  let rawQty = riskAmount.div(slDistance);
+  if (rawQty.gt(maxAllowedQty)) {
+    rawQty = maxAllowedQty;
   }
 
-  // FIX: Correct risk math - qty = (balance * riskPercent / 100) / |entry - sl|
-  const riskAmount = workingBalance.mul(riskPercent.div(100));
-  const rawQty = riskAmount.div(slDistance);
-  const qty = roundDownToStep(rawQty, qtyStep);
+  const qty = new Decimal(formatQuantity(rawQty, qtyStep));
 
   if (qty.lt(minOrderQty)) {
     return new Decimal("0");
@@ -206,11 +221,21 @@ export function getInitialState(): BacktestState {
  * Get effective risk percent based on consecutive losses
  * Drawdown Guard: reduces risk to 1% after 3 consecutive losses
  */
-export function getEffectiveRiskPercent(consecutiveLosses: number): Decimal {
+export function getEffectiveRiskPercent(
+  consecutiveLosses: number,
+  riskConfig?: BacktestRiskConfig,
+): Decimal {
+  const baseRiskPercent = riskConfig
+    ? new Decimal(riskConfig.riskPercent)
+    : BASE_RISK_PERCENT;
+  const reducedRiskPercent = riskConfig
+    ? new Decimal(riskConfig.reducedRiskPercent)
+    : REDUCED_RISK_PERCENT;
+
   const riskPercent =
     consecutiveLosses >= DRAWDOWN_GUARD_TRIGGER
-      ? REDUCED_RISK_PERCENT
-      : BASE_RISK_PERCENT;
+      ? reducedRiskPercent
+      : baseRiskPercent;
 
   if (consecutiveLosses >= DRAWDOWN_GUARD_TRIGGER) {
     logger.debug(
@@ -240,7 +265,7 @@ export function openTrade(
     timestamp: number;
   },
   structureDetails?: {
-    type: "SMS" | "CHoCH" | "BOS";
+    type?: StructureType;
     timestamp: number;
     price: Decimal;
   },
@@ -248,45 +273,48 @@ export function openTrade(
   limitPrice?: Decimal,
   symbol?: string,
   maxWorkingCapital: Decimal = new Decimal("0"),
+  riskConfig?: BacktestRiskConfig,
 ): { state: BacktestState; tradeOpened: boolean } {
-  let slPriceAdjusted = slPrice;
-  const slDistance = entryPrice.minus(slPrice).abs();
+  // Instrument precision is the single source of truth: every level is normalized
+  // once via formatPrice (nearest tick), exactly like RiskManager. No hardcoded
+  // decimals and no double rounding.
+  const tickSize = new Decimal(instrument.tickSize);
+  const entryPriceFormatted = new Decimal(formatPrice(entryPrice, tickSize));
+  const slPriceFormatted = new Decimal(formatPrice(slPrice, tickSize));
+  const tpPriceFormatted = new Decimal(formatPrice(tpPrice, tickSize));
+  const limitPriceFormatted =
+    limitPrice !== undefined
+      ? new Decimal(formatPrice(limitPrice, tickSize))
+      : undefined;
 
-  // Fix 1: Minimum SL distance - 0.1% minimum to prevent micro-stops
-  const minSlDistance = entryPrice.mul(MIN_SL_DISTANCE_PCT);
-  if (slDistance.lt(minSlDistance)) {
-    // Force SL to 0.1% distance
-    if (side === "Buy") {
-      slPriceAdjusted = entryPrice.minus(minSlDistance);
-    } else {
-      slPriceAdjusted = entryPrice.plus(minSlDistance);
-    }
-    logger.debug(
-      `SL adjusted to minimum 0.1% distance: ${slPriceAdjusted.toFixed(4)}`,
-    );
-  }
-
-  const slDistanceAdjusted = entryPrice.minus(slPriceAdjusted).abs();
+  // Stop-loss geometry is owned exclusively by the scenario. Every scenario
+  // derives its SL through `BaseScenario.calculateLevels()`, which already
+  // enforces the 0.1% offset floor and the inverted-zone defense. Widening a
+  // sub-0.1% stop here would rewrite the setup behind the strategy's back and
+  // silently change R:R, position sizing and `initialTotalR` — behaviour the
+  // live `RiskManager` never applies (it only rejects a non-positive distance).
+  const slPriceAdjusted = slPriceFormatted;
+  const slDistanceAdjusted = entryPriceFormatted.minus(slPriceAdjusted).abs();
 
   // ASSERT: SL must be on correct side of entry
   // Buy (Long): SL must be BELOW entry
   // Sell (Short): SL must be ABOVE entry
   if (side === "Buy") {
-    if (slPriceAdjusted.gte(entryPrice)) {
+    if (slPriceAdjusted.gte(entryPriceFormatted)) {
       logger.error(
-        `ASSERT FAILED: Buy trade has SL (${slPriceAdjusted.toFixed(4)}) >= entry (${entryPrice.toFixed(4)})`,
+        `ASSERT FAILED: Buy trade has SL (${slPriceAdjusted.toFixed(4)}) >= entry (${entryPriceFormatted.toFixed(4)})`,
       );
       throw new Error(
-        `Invalid SL for Buy: SL=${slPriceAdjusted.toFixed(4)} >= Entry=${entryPrice.toFixed(4)}`,
+        `Invalid SL for Buy: SL=${slPriceAdjusted.toFixed(4)} >= Entry=${entryPriceFormatted.toFixed(4)}`,
       );
     }
   } else {
-    if (slPriceAdjusted.lte(entryPrice)) {
+    if (slPriceAdjusted.lte(entryPriceFormatted)) {
       logger.error(
-        `ASSERT FAILED: Sell trade has SL (${slPriceAdjusted.toFixed(4)}) <= entry (${entryPrice.toFixed(4)})`,
+        `ASSERT FAILED: Sell trade has SL (${slPriceAdjusted.toFixed(4)}) <= entry (${entryPriceFormatted.toFixed(4)})`,
       );
       throw new Error(
-        `Invalid SL for Sell: SL=${slPriceAdjusted.toFixed(4)} <= Entry=${entryPrice.toFixed(4)}`,
+        `Invalid SL for Sell: SL=${slPriceAdjusted.toFixed(4)} <= Entry=${entryPriceFormatted.toFixed(4)}`,
       );
     }
   }
@@ -311,7 +339,13 @@ export function openTrade(
     return { state, tradeOpened: false };
   }
 
-  const riskPercent = getEffectiveRiskPercent(state.consecutiveLosses);
+  const riskPercent = getEffectiveRiskPercent(
+    state.consecutiveLosses,
+    riskConfig,
+  );
+  const leverage = riskConfig
+    ? new Decimal(riskConfig.leverage)
+    : LEVERAGE;
 
   // Strategy Capacity Limit: Apply maxWorkingCapital if configured
   let workingBalance = state.balance;
@@ -322,48 +356,68 @@ export function openTrade(
     }
   }
 
-  let qty = calculatePositionSize(
-    workingBalance,
-    entryPrice,
+  // Margin Buffer: 98% of working balance, leaving 2% for fees/reserve (RiskManager parity)
+  const marginBuffer = workingBalance.mul(0.98);
+
+  const qty = calculatePositionSize(
+    marginBuffer,
+    entryPriceFormatted,
     slPriceAdjusted,
     instrument,
     riskPercent,
-    maxWorkingCapital,
+    leverage,
   );
 
   if (qty.lte(0)) {
     return { state, tradeOpened: false };
   }
 
-  // Fix 2: Margin check - position value cannot exceed workingBalance * LEVERAGE
-  const maxPositionValue = workingBalance.mul(LEVERAGE);
-  const positionValue = qty.mul(entryPrice);
-  if (positionValue.gt(maxPositionValue)) {
-    // Reduce qty to fit within margin
-    const maxQty = maxPositionValue.div(entryPrice);
-    // Round down to qtyStep
-    const qtyStep = new Decimal(instrument.qtyStep);
-    qty = maxQty.div(qtyStep).floor().mul(qtyStep);
+  if (qty.gt(new Decimal(instrument.maxOrderQty))) {
     logger.debug(
-      `Qty reduced for margin: ${qty.toFixed(6)} (max position value: ${maxPositionValue.toFixed(2)})`,
+      `Qty ${qty.toFixed(6)} > maxOrderQty ${instrument.maxOrderQty} — trade aborted`,
     );
-  }
-
-  if (qty.lte(0)) {
     return { state, tradeOpened: false };
   }
 
+  // Burn-on-Entry: mirror live StrategyEngine — the trigger structure is consumed
+  // the moment the trade (or its pending Limit order) is registered, not on close.
+  let mitigatedStructures = state.mitigatedStructures;
+  if (
+    structureDetails &&
+    structureDetails.timestamp > 0 &&
+    !mitigatedStructures.some(
+      (ms) => ms.timestamp === structureDetails.timestamp,
+    )
+  ) {
+    mitigatedStructures = [
+      ...mitigatedStructures,
+      {
+        type: (structureDetails.type || "CHoCH") as StructureType,
+        timestamp: structureDetails.timestamp,
+        price:
+          structureDetails.price?.toString() ||
+          entryPriceFormatted.toString(),
+        direction: (side === "Buy" ? "BULLISH" : "BEARISH") as
+          | "BULLISH"
+          | "BEARISH",
+      },
+    ];
+    if (mitigatedStructures.length > 100) {
+      mitigatedStructures = mitigatedStructures.slice(-100);
+    }
+  }
+
   // Handle Limit orders: create pending order instead of immediate fill
-  if (orderType === "Limit" && limitPrice) {
+  if (orderType === "Limit" && limitPriceFormatted) {
     const pendingOrder: PendingLimitOrder = {
-      entryPrice,
+      entryPrice: entryPriceFormatted,
       slPrice: slPriceAdjusted,
-      tpPrice,
+      tpPrice: tpPriceFormatted,
       qty,
       side,
       scenarioId,
       scenarioName,
-      limitPrice,
+      limitPrice: limitPriceFormatted,
       placedAt: candle.timestamp,
       candlesWaited: 0,
       zoneType: zoneDetails?.type,
@@ -394,30 +448,33 @@ export function openTrade(
             },
           ]
         : state.mitigatedZones,
+      mitigatedStructures,
     };
 
     logger.debug(
-      `Backtest LIMIT ORDER PLACED: ${scenarioName} ${side} limitPrice=${limitPrice.toFixed(4)} SL=${slPriceAdjusted.toFixed(4)} TP=${tpPrice.toFixed(4)} qty=${qty.toFixed(6)}`,
+      `Backtest LIMIT ORDER PLACED: ${scenarioName} ${side} limitPrice=${limitPriceFormatted.toFixed(4)} SL=${slPriceAdjusted.toFixed(4)} TP=${tpPriceFormatted.toFixed(4)} qty=${qty.toFixed(6)}`,
     );
     return { state: newState, tradeOpened: false }; // Not opened yet, waiting for fill
   }
 
-  // Market order: immediate fill (existing logic)
-  const entryFee = entryPrice.mul(qty).mul(TAKER_FEE_RATE);
+  // Market order: immediate fill at the current price (parity with live avgPrice)
+  const entryFee = entryPriceFormatted.mul(qty).mul(TAKER_FEE_RATE);
 
-  // Initialize trade management state
-  const managementState = {
-    milestone1Triggered: false,
-    milestone2Triggered: false,
-    initialTotalR: "0",
-    initialQty: qty.toString(),
-  };
+  // Adaptive Fractioning: persist the real initial R:R so the Sniper branch
+  // (TotalR >= 4) can actually activate — parity with live trades.
+  const managementState = initializeTradeManagement(
+    entryPriceFormatted.toString(),
+    slPriceAdjusted.toString(),
+    tpPriceFormatted.toString(),
+    qty.toString(),
+  );
 
   const openTrade: OpenTrade = {
     entryTime: candle.timestamp,
-    entryPrice,
+    entryPrice: entryPriceFormatted,
     slPrice: slPriceAdjusted,
-    tpPrice,
+    initialSlPrice: slPriceAdjusted.toString(),
+    tpPrice: tpPriceFormatted,
     qty,
     side,
     scenarioId,
@@ -434,9 +491,12 @@ export function openTrade(
     structurePrice: structureDetails?.price,
     orderType: "Market",
     managementState,
+    realizedGrossPnl: "0",
   };
 
-  const newBalance = state.balance.minus(entryFee); // Deduct entry fee immediately
+  // The entry fee is NOT deducted here: it is accumulated on the trade and settled
+  // exactly once inside the closing net PnL (no double charge).
+  const newBalance = state.balance;
   const newPeak = newBalance.gt(state.peakBalance)
     ? newBalance
     : state.peakBalance;
@@ -463,10 +523,11 @@ export function openTrade(
           },
         ]
       : state.mitigatedZones,
+    mitigatedStructures,
   };
 
   logger.debug(
-    `Backtest OPEN: ${scenarioName} ${side} entry=${entryPrice.toFixed(4)} SL=${slPriceAdjusted.toFixed(4)} TP=${tpPrice.toFixed(4)} qty=${qty.toFixed(6)} balance=${newBalance.toFixed(2)}`,
+    `Backtest OPEN: ${scenarioName} ${side} entry=${entryPriceFormatted.toFixed(4)} SL=${slPriceAdjusted.toFixed(4)} TP=${tpPriceFormatted.toFixed(4)} qty=${qty.toFixed(6)} balance=${newBalance.toFixed(2)}`,
   );
 
   // Debug: Log first 3 trades opening
@@ -474,13 +535,21 @@ export function openTrade(
     debugTradeOpenCount++;
     const sym = symbol ?? "UNKNOWN";
     logger.warn(
-      `[TRADE OPEN #${debugTradeOpenCount}] Symbol: ${sym} | Side: ${side} | Entry: ${entryPrice.toFixed(4)} | SL: ${slPriceAdjusted.toFixed(4)} | TP: ${tpPrice.toFixed(4)} | Candle: O=${candle.open} H=${candle.high} L=${candle.low} C=${candle.close}`,
+      `[TRADE OPEN #${debugTradeOpenCount}] Symbol: ${sym} | Side: ${side} | Entry: ${entryPriceFormatted.toFixed(4)} | SL: ${slPriceAdjusted.toFixed(4)} | TP: ${tpPriceFormatted.toFixed(4)} | Candle: O=${candle.open} H=${candle.high} L=${candle.low} C=${candle.close}`,
     );
   }
 
   return { state: newState, tradeOpened: true };
 }
 
+/**
+ * Advance a pending Limit order by one candle of the execution timeframe.
+ *
+ * `config.limitExpirationCandles` is the EFFECTIVE lifetime in those candles:
+ * in Sniper Mode the caller resolves it from `sniperLimitExpirationCandles` (1m
+ * candles), in Classic mode from `limitExpirationCandles` (LTF candles). Resolving
+ * at the call site keeps this simulator free of mode-specific arithmetic.
+ */
 export function checkPendingLimitOrder(
   state: BacktestState,
   candle: Candle,
@@ -516,10 +585,19 @@ export function checkPendingLimitOrder(
     // Limit orders that add liquidity pay MAKER fee (0.020%)
     const entryFee = pending.limitPrice.mul(pending.qty).mul(MAKER_FEE_RATE);
 
+    // Adaptive Fractioning: persist the real initial R:R (Sniper branch needs TotalR >= 4).
+    const managementState = initializeTradeManagement(
+      pending.limitPrice.toString(),
+      pending.slPrice.toString(),
+      pending.tpPrice.toString(),
+      pending.qty.toString(),
+    );
+
     const openTrade: OpenTrade = {
       entryTime: candle.timestamp,
       entryPrice: pending.limitPrice, // Filled at limit price
       slPrice: pending.slPrice,
+      initialSlPrice: pending.slPrice.toString(),
       tpPrice: pending.tpPrice,
       qty: pending.qty,
       side: pending.side,
@@ -539,9 +617,13 @@ export function checkPendingLimitOrder(
       limitPrice: pending.limitPrice,
       limitOrderPlacedAt: pending.placedAt,
       limitOrderCandlesWaited: pending.candlesWaited,
+      managementState,
+      realizedGrossPnl: "0",
     };
 
-    const newBalance = state.balance.minus(entryFee);
+    // The entry fee is NOT deducted here: it is accumulated on the trade and settled
+    // exactly once inside the closing net PnL (no double charge).
+    const newBalance = state.balance;
     const newPeak = newBalance.gt(state.peakBalance)
       ? newBalance
       : state.peakBalance;
@@ -558,6 +640,8 @@ export function checkPendingLimitOrder(
       openTrade,
       pendingLimitOrder: null,
       mitigatedZones: state.mitigatedZones, // Already added when limit order was placed
+      // Structure was already burned when the Limit order was placed.
+      mitigatedStructures: state.mitigatedStructures,
     };
 
     const sym = symbol ?? "UNKNOWN";
@@ -673,6 +757,7 @@ export function checkAndCloseTrade(
   const managementContext: TradeContext = {
     entryPrice: trade.entryPrice.toString(),
     stopLoss: trade.slPrice.toString(),
+    initialStopLoss: trade.initialSlPrice ?? trade.slPrice.toString(),
     takeProfit: trade.tpPrice.toString(),
     currentPrice: (isLong ? high : low).toString(),
     side: trade.side as "Buy" | "Sell",
@@ -686,6 +771,8 @@ export function checkAndCloseTrade(
   // Apply management signal
   let updatedTrade = trade;
   let updatedManagementState = managementState;
+  // Carries balance / peak / drawdown mutations produced by partial closes.
+  let managedState = state;
 
   if (managementSignal.action !== "none") {
     logger.debug(
@@ -707,64 +794,75 @@ export function checkAndCloseTrade(
       managementSignal.action === "close_partial_25" ||
       managementSignal.action === "close_partial_50"
     ) {
-      if (managementSignal.closeQty) {
-        // Simulate partial close: calculate PnL for closed portion
-        const closeQty = new Decimal(managementSignal.closeQty);
-        const closePrice = isLong ? high : low;
-        const exitFee = closePrice.mul(closeQty).mul(TAKER_FEE_RATE);
+      if (managementSignal.closeQty && managementSignal.triggerPrice) {
+        // Fill at the EXACT milestone threshold — the price at which the signal
+        // became true. The candle extreme (high/low) is a magic wick: it is not
+        // a print a resting reduce-only order could capture, and on a wide candle
+        // it can sit beyond the take-profit.
+        const triggerPrice = new Decimal(managementSignal.triggerPrice);
+        // A gapped open can already sit beyond the milestone. Fill at whichever
+        // price the market offered first — the trigger, or the open. Both branches
+        // stay inside [low, high] by construction (detection proves the extreme
+        // reached the trigger).
+        const closePrice = isLong
+          ? Decimal.max(triggerPrice, new Decimal(candle.open))
+          : Decimal.min(triggerPrice, new Decimal(candle.open));
+        // Clamp to the remaining size: the minOrderQty fallback can otherwise
+        // request more than the open position.
+        const closeQty = Decimal.min(
+          new Decimal(managementSignal.closeQty),
+          updatedTrade.qty,
+        );
 
-        const priceDiff = isLong
-          ? closePrice.minus(trade.entryPrice)
-          : trade.entryPrice.minus(closePrice);
-        const grossPnl = priceDiff.mul(closeQty);
-        const netPnl = grossPnl.minus(exitFee);
+        if (closeQty.gt(0)) {
+          const partialFee = closePrice.mul(closeQty).mul(TAKER_FEE_RATE);
 
-        // Update balance with partial PnL
-        const partialBalance = state.balance.plus(netPnl);
-        const partialPeak = partialBalance.gt(state.peakBalance)
-          ? partialBalance
-          : state.peakBalance;
-        const partialDrawdown = partialPeak
-          .minus(partialBalance)
-          .div(partialPeak)
-          .mul(100);
+          const priceDiff = isLong
+            ? closePrice.minus(trade.entryPrice)
+            : trade.entryPrice.minus(closePrice);
+          const grossPnl = priceDiff.mul(closeQty);
 
-        // Reduce qty
-        const remainingQty = trade.qty.minus(closeQty);
+          // Fees are accumulated on the trade (entryFee acts as the total fee ledger)
+          // and settled exactly once in the final close PnL — never deducted twice.
+          const partialBalance = managedState.balance.plus(grossPnl);
+          const partialPeak = partialBalance.gt(managedState.peakBalance)
+            ? partialBalance
+            : managedState.peakBalance;
+          const partialDrawdown = partialPeak
+            .minus(partialBalance)
+            .div(partialPeak)
+            .mul(100);
 
-        updatedTrade = {
-          ...updatedTrade,
-          qty: remainingQty,
-          slPrice: managementSignal.newStopLoss
-            ? new Decimal(managementSignal.newStopLoss)
-            : updatedTrade.slPrice,
-        };
+          updatedTrade = {
+            ...updatedTrade,
+            qty: updatedTrade.qty.minus(closeQty),
+            entryFee: updatedTrade.entryFee.plus(partialFee),
+            // Aggregate realized partial gross so the final TradeResult covers the
+            // entire trade lifecycle instead of only the remaining position.
+            realizedGrossPnl: new Decimal(updatedTrade.realizedGrossPnl || "0")
+              .plus(grossPnl)
+              .toString(),
+            slPrice: managementSignal.newStopLoss
+              ? new Decimal(managementSignal.newStopLoss)
+              : updatedTrade.slPrice,
+          };
 
-        updatedManagementState = managementSignal.updatedState;
+          updatedManagementState = managementSignal.updatedState;
 
-        // Update state balance and add partial close to trades
-        const partialState: BacktestState = {
-          ...state,
-          balance: partialBalance,
-          equity: partialBalance,
-          peakBalance: partialPeak,
-          maxDrawdown: partialDrawdown.gt(state.maxDrawdown)
-            ? partialDrawdown
-            : state.maxDrawdown,
-          openTrade: updatedTrade,
-        };
-
-        // Apply management state update
-        partialState.openTrade = {
-          ...partialState.openTrade!,
-          managementState: updatedManagementState,
-        };
-
-        return {
-          state: partialState,
-          tradeResult: null,
-          mitigatedZone: undefined,
-        };
+          // Balance / peak / drawdown advance now. Execution deliberately does NOT
+          // return here: it continues to the SL/TP resolution below so a candle
+          // that both triggers a milestone and pierces the stop cannot defer the
+          // loss to a later candle.
+          managedState = {
+            ...managedState,
+            balance: partialBalance,
+            equity: partialBalance,
+            peakBalance: partialPeak,
+            maxDrawdown: partialDrawdown.gt(managedState.maxDrawdown)
+              ? partialDrawdown
+              : managedState.maxDrawdown,
+          };
+        }
       }
     }
 
@@ -779,10 +877,18 @@ export function checkAndCloseTrade(
     }
   }
 
+  // Partial closes have already mutated balance / peak / drawdown. Carry those
+  // into the SL/TP resolution below instead of returning early.
+  state = managedState;
+
+  // A partial that consumed the entire remaining position ends the trade at the
+  // milestone price (possible when minOrderQty > 25% of the position).
+  const exhaustedByPartial = updatedTrade.qty.lte(0);
+
   // No hit - continue holding
-  if (!hitSL && !hitTP) {
-    // But if management updated SL, persist the updated trade
-    if (updatedTrade.slPrice !== trade.slPrice) {
+  if (!hitSL && !hitTP && !exhaustedByPartial) {
+    // Persist any management change (new SL, reduced qty, realized partial PnL).
+    if (updatedTrade !== trade) {
       const updatedState: BacktestState = {
         ...state,
         openTrade: updatedTrade,
@@ -793,27 +899,57 @@ export function checkAndCloseTrade(
   }
 
   // CONSERVATIVE PRIORITY: If BOTH SL and TP hit in same candle wick -> LOSS at SL price
-  // This prevents fake wins where price spiked both ways
+  // This prevents fake wins where price spiked both ways.
+  // NOTE: hitSL/hitTP are evaluated against the PRE-management stop, so moving the
+  // stop to entry never manufactures a false breakeven in the same candle.
   const bothHit = hitSL && hitTP;
-  const exitPrice = bothHit
-    ? trade.slPrice
-    : hitSL
+  const exitPrice = exhaustedByPartial
+    ? new Decimal(
+        managementSignal.triggerPrice ?? updatedTrade.slPrice.toString(),
+      )
+    : bothHit
       ? trade.slPrice
-      : trade.tpPrice;
-  const closedBy = bothHit ? "BOTH" : hitSL ? "SL" : "TP";
-  const isLoss = closedBy === "SL" || closedBy === "BOTH";
+      : hitSL
+        ? trade.slPrice
+        : trade.tpPrice;
+  const closedBy = exhaustedByPartial
+    ? "TP"
+    : bothHit
+      ? "BOTH"
+      : hitSL
+        ? "SL"
+        : "TP";
 
-  const exitFee = exitPrice.mul(trade.qty).mul(TAKER_FEE_RATE);
-  const totalFees = trade.entryFee.plus(exitFee);
+  // Remaining size and the accumulated fee ledger — both may have been reduced
+  // by a partial close earlier in this same candle.
+  const exitFee = exitPrice.mul(updatedTrade.qty).mul(TAKER_FEE_RATE);
+  const totalFees = updatedTrade.entryFee.plus(exitFee);
 
   const priceDiff = isLong
     ? exitPrice.minus(trade.entryPrice)
     : trade.entryPrice.minus(exitPrice);
-  const grossPnl = priceDiff.mul(trade.qty);
-  const netPnl = grossPnl.minus(totalFees);
-  const pnlPercent = netPnl.div(trade.entryPrice.mul(trade.qty)).mul(100);
+  const finalGrossPnl = priceDiff.mul(updatedTrade.qty);
 
-  const newBalance = state.balance.plus(netPnl);
+  // Aggregate partial-close gross PnL so TradeResult reflects the ENTIRE trade
+  // lifecycle, matching run.ts balance aggregation (initial + Σ trade.pnl).
+  const totalGrossPnl = finalGrossPnl.plus(updatedTrade.realizedGrossPnl || "0");
+  const netPnl = totalGrossPnl.minus(totalFees);
+
+  // Loss is defined by realized PnL sign (live parity): a "TP" that loses after
+  // fees still increments the Drawdown Guard and arms the cooldown.
+  const isLoss = netPnl.lt(0);
+
+  // Percent is measured against the initial position notional — a lifecycle PnL
+  // divided by the remaining qty would overstate the return after partial closes.
+  const initialQty = new Decimal(
+    trade.managementState?.initialQty || trade.qty.toString(),
+  );
+  const pnlPercent = netPnl.div(trade.entryPrice.mul(initialQty)).mul(100);
+
+  // Partial gross was already credited to the balance at each partial close.
+  // Apply only the final portion + the full accumulated fee ledger here, so the
+  // lifecycle PnL is never double-counted.
+  const newBalance = state.balance.plus(finalGrossPnl).minus(totalFees);
   const newPeak = newBalance.gt(state.peakBalance)
     ? newBalance
     : state.peakBalance;
@@ -848,10 +984,16 @@ export function checkAndCloseTrade(
     };
   }
 
-  // Structure mitigation: ALWAYS add trigger structure on close (win or loss)
-  // Uses trade.structureDetails set by scenario via openTrade
+  // Structure mitigation: add trigger structure on close (win or loss) if it was
+  // not already burned on entry (burn-on-entry parity — avoids duplicates).
   const structureTimestamp = trade.structureTimestamp ?? 0;
-  const hasValidStructure = structureTimestamp > 0 && trade.structureType;
+  const structureAlreadyMitigated = state.mitigatedStructures.some(
+    (ms) => ms.timestamp === structureTimestamp,
+  );
+  const hasValidStructure =
+    structureTimestamp > 0 &&
+    trade.structureType &&
+    !structureAlreadyMitigated;
 
   const newState: BacktestState = {
     ...state,
@@ -868,9 +1010,10 @@ export function checkAndCloseTrade(
         exitPrice,
         slPrice: trade.slPrice,
         tpPrice: trade.tpPrice,
-        qty: trade.qty,
+        qty: initialQty,
         side: trade.side,
         pnl: netPnl,
+        grossPnl: totalGrossPnl,
         pnlPercent,
         feesPaid: totalFees,
         scenarioId: trade.scenarioId,

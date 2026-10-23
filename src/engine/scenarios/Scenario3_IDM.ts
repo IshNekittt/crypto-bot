@@ -7,7 +7,7 @@ export class Scenario3_IDM extends BaseScenario {
     super(3, 'IDM', config);
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     if (!this.isInKillzone(patternData)) {
       this.logRejection('Not in active killzone');
       return false;
@@ -16,13 +16,15 @@ export class Scenario3_IDM extends BaseScenario {
     // IDM: Local minimum/maximum that acts as inducement
     // Price sweeps a local extreme (IDM), then tests the REAL OB
     
-    const lastCandle = patternData.candles15m[patternData.candles15m.length - 1];
+    const lastCandle = patternData.candles15m?.[patternData.candles15m.length - 1];
     if (!lastCandle) return false;
 
-    // Check for bearish IDM (local low swept, then bounce to test OB)
+    // IDM: the inducement is the freshest 15m BULLISH CHoCH — the structure that
+    // broke the local swing and signalled the reversal. NOTE: `brokenSwing` is a
+    // legacy field emitted only by the deprecated `smc.ts` detector; production
+    // structures never carry it, which made this scenario permanently dead.
     const recentLowSweep = [...(patternData.structures || [])].reverse().find((s: any) => 
-      s.direction === 'BULLISH' && s.type === 'CHOCH' && 
-      s.brokenSwing && s.brokenSwing.type === 'LOW'
+      s.direction === 'BULLISH' && s.type === 'CHOCH' && s.timeframe === '15'
     );
 
     if (!recentLowSweep) {
@@ -31,10 +33,10 @@ export class Scenario3_IDM extends BaseScenario {
     }
 
     // The real OB should be BELOW the swept low
-    const sweptLow = new Decimal(recentLowSweep.brokenSwing.price);
+    const sweptLow = new Decimal(recentLowSweep.price);
     const realObs = patternData.zones?.filter((z: any) => 
-      z.type === 'OB' && z.direction === 'BULLISH' && 
-      z.top.lt(sweptLow) && !z.invalidated
+      z.type === 'OB' && z.direction === 'BULLISH' && z.timeframe === '15' &&
+      z.top.lt(sweptLow) && !z.mitigated
     ) || [];
 
     if (!realObs.length) {
@@ -87,8 +89,8 @@ export class Scenario3_IDM extends BaseScenario {
     // Set structure details for mitigation tracking (the sweep CHoCH is the trigger structure)
     this.setStructureDetails({
       type: 'CHoCH',
-      timestamp: recentLowSweep.timestamp ?? recentLowSweep.brokenSwing?.timestamp ?? 0,
-      price: recentLowSweep.price ?? recentLowSweep.brokenSwing?.price ?? entry,
+      timestamp: recentLowSweep.timestamp,
+      price: recentLowSweep.price,
       direction: 'BULLISH',
     });
 

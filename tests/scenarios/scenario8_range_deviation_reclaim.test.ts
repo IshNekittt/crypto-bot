@@ -33,8 +33,16 @@ const mockConfig: BotConfig = {
   smcSlAtrOffset: '0.5',
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
+  sniperLimitExpirationCandles: 15,
+  smcSweepMinWickRatio: new Decimal('0.25'),
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
@@ -121,6 +129,7 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       direction: 'BEARISH' as const,
       price: new Decimal(102),
       timestamp: chochTime,
+      timeframe: '15',
       isValidated: true,
       impulseFactor: new Decimal(2.0),
     };
@@ -229,6 +238,19 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('reclaimed');
     });
+
+    it('should anchor on the NEWEST deviation (stale reclaim must not qualify)', () => {
+      const data = createIdealRangeDeviationPatternData();
+      // The older deviation (index 2) is followed by a reclaim (index 4)…
+      // …but a fresher deviation prints on the last candle with no reclaim after it.
+      data.candles15m[5].high = '107';
+      data.candles15m[5].low = '105';
+      data.candles15m[5].close = '106'; // still outside the range
+
+      const result = scenario.evaluate(data);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('reclaimed');
+    });
   });
 
   describe('negative cases - CHoCH', () => {
@@ -246,6 +268,15 @@ describe('Scenario8: Range Deviation & Reclaim', () => {
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('Bearish CHoCH displacement < 1.5 ATR');
+    });
+
+    it('should ignore a 4H CHoCH (strict 15m anchor)', () => {
+      const data = createIdealRangeDeviationPatternData();
+      data.structures[0].timeframe = '240';
+
+      const result = scenario.evaluate(data);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toBe('No bearish CHoCH after reclaim');
     });
   });
 

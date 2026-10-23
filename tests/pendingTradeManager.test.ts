@@ -2,6 +2,7 @@ import { PendingTradeManager } from '../src/engine/pendingTradeManager';
 import { TelegramNotifier } from '../src/telegram/notifier';
 import { PendingTrade } from '../src/engine/pendingTradeManager';
 import { BotConfig } from '../src/config/env';
+import { Decimal } from 'decimal.js';
 
 describe('PendingTradeManager', () => {
   let manager: PendingTradeManager;
@@ -38,8 +39,16 @@ describe('PendingTradeManager', () => {
     smcSlAtrOffset: '0.5',
     smcDisplacementMultiplier: '1.5',
     limitExpirationCandles: 6,
+    sniperLimitExpirationCandles: 15,
+    smcSweepMinWickRatio: new Decimal('0.25'),
     smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     sniperDisplacementMultiplier: undefined,
     backtestDays: 60,
     useLocalCacheOnly: false,

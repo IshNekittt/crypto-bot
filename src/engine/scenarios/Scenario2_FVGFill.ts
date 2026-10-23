@@ -53,11 +53,14 @@ export class Scenario2_FVGFill extends BaseScenario {
     const lookbackStart = Math.max(0, fvgIndex - 15);
     const lookbackEnd = fvgIndex;
     
-    // Check for sweeps in liquidity pools within lookback window
+    // Check for sweeps in liquidity pools within lookback window.
+    // NOTE: `isTaken` is intentionally NOT checked — `PatternRecognizer` always
+    // emits `isTaken: false` (and `true` only from the legacy `smc.ts`), so
+    // filtering on it made this confluence gate permanently dead. Presence of a
+    // liquidity pool inside the window IS the sweep context.
     const recentPools = liquidityPools?.filter((p: any) => 
       p.timestamp >= candles15m[lookbackStart].timestamp &&
-      p.timestamp <= candles15m[lookbackEnd].timestamp &&
-      p.isTaken
+      p.timestamp <= candles15m[lookbackEnd].timestamp
     ) || [];
 
     if (recentPools.length > 0) return true;
@@ -72,7 +75,7 @@ export class Scenario2_FVGFill extends BaseScenario {
     return recentStructures.length > 0;
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     Scenario2_FVGFill.rejectionStats.totalEvals++;
 
     if (this.config.enforceKillzones !== false && (!patternData.currentKillzone || patternData.currentKillzone === 'NONE')) {
@@ -81,9 +84,13 @@ export class Scenario2_FVGFill extends BaseScenario {
       return false;
     }
 
-    // Find HTF FVG (4H or Daily)
+    // Find HTF FVG (4H or Daily).
+    // BULLISH only: the execution path below is Long-only (`calculateLevels` is
+    // called with 'BULLISH'), so a BEARISH FVG could never produce a valid setup —
+    // admitting it only delayed the rejection and made the Premium/Discount branch
+    // contradict the hardcoded direction.
     const htfFvgs = patternData.zones?.filter((z: any) => 
-      z.type === 'FVG' && (z.timeframe === '240' || z.timeframe === 'D')
+      z.type === 'FVG' && z.direction === 'BULLISH' && (z.timeframe === '240' || z.timeframe === 'D')
     ) || [];
 
     if (!htfFvgs.length) {
@@ -98,26 +105,16 @@ export class Scenario2_FVGFill extends BaseScenario {
     if (!lastCandle) return false;
 
     // PREMIUM/DISCOUNT FILTER (Fibonacci 0.5)
-    // For BULLISH FVG (Long): FVG must be in DISCOUNT zone (below 0.5)
-    // For BEARISH FVG (Short): FVG must be in PREMIUM zone (above 0.5)
+    // The setup is Long-only, so the BULLISH HTF FVG MUST be in DISCOUNT (below 0.5).
     const pd = patternData.patternRecognizer.calculatePremiumDiscount(patternData.candles15m);
     if (!pd) {
       this.logRejection('Could not calculate Premium/Discount levels');
       return false;
     }
-    
+
     const fvgMid = htfFvg.top.plus(htfFvg.bottom).dividedBy(2);
-    const isBullishFvg = htfFvg.direction === 'BULLISH';
-    
-    // BULLISH FVG must be in DISCOUNT (below equilibrium)
-    // BEARISH FVG must be in PREMIUM (above equilibrium)
-    if (isBullishFvg && fvgMid.gte(pd.equilibrium)) {
+    if (fvgMid.gte(pd.equilibrium)) {
       this.logRejection('BULLISH HTF FVG not in Discount zone (above 0.5)');
-      Scenario2_FVGFill.rejectionStats.premiumDiscount++;
-      return false;
-    }
-    if (!isBullishFvg && fvgMid.lte(pd.equilibrium)) {
-      this.logRejection('BEARISH HTF FVG not in Premium zone (below 0.5)');
       Scenario2_FVGFill.rejectionStats.premiumDiscount++;
       return false;
     }

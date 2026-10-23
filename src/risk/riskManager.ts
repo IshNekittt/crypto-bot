@@ -127,6 +127,16 @@ export class RiskManager {
 
     const entryDecimal = new Decimal(entry);
     const stopLossDecimal = new Decimal(stopLoss);
+
+    // Hard guard: a zero/negative entry would make every downstream division meaningless
+    // (qty, leverage cap) and could produce an order that the exchange never fills.
+    if (entryDecimal.lte(0)) {
+      return {
+        ok: false,
+        reason: `${input.symbol}: Entry price cannot be zero or negative`,
+      };
+    }
+
     const slDistanceDecimal = isLong
       ? entryDecimal.minus(stopLossDecimal)
       : stopLossDecimal.minus(entryDecimal);

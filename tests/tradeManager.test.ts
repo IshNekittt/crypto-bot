@@ -114,7 +114,7 @@ describe('Adaptive Fractioning — evaluateTradeManagement', () => {
       );
 
       expect(signal.action).toBe('move_sl_to_entry');
-      expect(signal.newStopLoss).toBe('100');
+      expect(new Decimal(signal.newStopLoss!).eq(100)).toBe(true);
       expect(signal.updatedState.milestone1Triggered).toBe(true);
     });
 
@@ -131,7 +131,7 @@ describe('Adaptive Fractioning — evaluateTradeManagement', () => {
       );
 
       expect(signal.action).toBe('move_sl_to_entry');
-      expect(signal.newStopLoss).toBe('100');
+      expect(new Decimal(signal.newStopLoss!).eq(100)).toBe(true);
     });
 
     it('Sniper in profit at 33% closes 25% and moves SL to entry', () => {
@@ -146,8 +146,51 @@ describe('Adaptive Fractioning — evaluateTradeManagement', () => {
       );
 
       expect(signal.action).toBe('close_partial_25');
-      expect(signal.newStopLoss).toBe('100');
+      expect(new Decimal(signal.newStopLoss!).eq(100)).toBe(true);
       expect(new Decimal(signal.closeQty!).gt(0)).toBe(true);
+    });
+
+    it('Sniper partial-close trigger price is the exact milestone threshold (no magic wick)', () => {
+      const state = makeState('100', '99.5', '102.5', '10');
+      const signal = evaluateTradeManagement(
+        makeContext({
+          stopLoss: '99.5',
+          takeProfit: '102.5',
+          currentPrice: '101.9', // far past 33% — a wide candle
+          managementState: state,
+        }),
+      );
+
+      expect(signal.action).toBe('close_partial_25');
+      // entry + (tp - entry) * 0.33 = 100 + 2.5 * 0.33 = 100.825 -> tick 0.01
+      expect(new Decimal(signal.triggerPrice!).eq('100.83')).toBe(true);
+    });
+
+    it('Milestone 2 stays reachable after milestone 1 moved the SL to entry', () => {
+      // Sniper geometry: entry 100, initial SL 99.5, TP 102.5 (TotalR = 5).
+      const state = {
+        ...makeState('100', '99.5', '102.5', '10'),
+        milestone1Triggered: true,
+      };
+
+      const signal = evaluateTradeManagement(
+        makeContext({
+          stopLoss: '100', // trailed stop, now equal to entry
+          initialStopLoss: '99.5', // original risk distance (100 - 99.5)
+          takeProfit: '102.5',
+          currentPrice: '101.8', // (101.8 - 100) / 2.5 = 72% progress
+          managementState: state,
+        }),
+      );
+
+      // Before the fix |entry - sl| == 0 made this permanently
+      // 'Invalid risk/reward distances' and milestone 2 never fired.
+      expect(signal.reason).not.toBe('Invalid risk/reward distances');
+      expect(signal.action).toBe('close_partial_50');
+      // 100 + 2.5 * 0.66 = 101.65
+      expect(new Decimal(signal.triggerPrice!).eq('101.65')).toBe(true);
+      // Trailing stop: 100 + 2.5 * 0.33 = 100.825 -> tick 0.01 -> 100.83
+      expect(new Decimal(signal.newStopLoss!).eq('100.83')).toBe(true);
     });
   });
 });

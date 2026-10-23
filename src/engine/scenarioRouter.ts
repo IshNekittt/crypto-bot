@@ -69,7 +69,7 @@ export class ScenarioRouter {
       logger.info(`[${this.symbol}] Active scenarios: ${this.scenarios.map(s => `${s.id}:${s.name}`).join(', ')}`);
     } else {
       this.scenarios = allScenarios;
-      logger.info(`[${this.symbol}] All 11 scenarios active (no active scenarios configured)`);
+      logger.info(`[${this.symbol}] All ${allScenarios.length} scenarios active (no active scenarios configured)`);
     }
   }
 

@@ -35,7 +35,7 @@ export class Scenario7_AMD extends BaseScenario {
     };
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     Scenario7_AMD.rejectionStats.totalEvals++;
 
     // CRITICAL: AMD works at session transitions
@@ -82,8 +82,11 @@ export class Scenario7_AMD extends BaseScenario {
     let sweepCandle: any = null;
     
     // Check last 8 candles for sweep (sweep could be 1-7 candles ago, CHoCH follows)
+    // Newest-first: the freshest sweep is the only valid manipulation anchor.
+    // `candles15m` is chronological (oldest → newest), so iterate from the end and
+    // break on the first (newest) hit — a forward scan would pick the oldest sweep.
     const checkWindow = Math.min(8, candles15m.length);
-    for (let i = candles15m.length - checkWindow; i < candles15m.length; i++) {
+    for (let i = candles15m.length - 1; i >= candles15m.length - checkWindow; i--) {
       const c = candles15m[i];
       const low = new Decimal(c.low);
       const close = new Decimal(c.close);
@@ -110,6 +113,7 @@ export class Scenario7_AMD extends BaseScenario {
     const recentChoch = [...(structures || [])].reverse().find((s: any) => 
       s.type === 'CHOCH' && 
       s.direction === 'BULLISH' &&
+      s.timeframe === '15' &&
       s.timestamp > sweepTime && // CHoCH MUST be AFTER sweep
       s.timestamp <= sweepTime + 8 * 60 * 60 * 1000 // within 8H after sweep
     );
@@ -163,12 +167,17 @@ export class Scenario7_AMD extends BaseScenario {
       return false;
     }
 
-    // Override TP to target Asian High if it provides better R:R
-    if (asianHigh.gt(levels.takeProfit)) {
-      const customReward = asianHigh.minus(levels.entry);
-      if (customReward.div(risk).gte(3)) {
-        levels.takeProfit = asianHigh;
-      }
+    // Clamp TP to the Asian Range boundary instead of blind-overwriting it.
+    // The boundary is the structural distribution target, so never aim beyond it
+    // (Decimal.min for a long / Decimal.max for a short picks the nearer target).
+    // The guard keeps the boundary on the profitable side of the entry, which is
+    // what guarantees the geometry can never invert. No manual RR gate is needed
+    // here: the base levels above are already built at 1:3.
+    const isLong = levels.entry.gt(levels.stopLoss);
+    if (isLong && asianHigh.gt(levels.entry)) {
+      levels.takeProfit = Decimal.min(levels.takeProfit, asianHigh);
+    } else if (!isLong && asianLow.lt(levels.entry)) {
+      levels.takeProfit = Decimal.max(levels.takeProfit, asianLow);
     }
 
     this.setLevels(levels);
@@ -191,7 +200,7 @@ export class Scenario7_AMD extends BaseScenario {
       direction: 'BULLISH',
     });
 
-    this.setReason(`AMD: Asian Low swept in ${currentKillzone} killzone (Asian Range height ${asianRangeHeight.toFixed(2)} < 3.0*ATR4H) + CHoCH + FVG 0.5 entry, target Asian High`);
+    this.setReason(`AMD: Asian Low swept in ${currentKillzone} killzone (Asian Range height ${asianRangeHeight.toFixed(2)} < 3.0*ATR4H) + CHoCH + FVG 0.5 entry, TP clamped to Asian Range boundary`);
     return true;
   }
 }

@@ -205,4 +205,91 @@ describe('PatternRecognizer', () => {
       expect(typeof recognizer.detectSMS).toBe('function');
     });
   });
+
+  describe('buildPatternData — chronological merge & timeframe tagging', () => {
+    const makeCandles = (start: number, step: number, count: number) => {
+      const candles: any[] = [];
+      for (let i = 0; i < count; i++) {
+        candles.push({
+          timestamp: start + i * step,
+          open: '100',
+          high: '101',
+          low: '99',
+          close: '100',
+          volume: '1000',
+        });
+      }
+      return candles;
+    };
+
+    it('sorts merged structures/zones ascending and tags origin timeframes', async () => {
+      // Overlapping windows: 15m starts earlier but extends past most 4H candles,
+      // which reproduces the production defect of concatenating [...]15m, ...4H].
+      const ltfCandles = makeCandles(1_000, 900_000, 6);
+      const htfCandles = makeCandles(2_000, 3_600_000, 6);
+
+      (jest.spyOn(recognizer, 'detectStructureBreaks') as jest.SpyInstance).mockImplementation((candles: any[]) => {
+        const timeframe = candles === ltfCandles ? '15' : '240';
+        return [
+          {
+            type: 'CHOCH',
+            price: new Decimal(100),
+            timestamp: candles[candles.length - 1].timestamp,
+            isValidated: true,
+            direction: 'BULLISH',
+            impulseFactor: new Decimal(2),
+            timeframe,
+          },
+          {
+            type: 'BOS',
+            price: new Decimal(100),
+            timestamp: candles[0].timestamp,
+            isValidated: true,
+            direction: 'BULLISH',
+            impulseFactor: new Decimal(2),
+            timeframe,
+          },
+        ] as any;
+      });
+
+      (jest.spyOn(recognizer, 'detectFVGs') as jest.SpyInstance).mockImplementation((candles: any[]) => [
+        {
+          type: 'FVG',
+          direction: 'BULLISH',
+          top: new Decimal(101),
+          bottom: new Decimal(99),
+          timestamp: candles[candles.length - 1].timestamp,
+          mitigated: false,
+          timeframe: '15',
+        },
+      ] as any);
+
+      (jest.spyOn(recognizer, 'detectOrderBlocks') as jest.SpyInstance).mockImplementation((candles: any[]) => [
+        {
+          type: 'OB',
+          direction: 'BULLISH',
+          top: new Decimal(101),
+          bottom: new Decimal(99),
+          timestamp: candles[0].timestamp,
+          mitigated: false,
+          timeframe: '15',
+        },
+      ] as any);
+
+      const pd = await recognizer.buildPatternData(
+        'TESTUSDT',
+        ltfCandles,
+        htfCandles,
+        ltfCandles[ltfCandles.length - 1].timestamp
+      );
+
+      // Naive concatenation would yield [1000, 4501000, 2000, 18002000].
+      expect(pd.structures.map((s: any) => s.timestamp)).toEqual([1_000, 2_000, 4_501_000, 18_002_000]);
+      expect(pd.structures.map((s: any) => s.timeframe)).toEqual(['15', '240', '15', '240']);
+
+      // Zones: FVG(15m), FVG(4H), OB(15m), OB(4H) are also globally sorted.
+      expect(pd.zones.map((z: any) => z.timestamp)).toEqual([1_000, 2_000, 4_501_000, 18_002_000]);
+      expect(pd.zones.map((z: any) => z.timeframe)).toEqual(['15', '240', '15', '240']);
+    });
+  });
 });

@@ -482,6 +482,10 @@ async openTrade(input: {
   async runIntegrationTest(): Promise<boolean> {
     const client = await this.pool.connect();
     try {
+      // Everything below runs inside a transaction that is ALWAYS rolled back: the goal is
+      // to validate SQL syntax / column mapping, never to persist test rows.
+      await client.query('BEGIN');
+
       const testId = 'TEST_DB_1';
       const now = Date.now();
 
@@ -537,6 +541,15 @@ async openTrade(input: {
       logger.info('Database integration test passed (INSERT/SELECT/DELETE with zoneDetails Decimal operations)');
       return true;
     } finally {
+      // ROLLBACK is guaranteed even if the try block throws — releasing a pooled connection
+      // with an open (possibly aborted) transaction would poison every later query on it.
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        logger.warn(
+          `Integration test ROLLBACK failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        );
+      }
       client.release();
     }
   }
@@ -549,7 +562,7 @@ async openTrade(input: {
     const client = await this.pool.connect();
     try {
       const result = await client.query(
-        `SELECT id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, pnl, exit_price, status, reason, opened_at, closed_at, order_id, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, management_state
+        `SELECT id, symbol, scenario_id, entry_price, sl_price, tp_price, qty, pnl, exit_price, status, reason, opened_at, closed_at, order_id, side, zone_type, zone_top, zone_bottom, zone_timeframe, zone_direction, zone_timestamp, order_type, limit_price, management_state
          FROM trades ORDER BY id ASC`,
       );
       return result.rows as TradeRecord[];

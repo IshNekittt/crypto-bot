@@ -178,8 +178,15 @@ export interface IScenario {
   getStructureDetails(): StructureDetails | null;
 }
 
+/**
+ * Every structure that can act as a trade trigger and therefore be burned into
+ * `mitigatedStructures`. `SWEEP` covers SFP/Turtle Soup entries whose trigger is
+ * the sweep candle itself rather than a CHoCH/BOS/SMS break.
+ */
+export type StructureType = 'SMS' | 'CHoCH' | 'BOS' | 'SWEEP';
+
 export interface StructureDetails {
-  type: 'SMS' | 'CHoCH' | 'BOS';
+  type?: StructureType;
   timestamp: number;
   price: Decimal;
   direction?: 'BULLISH' | 'BEARISH';
@@ -195,7 +202,7 @@ export interface MitigatedZone {
 }
 
 export interface MitigatedStructure {
-  type: 'SMS' | 'CHoCH' | 'BOS';
+  type: StructureType;
   timestamp: number;
   price: string;
   direction: 'BULLISH' | 'BEARISH';

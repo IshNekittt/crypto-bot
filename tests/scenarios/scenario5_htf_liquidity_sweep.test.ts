@@ -22,7 +22,7 @@ const mockConfig: BotConfig = {
   autoTrading: false,
   tradeApprovalTimeoutMinutes: 5,
   enableLiveTestOrders: false,
-  activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+  activeScenarios: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
   enableFundingMonitor: false,
   fundingMonitorSymbols: [],
   fundingAlertThresholdPct: '0.0',
@@ -33,297 +33,389 @@ const mockConfig: BotConfig = {
   smcSlAtrOffset: '0.5',
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
+  sniperLimitExpirationCandles: 15,
+  smcSweepMinWickRatio: new Decimal('0.25'),
   smartEntryThresholdPct: '0.0015',
-    enableSniperMode: false,
-    backtestDays: 60,
-    useLocalCacheOnly: false,
-    maxWorkingCapital: 0,
-    preflightBufferPct: "0.05",
-    enableHealthcheckServer: false,
-    allowedDaysOfWeek: [1, 2, 3, 4, 5],
-    enforceKillzones: true,
-    enableTradeNotifications: true,
+  enableSniperMode: false,
+  enableDynamicTp: false,
+  fixedTpRr: new Decimal(3),
+  dynamicTpMinRr: new Decimal('1.5'),
+  dynamicTpMaxRr: new Decimal(6),
+  dynamicTpRequireTarget: false,
+  minTpDistancePct: new Decimal('0.0035'),
+  backtestDays: 60,
+  useLocalCacheOnly: false,
+  maxWorkingCapital: 0,
+  preflightBufferPct: '0.05',
+  enableHealthcheckServer: false,
+  allowedDaysOfWeek: [1, 2, 3, 4, 5],
+  enforceKillzones: true,
+  enableTradeNotifications: true,
 };
+
+const BASE_TS = 1788675600000; // London killzone
+const LTF_MS = 15 * 60 * 1000;
+const CANDLE_COUNT = 30;
+const SWEEP_INDEX = 16;
+const CHOCH_INDEX = 20;
+const FVG_INDEX = 24;
+
+function candle(index: number, overrides: Record<string, string> = {}) {
+  return {
+    timestamp: BASE_TS + index * LTF_MS,
+    open: '102.6',
+    high: '103.2',
+    low: '102.4',
+    close: '103',
+    volume: '1000',
+    ...overrides,
+  };
+}
+
+function pool(type: string, price: string) {
+  return {
+    type,
+    priceLevel: new Decimal(price),
+    points: [],
+    isTaken: false,
+    timestamp: BASE_TS - LTF_MS,
+  };
+}
+
+interface FixtureOptions {
+  readonly direction?: 'BULLISH' | 'BEARISH';
+  readonly sweepIndex?: number;
+  readonly chochIndex?: number;
+  readonly fvgIndex?: number;
+  readonly displacement?: string;
+  readonly withFvg?: boolean;
+  readonly extraPools?: Array<{ type: string; price: string }>;
+  readonly killzone?: string;
+}
+
+/**
+ * Builds a 30-candle 15m series with a sweep, a CHoCH AFTER it and an FVG AFTER
+ * the CHoCH — the exact causal chain Scenario 5 requires.
+ *
+ * Short fixture: PDH 105 swept by a wick to 106 closing back at 104.
+ * Long fixture:  PDL 95 swept by a wick to 94 closing back at 95.8.
+ */
+function buildPatternData(options: FixtureOptions = {}) {
+  const direction = options.direction ?? 'BEARISH';
+  const sweepIndex = options.sweepIndex ?? SWEEP_INDEX;
+  const chochIndex = options.chochIndex ?? CHOCH_INDEX;
+  const fvgIndex = options.fvgIndex ?? FVG_INDEX;
+
+  const candles = Array.from({ length: CANDLE_COUNT }, (_, i) => candle(i));
+
+  if (direction === 'BEARISH') {
+    candles[sweepIndex] = candle(sweepIndex, {
+      open: '103',
+      high: '106',
+      low: '102.8',
+      close: '104',
+    });
+  } else {
+    candles[sweepIndex] = candle(sweepIndex, {
+      open: '96',
+      high: '96.2',
+      low: '94',
+      close: '95.8',
+    });
+  }
+
+  const levelType = direction === 'BEARISH' ? 'PDH' : 'PDL';
+  const levelPrice = direction === 'BEARISH' ? '105' : '95';
+
+  const pools = [pool(levelType, levelPrice)];
+  for (const extra of options.extraPools ?? []) {
+    pools.push(pool(extra.type, extra.price));
+  }
+
+  const structures = [
+    {
+      type: 'CHOCH',
+      direction,
+      price: new Decimal(direction === 'BEARISH' ? 103 : 97),
+      timestamp: candles[chochIndex].timestamp,
+      isValidated: true,
+      impulseFactor: new Decimal(options.displacement ?? '2.0'),
+      timeframe: '15',
+    },
+  ];
+
+  const zones = options.withFvg === false
+    ? []
+    : [
+        direction === 'BEARISH'
+          ? {
+              type: 'FVG',
+              direction,
+              top: new Decimal(103),
+              bottom: new Decimal(101),
+              timestamp: candles[fvgIndex].timestamp,
+              mitigated: false,
+              timeframe: '15',
+            }
+          : {
+              type: 'FVG',
+              direction,
+              top: new Decimal(97),
+              bottom: new Decimal(95),
+              timestamp: candles[fvgIndex].timestamp,
+              mitigated: false,
+              timeframe: '15',
+            },
+      ];
+
+  return {
+    currentKillzone: options.killzone ?? 'LONDON',
+    currentSession: 'LONDON',
+    candles15m: candles,
+    structures,
+    zones,
+    liquidityPools: pools,
+    atr15m: new Decimal('0.5'),
+  } as any;
+}
 
 describe('Scenario5: HTF Liquidity Sweep', () => {
   let scenario: Scenario5_HTFLiquiditySweep;
 
   beforeEach(() => {
-    scenario = new Scenario5_HTFLiquiditySweep(mockConfig);
-  });
-
-  const createMockPatternData = (overrides: Partial<{
-    killzone: string;
-    hasLiquiditySweep: boolean;
-    sweepPoolType: string;
-    hasChochAfterSweep: boolean;
-    chochDisplacement: boolean;
-    hasFreshFvg: boolean;
-  }> = {}) => {
-    const config = {
-      killzone: overrides.killzone || 'LONDON',
-      hasLiquiditySweep: overrides.hasLiquiditySweep || false,
-      sweepPoolType: overrides.sweepPoolType || 'PDH',
-      hasChochAfterSweep: overrides.hasChochAfterSweep !== false,
-      chochDisplacement: overrides.chochDisplacement !== false,
-      hasFreshFvg: overrides.hasFreshFvg !== false,
-    };
-
-    const liquidityPool = {
-      type: config.sweepPoolType, priceLevel: new Decimal(105),
-      points: [], isTaken: false, timestamp: Date.now() - 1000,
-    };
-
-    const now = Date.now();
-    const choch = config.hasChochAfterSweep ? {
-      type: 'CHOCH', direction: 'BEARISH', price: new Decimal(103),
-      timestamp: now - 2 * 60 * 60 * 1000, // 2 hours ago (within 4H window)
-      isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
-    } : null;
-
-    const freshFvg = config.hasFreshFvg ? {
-      type: 'FVG', direction: 'BEARISH', top: new Decimal(103), bottom: new Decimal(101),
-      timestamp: now, // Current candle timestamp (FVG formed on current candle)
-      mitigated: false, timeframe: '15',
-    } : null;
-
-    // Sweep candle: wick above PDH (105) at 106, close back below at 104 (SFP)
-    const sweepCandle = config.hasLiquiditySweep ? {
-      timestamp: now, close: '104', high: '106', low: '103', open: '100', volume: '1000',
-    } : {
-      timestamp: now, close: '100', high: '101', low: '99', open: '100', volume: '1000',
-    };
-
-    return {
-      currentKillzone: config.killzone,
-      currentSession: 'LONDON',
-      candles15m: [sweepCandle],
-      structures: choch ? [choch] : [],
-      zones: freshFvg ? [freshFvg] : [],
-      liquidityPools: [liquidityPool],
-      atr15m: new Decimal('0.5'),
-    };
-  };
-
-  // Helper for BULLISH (Long) setups: PDL/SSL sweep
-  const createBullishPatternData = (overrides: Partial<{
-    killzone: string;
-    hasChochAfterSweep: boolean;
-    chochDisplacement: boolean;
-    hasFreshFvg: boolean;
-  }> = {}) => {
-    const config = {
-      killzone: overrides.killzone || 'LONDON',
-      hasChochAfterSweep: overrides.hasChochAfterSweep !== false,
-      chochDisplacement: overrides.chochDisplacement !== false,
-      hasFreshFvg: overrides.hasFreshFvg !== false,
-    };
-
-    // PDL at 95 - sweep wick below at 94, close back above at 96 (SFP bullish)
-    const liquidityPool = {
-      type: 'PDL', priceLevel: new Decimal(95),
-      points: [], isTaken: false, timestamp: Date.now() - 1000,
-    };
-
-    const now = Date.now();
-    const choch = config.hasChochAfterSweep ? {
-      type: 'CHOCH', direction: 'BULLISH', price: new Decimal(97),
-      timestamp: now - 2 * 60 * 60 * 1000,
-      isValidated: true, impulseFactor: config.chochDisplacement ? new Decimal(2.0) : new Decimal(1.0),
-    } : null;
-
-    // BULLISH FVG: top > bottom
-    const freshFvg = config.hasFreshFvg ? {
-      type: 'FVG', direction: 'BULLISH', top: new Decimal(97), bottom: new Decimal(95),
-      timestamp: now,
-      mitigated: false, timeframe: '15',
-    } : null;
-
-    // Sweep candle: wick below PDL (95) at 94, close back above at 96
-    const sweepCandle = {
-      timestamp: now, close: '96', high: '98', low: '94', open: '100', volume: '1000',
-    };
-
-    return {
-      currentKillzone: config.killzone,
-      currentSession: 'LONDON',
-      candles15m: [sweepCandle],
-      structures: choch ? [choch] : [],
-      zones: freshFvg ? [freshFvg] : [],
-      liquidityPools: [liquidityPool],
-      atr15m: new Decimal('0.5'),
-    };
-  };
-
-  beforeEach(() => {
+    Scenario5_HTFLiquiditySweep.resetStats();
     scenario = new Scenario5_HTFLiquiditySweep(mockConfig);
   });
 
   describe('positive cases', () => {
-    it('should trigger when PDH swept in killzone with CHoCH and FVG', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true }));
-      
+    it('triggers on a PDH sweep + CHoCH after the sweep + FVG (Short)', () => {
+      const result = scenario.evaluate(buildPatternData({ direction: 'BEARISH' }));
+
       expect(result).toBe(true);
       expect(scenario.getReason()).toContain('HTF Liquidity Sweep');
-      expect(scenario.getLevels().entry).toBeDefined();
+      expect(scenario.getReason()).toContain('PDH');
+
+      const levels = scenario.getLevels();
+      expect(levels.stopLoss.gt(levels.entry)).toBe(true);
+      expect(levels.takeProfit.lt(levels.entry)).toBe(true);
+
+      const zone = scenario.getZoneDetails();
+      expect(zone?.type).toBe('FVG');
+      expect(zone?.direction).toBe('BEARISH');
+
+      const structure = scenario.getStructureDetails();
+      expect(structure?.type).toBe('CHoCH');
+      expect(structure?.timestamp).toBe(BASE_TS + CHOCH_INDEX * LTF_MS);
+      expect(structure?.direction).toBe('BEARISH');
     });
 
-    it('should trigger when PDL swept in killzone with BULLISH CHoCH and FVG (Long setup)', () => {
-      const result = scenario.evaluate(createBullishPatternData({}));
-      
+    it('triggers on a PDL sweep + BULLISH CHoCH + FVG (Long)', () => {
+      const result = scenario.evaluate(buildPatternData({ direction: 'BULLISH' }));
+
       expect(result).toBe(true);
-      expect(scenario.getReason()).toContain('HTF Liquidity Sweep');
-      expect(scenario.getLevels().entry).toBeDefined();
+      expect(scenario.getReason()).toContain('PDL');
+
+      const levels = scenario.getLevels();
+      expect(levels.stopLoss.lt(levels.entry)).toBe(true);
+      expect(levels.takeProfit.gt(levels.entry)).toBe(true);
     });
 
-    it('should work in NY killzone', () => {
-      const result = scenario.evaluate(createMockPatternData({ killzone: 'NY', hasLiquiditySweep: true }));
+    it('finds a sweep that happened several candles before the latest candle', () => {
+      // Sweep 13 candles before the end — the legacy last-candle-only scan missed it.
+      const result = scenario.evaluate(
+        buildPatternData({ direction: 'BEARISH', sweepIndex: SWEEP_INDEX })
+      );
+
       expect(result).toBe(true);
+    });
+
+    it('works in the NY killzone', () => {
+      const result = scenario.evaluate(buildPatternData({ killzone: 'NY' }));
+      expect(result).toBe(true);
+    });
+
+    it('bypasses the killzone gate when enforceKillzones=false', () => {
+      const bypass = new Scenario5_HTFLiquiditySweep({ ...mockConfig, enforceKillzones: false });
+      const result = bypass.evaluate(buildPatternData({ killzone: 'NONE' }));
+
+      expect(result).toBe(true);
+      expect(bypass.getReason()).toContain('HTF Liquidity Sweep');
     });
   });
 
   describe('negative cases - killzone', () => {
-    it('should reject when killzone is NONE', () => {
-      const result = scenario.evaluate(createMockPatternData({ killzone: 'NONE', hasLiquiditySweep: true }));
+    it('rejects outside London/NY', () => {
+      const result = scenario.evaluate(buildPatternData({ killzone: 'ASIAN' }));
+
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('London or NY killzone');
     });
+  });
 
-    it('should bypass killzone gate when enforceKillzones=false (backtest bypass)', () => {
-      const bypassScenario = new Scenario5_HTFLiquiditySweep({ ...mockConfig, enforceKillzones: false });
-      const result = bypassScenario.evaluate(createMockPatternData({ killzone: 'NONE', hasLiquiditySweep: true }));
+  describe('negative cases - sweep', () => {
+    it('rejects when the only sweep is older than the 16-candle window', () => {
+      // Index 5 is 25 candles before the end → outside the 16-candle scan.
+      const result = scenario.evaluate(buildPatternData({ sweepIndex: 5 }));
+
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('No HTF liquidity sweep');
+    });
+
+    it('rejects when no HTF pool exists', () => {
+      const data = buildPatternData();
+      data.liquidityPools = [pool('EQH', '105')];
+
+      const result = scenario.evaluate(data);
+
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('No HTF liquidity pools');
+    });
+  });
+
+  describe('negative cases - causality', () => {
+    it('rejects a CHoCH that formed BEFORE the sweep', () => {
+      const result = scenario.evaluate(
+        buildPatternData({ chochIndex: SWEEP_INDEX - 4 })
+      );
+
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('No aggressive 15m CHoCH');
+    });
+  });
+
+  describe('deterministic pool ranking', () => {
+    it('picks PDH over PDL when one candle sweeps both', () => {
+      const data = buildPatternData({ direction: 'BEARISH' });
+      // Same candle pierces PDH (105) upward and PDL (95) downward.
+      data.candles15m[SWEEP_INDEX] = candle(SWEEP_INDEX, {
+        open: '100',
+        high: '106',
+        low: '94',
+        close: '100',
+      });
+      data.liquidityPools = [pool('PDL', '95'), pool('PDH', '105')];
+
+      const result = scenario.evaluate(data);
+
       expect(result).toBe(true);
-      expect(bypassScenario.getReason()).toContain('HTF Liquidity Sweep');
+      expect(scenario.getReason()).toContain('PDH');
+      expect(scenario.getReason()).not.toContain('PDL');
+    });
+
+    it('picks PWH over PWL when one candle sweeps both', () => {
+      const data = buildPatternData({ direction: 'BEARISH' });
+      data.candles15m[SWEEP_INDEX] = candle(SWEEP_INDEX, {
+        open: '100',
+        high: '116',
+        low: '84',
+        close: '100',
+      });
+      data.liquidityPools = [pool('PWL', '85'), pool('PWH', '115')];
+
+      const result = scenario.evaluate(data);
+
+      expect(result).toBe(true);
+      expect(scenario.getReason()).toContain('PWH');
     });
   });
 
-  describe('negative cases - liquidity sweep', () => {
-    it('should reject when no HTF liquidity pool swept', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasLiquiditySweep: false }));
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toContain('sweep');
-    });
-  });
+  describe('negative cases - CHoCH validation', () => {
+    it('rejects when the CHoCH displacement is below 1.5 ATR', () => {
+      const result = scenario.evaluate(buildPatternData({ displacement: '1.0' }));
 
-  describe('negative cases - CHoCH', () => {
-    it('should reject when no CHoCH after sweep', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true, hasChochAfterSweep: false }));
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toContain('CHoCH');
-    });
-
-    it('should reject when CHoCH displacement < 1.5 ATR', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true, chochDisplacement: false }));
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('displacement < 1.5 ATR');
     });
   });
 
   describe('negative cases - FVG', () => {
-    it('should reject when no fresh FVG after CHoCH', () => {
-      const result = scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true, hasFreshFvg: false }));
+    it('rejects when no 15m FVG forms after the CHoCH', () => {
+      const result = scenario.evaluate(buildPatternData({ withFvg: false }));
+
       expect(result).toBe(false);
-      expect(scenario.getReason()).toContain('FVG');
+      expect(scenario.getReason()).toContain('No 15m FVG');
     });
   });
 
-  describe('getLevels() geometry checks', () => {
-    it('should return SL < Entry < TP for BULLISH (Long) setup', () => {
-      scenario.evaluate(createBullishPatternData({}));
-      
+  describe('inverted FVG geometry', () => {
+    it('keeps SL below entry for a Long even when top < bottom', () => {
+      const data = buildPatternData({ direction: 'BULLISH' });
+      data.zones = [
+        {
+          type: 'FVG',
+          direction: 'BULLISH',
+          top: new Decimal(95),
+          bottom: new Decimal(97), // inverted
+          timestamp: BASE_TS + FVG_INDEX * LTF_MS,
+          mitigated: false,
+          timeframe: '15',
+        },
+      ];
+
+      expect(scenario.evaluate(data)).toBe(true);
+
       const levels = scenario.getLevels();
-      const entry = new Decimal(levels.entry);
-      const sl = new Decimal(levels.stopLoss);
-      const tp = new Decimal(levels.takeProfit);
-      
-      // BULLISH: SL < Entry < TP
-      expect(sl.lt(entry)).toBe(true);
-      expect(tp.gt(entry)).toBe(true);
+      expect(levels.stopLoss.lt(levels.entry)).toBe(true);
     });
 
-    it('should return SL > Entry > TP for BEARISH (Short) setup', () => {
-      scenario.evaluate(createMockPatternData({ hasLiquiditySweep: true }));
-      
+    it('keeps SL above entry for a Short even when top < bottom', () => {
+      const data = buildPatternData({ direction: 'BEARISH' });
+      data.zones = [
+        {
+          type: 'FVG',
+          direction: 'BEARISH',
+          top: new Decimal(101),
+          bottom: new Decimal(103), // inverted
+          timestamp: BASE_TS + FVG_INDEX * LTF_MS,
+          mitigated: false,
+          timeframe: '15',
+        },
+      ];
+
+      expect(scenario.evaluate(data)).toBe(true);
+
       const levels = scenario.getLevels();
-      const entry = new Decimal(levels.entry);
-      const sl = new Decimal(levels.stopLoss);
-      const tp = new Decimal(levels.takeProfit);
-      
-      // BEARISH: SL > Entry > TP
-      expect(sl.gt(entry)).toBe(true);
-      expect(tp.lt(entry)).toBe(true);
+      expect(levels.stopLoss.gt(levels.entry)).toBe(true);
+    });
+  });
+
+  describe('take-profit resolution', () => {
+    it('keeps the fixed 3R target when dynamic TP is disabled', () => {
+      expect(scenario.evaluate(buildPatternData())).toBe(true);
+
+      const levels = scenario.getLevels();
+      // entry 102, SL 103.25 → R = 1.25 → 3R = 98.25
+      expect(levels.entry.toString()).toBe('102');
+      expect(levels.stopLoss.toString()).toBe('103.25');
+      expect(levels.takeProfit.toString()).toBe('98.25');
     });
 
-    it('should handle inverted FVG zone (top < bottom) correctly for Long', () => {
-      // Create inverted zone: top < bottom (swapped coordinates)
-      const invertedFvgPatternData = {
-        currentKillzone: 'LONDON',
-        currentSession: 'LONDON',
-        candles15m: [{
-          timestamp: Date.now(), close: '96', high: '98', low: '94', open: '100', volume: '1000',
-        }],
-        structures: [{
-          type: 'CHOCH', direction: 'BULLISH', price: new Decimal(97),
-          timestamp: Date.now() - 2 * 60 * 60 * 1000,
-          isValidated: true, impulseFactor: new Decimal(2.0),
-        }],
-        zones: [{
-          type: 'FVG', direction: 'BULLISH', 
-          top: new Decimal(95), bottom: new Decimal(97), // INVERTED: top < bottom
-          timestamp: Date.now(), mitigated: false, timeframe: '15',
-        }],
-        liquidityPools: [{
-          type: 'PDL', priceLevel: new Decimal(95),
-          points: [], isTaken: false, timestamp: Date.now() - 1000,
-        }],
-        atr15m: new Decimal('0.5'),
-      };
-      
-      const result = scenario.evaluate(invertedFvgPatternData);
-      
-      expect(result).toBe(true);
-      const levels = scenario.getLevels();
-      const entry = new Decimal(levels.entry);
-      const sl = new Decimal(levels.stopLoss);
-      
-      // Even with inverted zone, SL must be < Entry for BULLISH
-      expect(sl.lt(entry)).toBe(true);
+    it('snaps to the nearest structural pool when dynamic TP is enabled', () => {
+      const dynamic = new Scenario5_HTFLiquiditySweep({ ...mockConfig, enableDynamicTp: true });
+      const data = buildPatternData({ extraPools: [{ type: 'EQL', price: '100' }] });
+
+      expect(dynamic.evaluate(data)).toBe(true);
+      // 100 is 2.0 / 1.25 = 1.6R away — above the 1.5R floor.
+      expect(dynamic.getLevels().takeProfit.toString()).toBe('100');
     });
 
-    it('should handle inverted FVG zone (top < bottom) correctly for Short', () => {
-      // Create inverted zone for BEARISH: top < bottom
-      const invertedFvgPatternData = {
-        currentKillzone: 'LONDON',
-        currentSession: 'LONDON',
-        candles15m: [{
-          timestamp: Date.now(), close: '104', high: '106', low: '103', open: '100', volume: '1000',
-        }],
-        structures: [{
-          type: 'CHOCH', direction: 'BEARISH', price: new Decimal(103),
-          timestamp: Date.now() - 2 * 60 * 60 * 1000,
-          isValidated: true, impulseFactor: new Decimal(2.0),
-        }],
-        zones: [{
-          type: 'FVG', direction: 'BEARISH', 
-          top: new Decimal(101), bottom: new Decimal(103), // INVERTED: top < bottom
-          timestamp: Date.now(), mitigated: false, timeframe: '15',
-        }],
-        liquidityPools: [{
-          type: 'PDH', priceLevel: new Decimal(105),
-          points: [], isTaken: false, timestamp: Date.now() - 1000,
-        }],
-        atr15m: new Decimal('0.5'),
-      };
-      
-      const result = scenario.evaluate(invertedFvgPatternData);
-      
-      expect(result).toBe(true);
-      const levels = scenario.getLevels();
-      const entry = new Decimal(levels.entry);
-      const sl = new Decimal(levels.stopLoss);
-      
-      // Even with inverted zone, SL must be > Entry for BEARISH
-      expect(sl.gt(entry)).toBe(true);
+    it('rejects when the nearest pool leaves less than minRr of room', () => {
+      const dynamic = new Scenario5_HTFLiquiditySweep({ ...mockConfig, enableDynamicTp: true });
+      // 101 is 1.0 / 1.25 = 0.8R away — the wall filter must reject, not clamp.
+      const data = buildPatternData({ extraPools: [{ type: 'EQL', price: '101' }] });
+
+      expect(dynamic.evaluate(data)).toBe(false);
+      expect(dynamic.getReason()).toContain('Take-profit rejected');
+      expect(Scenario5_HTFLiquiditySweep.getRejectionStats().tpInvalid).toBe(1);
+    });
+
+    it('clamps an over-extended structural target to DYNAMIC_TP_MAX_RR', () => {
+      const dynamic = new Scenario5_HTFLiquiditySweep({ ...mockConfig, enableDynamicTp: true });
+      // 80 is 22 / 1.25 = 17.6R away → clamped to 6R = 102 - 7.5 = 94.5
+      const data = buildPatternData({ extraPools: [{ type: 'EQL', price: '80' }] });
+
+      expect(dynamic.evaluate(data)).toBe(true);
+      expect(dynamic.getLevels().takeProfit.toString()).toBe('94.5');
     });
   });
 });

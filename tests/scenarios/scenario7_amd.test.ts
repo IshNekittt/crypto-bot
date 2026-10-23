@@ -33,8 +33,16 @@ const mockConfig: BotConfig = {
   smcSlAtrOffset: '0.5',
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
+  sniperLimitExpirationCandles: 15,
+  smcSweepMinWickRatio: new Decimal('0.25'),
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
@@ -112,6 +120,7 @@ describe('Scenario7: AMD (Accumulation-Manipulation-Distribution)', () => {
       direction: 'BULLISH' as const,
       price: new Decimal(100),
       timestamp: chochTime,
+      timeframe: '15',
       isValidated: true,
       impulseFactor: new Decimal(2.0), // > 1.5
     };
@@ -157,7 +166,22 @@ describe('Scenario7: AMD (Accumulation-Manipulation-Distribution)', () => {
       expect(scenario.getReason()).toContain('AMD');
       expect(scenario.getLevels().entry).toBeDefined();
       expect(scenario.getLevels().takeProfit).toBeDefined();
-      expect(parseFloat(scenario.getLevels().takeProfit.toString())).toBe(105); // Asian High
+      // TP is clamped to the nearer of the 3R target (104.25) and Asian High (105).
+      // A long must never aim beyond the structural distribution target.
+      expect(parseFloat(scenario.getLevels().takeProfit.toString())).toBe(104.25);
+    });
+
+    it('should clamp TP to Asian High when it is the nearer target', () => {
+      const data = createIdealAmdPatternData();
+      // Asian High (103.5) is now closer than the 3R target (104.25)
+      data.sessionRanges[0].high = new Decimal(103.5);
+
+      const result = scenario.evaluate(data);
+
+      expect(result).toBe(true);
+      expect(parseFloat(scenario.getLevels().takeProfit.toString())).toBe(103.5);
+      // Geometry intact: TP still above entry
+      expect(scenario.getLevels().takeProfit.gt(scenario.getLevels().entry)).toBe(true);
     });
   });
 
@@ -216,12 +240,34 @@ describe('Scenario7: AMD (Accumulation-Manipulation-Distribution)', () => {
       expect(scenario.getReason()).toContain('CHoCH');
     });
 
+    it('should anchor on the NEWEST sweep (stale older sweep must not qualify)', () => {
+      const data = createIdealAmdPatternData();
+      // CHoCH confirms the ORIGINAL (older) sweep only…
+      data.structures[0].timestamp = data.candles15m[4].timestamp;
+      // …then a fresher sweep prints on the last candle with no CHoCH after it.
+      data.candles15m[6].low = '97.5';
+      data.candles15m[6].close = '99.2';
+
+      const result = scenario.evaluate(data);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('CHoCH');
+    });
+
     it('should reject when CHoCH displacement < 1.5 ATR', () => {
       const data = createIdealAmdPatternData();
       data.structures[0].impulseFactor = new Decimal(1.0); // < 1.5
       const result = scenario.evaluate(data);
       expect(result).toBe(false);
       expect(scenario.getReason()).toBe('CHoCH after Asian Low sweep displacement < 1.5 ATR');
+    });
+
+    it('should ignore a 4H CHoCH (strict 15m anchor)', () => {
+      const data = createIdealAmdPatternData();
+      data.structures[0].timeframe = '240';
+
+      const result = scenario.evaluate(data);
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('CHoCH');
     });
   });
 

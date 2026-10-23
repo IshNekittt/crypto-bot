@@ -52,6 +52,13 @@ export interface Structure {
   readonly isValidated: boolean;
   readonly direction: Direction;
   readonly impulseFactor?: Decimal;
+  /**
+   * Origin timeframe of the structure ('15' for LTF, '240' for HTF).
+   * Tagged when structures are merged in `buildPatternData`; detection itself
+   * is timeframe-agnostic. Scenarios MUST tag/filter on this to distinguish
+   * 15m structure from 4H structure — without it every HTF filter is dead code.
+   */
+  readonly timeframe?: string;
 }
 
 export interface MacroContext {
@@ -1114,9 +1121,18 @@ export class PatternRecognizer {
     const swingPoints15m = this.findSwingPoints(ltfCandles);
     const swingPoints4h = this.findSwingPoints(htfCandles);
 
-    // Detect structures
-    const structures15m = this.detectStructureBreaks(ltfCandles, atr15m);
-    const structures4h = this.detectStructureBreaks(htfCandles, atr4h);
+    // Detect structures.
+    // Tag each structure with its origin timeframe BEFORE merging: detection is
+    // timeframe-agnostic, and scenarios filter on `timeframe` to distinguish
+    // 15m structure from 4H structure (Scenarios 2 & 4 HTF trend filters).
+    const structures15m = this.detectStructureBreaks(ltfCandles, atr15m).map(s => ({
+      ...s,
+      timeframe: '15',
+    }));
+    const structures4h = this.detectStructureBreaks(htfCandles, atr4h).map(s => ({
+      ...s,
+      timeframe: '240',
+    }));
 
     // Detect Trading Range on 15m with Bollinger Bands squeeze filter
     const tradingRange = this.detectTradingRange(
@@ -1202,6 +1218,22 @@ export class PatternRecognizer {
     const ms = Date.now() - startMs;
     logger.debug(`[${symbol}] PatternData built in ${ms}ms`);
 
+    // Merge 15m + 4H structures/zones and enforce a strict chronological order
+    // (oldest → newest). Scenarios assume ascending timestamps when they pick the
+    // freshest match via `arr[arr.length - 1]` or `[...arr].reverse().find(...)`.
+    // Naive concatenation ([...15m, ...4H]) breaks that assumption whenever a 4H
+    // structure is older than the newest 15m structure.
+    const combinedStructures: Structure[] = [...structures15m, ...structures4h].sort(
+      (a, b) => a.timestamp - b.timestamp
+    );
+
+    const combinedZones: Zone[] = [
+      ...this.detectFVGs(ltfCandles).map(f => ({ ...f, timeframe: '15' as Timeframe })),
+      ...this.detectFVGs(htfCandles).map(f => ({ ...f, timeframe: '240' as Timeframe })),
+      ...this.detectOrderBlocks(ltfCandles, structures15m).map(o => ({ ...o, timeframe: '15' as Timeframe })),
+      ...this.detectOrderBlocks(htfCandles, structures4h).map(o => ({ ...o, timeframe: '240' as Timeframe })),
+    ].sort((a, b) => a.timestamp - b.timestamp);
+
     return {
       candles15m: ltfCandles,
       candles4h: htfCandles,
@@ -1211,13 +1243,8 @@ export class PatternRecognizer {
       sessionRanges,
       tradingRange,
       liquidityPools: allLiquidityPools,
-      structures: [...structures15m, ...structures4h],
-      zones: [
-        ...this.detectFVGs(ltfCandles).map(f => ({ ...f, timeframe: '15' as Timeframe })),
-        ...this.detectFVGs(htfCandles).map(f => ({ ...f, timeframe: '240' as Timeframe })),
-        ...this.detectOrderBlocks(ltfCandles, structures15m).map(o => ({ ...o, timeframe: '15' as Timeframe })),
-        ...this.detectOrderBlocks(htfCandles, structures4h).map(o => ({ ...o, timeframe: '240' as Timeframe })),
-      ],
+      structures: combinedStructures,
+      zones: combinedZones,
       swingPoints: [...swingPoints15m, ...swingPoints4h],
       atr15m,
       atr4h,

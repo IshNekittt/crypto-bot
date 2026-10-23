@@ -136,7 +136,7 @@ export class Scenario10_BreakerBlock extends BaseScenario {
     }
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     Scenario10_BreakerBlock.rejectionStats.totalEvals++;
 
     // Breaker Block can work in any killzone, but prefer active sessions
@@ -156,6 +156,7 @@ export class Scenario10_BreakerBlock extends BaseScenario {
     // BOS is more reliable for Breaker Blocks than CHoCH
     const breaksThroughOb = structures.filter((s: any) => {
       if (s.type !== 'BOS') return false; // Only BOS, not CHoCH
+      if (s.timeframe !== '15') return false; // 15m BOS only — a 4H break cannot validate a 15m breaker
       const brokenObs = zones.filter((z: any) => 
         z.type === 'OB' && 
         z.direction === (s.direction === 'BULLISH' ? 'BEARISH' : 'BULLISH') && // opposite direction OB
@@ -175,9 +176,12 @@ export class Scenario10_BreakerBlock extends BaseScenario {
     const breakEvent = breaksThroughOb[breaksThroughOb.length - 1];
     const brokenObDirection = breakEvent.direction === 'BULLISH' ? 'BEARISH' : 'BULLISH';
     
-    // Find the OB that was broken
+    // Find the OB that was broken. Causality is mandatory: the OB must have
+    // existed BEFORE the break — an OB formed after the BOS cannot be the block
+    // that the BOS broke through.
     const brokenOb = [...zones].reverse().find((z: any) => 
-      z.type === 'OB' && 
+      z.type === 'OB' &&
+      z.timestamp < breakEvent.timestamp &&
       z.direction === brokenObDirection &&
       (breakEvent.direction === 'BULLISH'
         ? breakEvent.price.gt(z.top) // bullish break: broke above bearish OB top

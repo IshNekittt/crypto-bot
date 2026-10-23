@@ -588,8 +588,11 @@ export class TelegramNotifier {
     if (reason === 'CANCELLED') {
       const text = `🗑️ <b>Limit Order Cancelled</b>\n\n📊 ${symbol}\n⏳ Reason: Expired / Timeout`;
       try {
-        await this.sendMessage(text);
-        logger.info(`[${symbol}] Sent Telegram notification for Cancelled Limit Order.`);
+        const sent = await this.sendMessage(text);
+        // Only claim delivery when Telegram actually accepted the message.
+        if (sent) {
+          logger.info(`[${symbol}] Sent Telegram notification for Cancelled Limit Order.`);
+        }
       } catch (e) {
         logger.error(`[${symbol}] Failed to send CANCELLED notification: ${e instanceof Error ? e.message : String(e)}`);
       }

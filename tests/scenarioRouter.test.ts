@@ -1,6 +1,7 @@
 import { ScenarioRouter } from '../src/engine/scenarioRouter';
 import { IScenario } from '../src/types';
 import { BotConfig } from '../src/config/env';
+import { Decimal } from 'decimal.js';
 
 const mockConfig: BotConfig = {
   apiKey: '',
@@ -33,8 +34,16 @@ const mockConfig: BotConfig = {
   smcSlAtrOffset: '0.5',
   smcDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6,
+  sniperLimitExpirationCandles: 15,
+  smcSweepMinWickRatio: new Decimal('0.25'),
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal(3),
+    dynamicTpMinRr: new Decimal('1.5'),
+    dynamicTpMaxRr: new Decimal(6),
+    dynamicTpRequireTarget: false,
+    minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,
@@ -107,6 +116,19 @@ describe('ScenarioRouter', () => {
         'FVG Fill',
         'Mitigation Chain',
       ]);
+    });
+
+    it('does not register the archived Scenario 13', () => {
+      const archivedRouter = new ScenarioRouter({
+        symbol: 'SOLUSDT',
+        patternRecognizer: mockPatternRecognizer,
+        notifier: mockNotifier,
+        activeScenarios: [13],
+        config: { ...mockConfig, activeScenarios: [13] },
+      });
+
+      // Scenario 13 was archived: the router simply has nothing to evaluate.
+      expect((archivedRouter as any).scenarios).toHaveLength(0);
     });
   });
 

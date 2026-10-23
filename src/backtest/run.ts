@@ -2,12 +2,13 @@ import "dotenv/config";
 import { BybitClient } from "../api/bybitClient";
 import { PatternRecognizer } from "../smc/patternRecognizer";
 import { ScenarioRouter } from "../engine/scenarioRouter";
-import { loadConfig } from "../config/env";
+import type { RouterResult } from "../engine/scenarioRouter";
+import { loadConfig, resolveLimitExpirationCandles } from "../config/env";
 import { logger } from "../utils/logger";
 import { Candle, Timeframe } from "../types";
 import { InstrumentInfo } from "./executionSimulator";
-import { MitigatedStructure } from "../types";
 import { Decimal } from "decimal.js";
+import { formatPrice } from "../utils/precision";
 import { loadCachedOrFetch, getTimeRangeForDays } from "./historyLoader";
 import {
   openTrade,
@@ -15,7 +16,26 @@ import {
   getInitialState,
   TradeResult,
 } from "./executionSimulator";
-import { printReport, writeBacktestArtifacts } from "./reporter";
+import type { BacktestState } from "./executionSimulator";
+import { printReport, writeBacktestArtifacts, resetScenarioRejectionStats } from "./reporter";
+
+/**
+ * Live `CandleFeed` capacities — the backtester MUST feed `buildPatternData()`
+ * the identical lookback window, otherwise scenarios 1/5/9 see different 4H
+ * structures than the deployed engine.
+ *
+ *  - LTF / HTF: `historyCandles` closed candles (StrategyEngine constructor).
+ *  - Sniper 1m feed: hardcoded to 300 candles (5 hours) in StrategyEngine.
+ */
+const SNIPER_1M_WINDOW = 300;
+
+/**
+ * Minimum candles per timeframe before evaluation — mirrors the guard in
+ * `StrategyEngine.process()` (`candlesLtf.length < 20 || candlesHtf.length < 20`).
+ * Live scans as soon as 20 candles exist; a larger backtest-only gate would
+ * suppress setups the live engine would have taken.
+ */
+const MIN_PATTERN_CANDLES = 20;
 
 function parseArgs(config: any): string[] {
   const args = process.argv.slice(2);
@@ -42,15 +62,6 @@ function cleanupMemory(
     router.patternRecognizer = null;
   }
   if (global.gc) global.gc();
-}
-
-interface MitigatedZone {
-  type: "OB" | "FVG" | "BREAKER" | "MITIGATION";
-  top: string;
-  bottom: string;
-  timeframe: string;
-  direction: string;
-  timestamp: number;
 }
 
 function calculateDailyLevels(
@@ -97,6 +108,51 @@ function calculateWeeklyLevels(
   return { pwh, pwl, woPrice };
 }
 
+/**
+ * Burn a rejected setup exactly like live `StrategyEngine.burnSetup()`:
+ * the trigger zone and structure are added to the mitigation lists so the
+ * router cannot re-detect the same dead setup on the next candle.
+ *
+ * Macro liquidity pools (PDH/PDL/PWH/PWL) are never carried in `zoneDetails`
+ * by design — Scenario 12 emits only `structureDetails` (Invariant 21).
+ */
+function burnBacktestSetup(
+  state: BacktestState,
+  routerResult: RouterResult,
+  side: "Buy" | "Sell",
+): void {
+  const zone = routerResult.zoneDetails;
+  if (zone) {
+    state.mitigatedZones.push({
+      type: zone.type,
+      top: zone.top.toString(),
+      bottom: zone.bottom.toString(),
+      timeframe: zone.timeframe,
+      direction: zone.direction,
+      timestamp: zone.timestamp,
+    });
+    if (state.mitigatedZones.length > 100) {
+      state.mitigatedZones = state.mitigatedZones.slice(-100);
+    }
+  }
+
+  const structure = routerResult.structureDetails;
+  if (structure && structure.timestamp > 0) {
+    state.mitigatedStructures.push({
+      type: structure.type ?? "CHoCH",
+      timestamp: structure.timestamp,
+      price: structure.price
+        ? structure.price.toString()
+        : String(routerResult.levels?.entry ?? "0"),
+      direction:
+        structure.direction ?? (side === "Buy" ? "BULLISH" : "BEARISH"),
+    });
+    if (state.mitigatedStructures.length > 100) {
+      state.mitigatedStructures = state.mitigatedStructures.slice(-100);
+    }
+  }
+}
+
 async function runBacktestForSymbol(
   symbol: string,
   instrument: InstrumentInfo,
@@ -108,11 +164,17 @@ async function runBacktestForSymbol(
   config: ReturnType<typeof loadConfig> & {
     enableSniperMode?: boolean;
   },
+  /**
+   * Number of warmup LTF candles prepended before the simulated/report period.
+   * They are pattern CONTEXT only (live boots with a fully preloaded
+   * CandleFeed) — the loop starts at this index so warmup candles are never
+   * traded and the report period still matches `BACKTEST_DAYS`.
+   */
+  ltfWarmupCount: number = 0,
 ): Promise<{ trades: TradeResult[]; maxDrawdown: Decimal }> {
   const state = getInitialState();
   const results: TradeResult[] = [];
-  const mitigatedZones: MitigatedZone[] = [];
-  let mitigatedStructures: MitigatedStructure[] = [];
+  let preflightSkipped = 0;
 
   const htfMap = new Map<number, Candle>();
   for (const c of candlesHtf) {
@@ -154,14 +216,30 @@ async function runBacktestForSymbol(
   const useSniperMode =
     config.enableSniperMode === true && candles1m.length > 0;
 
+  // === PATTERN WINDOW PARITY (live CandleFeed capacities) ===
+  // Live feeds buildPatternData() the last `historyCandles` CLOSED candles for
+  // BOTH LTF and HTF — `CandleFeed.getCandles()` never exposes the forming
+  // candle. The backtester MUST use the identical window, otherwise scenarios
+  // 1/5/9 evaluate different 4H structures than the deployed engine.
+  const historyWindow = config.historyCandles ?? 200;
+  const ltfMs = ltfMinutes * 60 * 1000;
+  const htfMs = Number(config.htfTimeframe) * 60 * 1000;
+
   let index15m = 0;
   const mainCandles = useSniperMode ? candles1m : candlesLtf;
 
+  // Warmup candles exist only as pattern context: the simulated/report period
+  // starts at the first candle of the requested range. Sniper mode drives the
+  // loop with the 1m series, which is loaded without warmup.
+  const loopStart = useSniperMode
+    ? 0
+    : Math.max(0, Math.min(ltfWarmupCount, mainCandles.length));
+
   logger.warn(
-    `[${symbol}] Starting backtest loop over ${mainCandles.length} candles (Sniper Mode: ${useSniperMode ? "ON (1m)" : "OFF (15m)"})...`,
+    `[${symbol}] Starting backtest loop over ${mainCandles.length - loopStart} candles (Sniper Mode: ${useSniperMode ? "ON (1m)" : "OFF (15m)"})...`,
   );
 
-  for (let i = 0; i < mainCandles.length; i++) {
+  for (let i = loopStart; i < mainCandles.length; i++) {
     if (i % (useSniperMode ? 10000 : 1000) === 0) {
       logger.warn(
         `[${symbol}] Processing candle ${i}/${mainCandles.length} (${((i / mainCandles.length) * 100).toFixed(1)}%)`,
@@ -285,28 +363,25 @@ async function runBacktestForSymbol(
         (state.openTrade && state.openTrade.entryTime !== candleTime) ||
         state.pendingLimitOrder
       ) {
-        const {
-          state: stateAfterCheck,
-          tradeResult,
-          mitigatedZone,
-        } = checkAndCloseTrade(
+        const { state: stateAfterCheck, tradeResult } = checkAndCloseTrade(
           state,
           currentCandle,
           {
             cooldownCandles: config.cooldownCandles,
             ltfTimeframe: config.ltfTimeframe,
-            limitExpirationCandles: config.limitExpirationCandles || 6,
+            // Effective lifetime in EXECUTION candles: Sniper counts 1m candles,
+            // Classic counts LTF candles. Resolved centrally so live and backtest agree.
+            limitExpirationCandles: resolveLimitExpirationCandles(config),
+            enableSniperMode: config.enableSniperMode,
           },
           instrument,
           symbol,
         );
 
         Object.assign(state, stateAfterCheck);
-        mitigatedStructures = state.mitigatedStructures;
 
         if (tradeResult) {
           results.push(tradeResult);
-          if (mitigatedZone) mitigatedZones.push(mitigatedZone);
         }
       }
       if (state.openTrade || state.pendingLimitOrder) continue;
@@ -317,21 +392,50 @@ async function runBacktestForSymbol(
     // В обычном режиме: только на закрытии 15m свечи
     const shouldEvaluateRouter = useSniperMode ? true : isNew15mClose;
 
+    // Evaluation timestamp: live passes the timestamp of the candle that just
+    // closed — the 1m candle in Sniper Mode, the 15m candle in Classic mode
+    // (StrategyEngine.process). Session and killzone are derived from it, so a
+    // 15m anchor would mis-gate the first 15 minutes of every hour in Sniper Mode.
+    const evalTimestamp = useSniperMode
+      ? candleTime
+      : lastClosed15m?.timestamp ?? candleTime;
+
     // Пересчитываем 15m/4H окна и PatternData ТОЛЬКО при новой 15m свече
     if (isNew15mClose && lastClosed15m) {
+      // Evaluation instant = the moment the trigger candle closed (live evaluates
+      // on confirmed klines, milliseconds after that instant).
+      const evalCloseTimeMs = useSniperMode
+        ? candleTime + 60 * 1000
+        : candleTime + ltfMs;
+
+      // HTF window: only 4H candles fully CLOSED by the evaluation instant. The
+      // old `ts <= lastClosed15m.timestamp` filter leaked the still-forming 4H
+      // candle — up to 4 hours of future price action (lookahead).
       const validHtfTimestamps = htfTimestamps.filter(
-        (ts) => ts <= lastClosed15m!.timestamp,
+        (ts) => ts + htfMs <= evalCloseTimeMs,
       );
       currentHtfCandles = validHtfTimestamps
         .map((ts) => htfMap.get(ts)!)
         .filter(Boolean);
 
-      if (currentHtfCandles.length >= 50) {
-        const ltfStart = Math.max(0, index15m - 200 + 1);
-        currentLtfCandles = candlesLtf.slice(ltfStart, index15m + 1);
+      // LTF window: drop the 15m candle still forming at the evaluation instant.
+      // Classic mode keeps the current candle (it has just closed:
+      // `timestamp + ltfMs === evalCloseTimeMs`); Sniper mode drops the candle
+      // containing the current 1m tick. Guard also handles data gaps correctly.
+      let ltfEndExclusive = index15m + 1;
+      const lastLtf = candlesLtf[ltfEndExclusive - 1];
+      if (lastLtf && lastLtf.timestamp + ltfMs > evalCloseTimeMs) {
+        ltfEndExclusive -= 1;
+      }
+      const ltfStart = Math.max(0, ltfEndExclusive - historyWindow);
+      currentLtfCandles = candlesLtf.slice(ltfStart, ltfEndExclusive);
 
+      if (
+        currentLtfCandles.length >= MIN_PATTERN_CANDLES &&
+        currentHtfCandles.length >= MIN_PATTERN_CANDLES
+      ) {
         const htfEndIdx = currentHtfCandles.length - 1;
-        const htfStartIdx = Math.max(0, htfEndIdx - 50 + 1);
+        const htfStartIdx = Math.max(0, htfEndIdx - historyWindow + 1);
         const currentHtfWindow = currentHtfCandles.slice(
           htfStartIdx,
           htfEndIdx + 1,
@@ -340,8 +444,8 @@ async function runBacktestForSymbol(
         // Условие пересчета паттернов: только на новой 15m свече или при изменении митигированных зон/структур
         const shouldRebuildCache =
           cachedPatternData === null ||
-          mitigatedZones.length !== lastCachedMitigatedZonesLength ||
-          mitigatedStructures.length !== lastCachedMitigatedStructuresLength ||
+          state.mitigatedZones.length !== lastCachedMitigatedZonesLength ||
+          state.mitigatedStructures.length !== lastCachedMitigatedStructuresLength ||
           isNew15mClose; // Пересчитываем ТОЛЬКО на закрытии 15m или при сделке
 
         if (shouldRebuildCache) {
@@ -349,36 +453,49 @@ async function runBacktestForSymbol(
             symbol,
             currentLtfCandles,
             currentHtfWindow,
-            lastClosed15m.timestamp,
+            evalTimestamp,
           );
-          lastCachedMitigatedZonesLength = mitigatedZones.length;
+          lastCachedMitigatedZonesLength = state.mitigatedZones.length;
           lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
         }
       }
     }
 
     // Вызываем Router на каждой итерации (1m свече в Sniper Mode, или 15m в обычном)
-    if (shouldEvaluateRouter && lastClosed15m && currentHtfCandles.length >= 50) {
+    // Gate mirrors the live StrategyEngine.process() guard (>= 20 candles per side).
+    if (
+      shouldEvaluateRouter &&
+      lastClosed15m &&
+      // Live parity: StrategyEngine.process() returns early while the post-SL
+      // cooldown is active, so no scenario is evaluated. Without this the
+      // backtester re-fires the same setup every minute for the whole cooldown
+      // window (observed: 5 phantom SOL triggers after one stop-out), inflating
+      // the trigger funnel with signals that can never become trades.
+      !(state.cooldownUntil > 0 && state.cooldownUntil > candleTime) &&
+      currentLtfCandles.length >= MIN_PATTERN_CANDLES &&
+      currentHtfCandles.length >= MIN_PATTERN_CANDLES
+    ) {
       // Подготовка 1m свечей для Снайперских сценариев
       let candles1mForRouter: Candle[] = [];
       if (useSniperMode) {
-        // Берем последние 200 1m свечей до текущего времени
+        // Live feed1m capacity is 300 candles (5h) — StrategyEngine constructor.
+        // Only candles already closed (timestamp <= candleTime) are visible.
         const endIdx = candles1m.findIndex(c => c.timestamp > candleTime);
         const sliceEnd = endIdx > 0 ? endIdx : candles1m.length;
-        const sliceStart = Math.max(0, sliceEnd - 200);
+        const sliceStart = Math.max(0, sliceEnd - SNIPER_1M_WINDOW);
         candles1mForRouter = candles1m.slice(sliceStart, sliceEnd);
       }
 
       cachedRouterResult = await router.evaluate(
         currentLtfCandles,
         currentHtfCandles,
-        lastClosed15m.timestamp,
-        mitigatedZones,
+        evalTimestamp,
+        state.mitigatedZones,
         state.mitigatedStructures,
         candles1mForRouter,
         cachedPatternData,
       );
-      lastCachedMitigatedZonesLength = mitigatedZones.length;
+      lastCachedMitigatedZonesLength = state.mitigatedZones.length;
       lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
 
       const routerResult = cachedRouterResult;
@@ -390,18 +507,87 @@ async function runBacktestForSymbol(
             (routerResult.zoneDetails || routerResult.structureDetails)
           ) {
             const levels = routerResult.levels;
-            const entryDecimal = new Decimal(levels.entry);
+            const idealEntry = new Decimal(levels.entry);
             const slDecimal = new Decimal(levels.stopLoss);
             const tpDecimal = new Decimal(levels.takeProfit);
-            const side = entryDecimal.gt(slDecimal) ? "Buy" : "Sell";
+            // STRICT MATHEMATICAL SIDE (Invariant 16.10): math never lies.
+            // Text labels (zoneDetails/structureDetails.direction) are never used.
+            const side = idealEntry.gt(slDecimal) ? "Buy" : "Sell";
+            const isLong = side === "Buy";
 
-            // В Sniper Mode текущая свеча - это 1m, иначе 15m
+            // The candle whose close is used as the Market fill:
+            // Sniper -> current 1m candle, Classic -> current (closed) 15m candle.
             const entryCandle = useSniperMode ? currentCandle : lastClosed15m;
+            const currentPrice = new Decimal(entryCandle.close);
 
-            const { state: newState, tradeOpened } = openTrade(
+            // === PRE-FLIGHT GUARDS (live parity: executeStagedEntry / handleTradeApproval) ===
+            // The setup is evaluated at the candle close and a Market order fills at
+            // that same price. If price has already crossed the SL (or reached the
+            // TP), the setup is dead: live burns it and never sends the order.
+            // Without this guard a Market fill can produce invalid SL geometry
+            // (e.g. Sell with SL below entry) and the simulator assertion throws on
+            // every subsequent candle.
+            const preflightBuffer = currentPrice.mul(
+              new Decimal(config.preflightBufferPct || "0.0005"),
+            );
+            const slBreached = isLong
+              ? currentPrice.lte(slDecimal.plus(preflightBuffer))
+              : currentPrice.gte(slDecimal.minus(preflightBuffer));
+
+            if (slBreached) {
+              logger.debug(
+                `[${symbol}] Pre-flight DEAD SETUP at ${new Date(currentCandle.timestamp).toISOString()}: price ${currentPrice} breached SL ${slDecimal}. Burning and skipping.`,
+              );
+              preflightSkipped++;
+              burnBacktestSetup(state, routerResult, side);
+              continue;
+            }
+
+            const tpReached = isLong
+              ? currentPrice.gte(tpDecimal)
+              : currentPrice.lte(tpDecimal);
+
+            if (tpReached) {
+              logger.debug(
+                `[${symbol}] Pre-flight DEAD SETUP at ${new Date(currentCandle.timestamp).toISOString()}: price ${currentPrice} already reached TP ${tpDecimal}. Burning and skipping.`,
+              );
+              preflightSkipped++;
+              burnBacktestSetup(state, routerResult, side);
+              continue;
+            }
+
+            // Hybrid Smart Entry — parity with StrategyEngine.executeStagedEntry():
+            // the Market/Limit decision is made at the live tick (here: the signal
+            // candle close). A discount (price better than idealEntry) always forces
+            // Market, otherwise the 0.15% threshold decides.
+            const isDiscount = isLong
+              ? currentPrice.lte(idealEntry)
+              : currentPrice.gte(idealEntry);
+            const threshold = new Decimal(
+              config.smartEntryThresholdPct || "0.0015",
+            );
+            const priceDiffPct = idealEntry
+              .minus(currentPrice)
+              .div(idealEntry)
+              .abs();
+            const useMarket = isDiscount || priceDiffPct.lte(threshold);
+
+            const orderType: "Market" | "Limit" = useMarket
+              ? "Market"
+              : "Limit";
+            const limitPrice = useMarket
+              ? undefined
+              : new Decimal(
+                  formatPrice(idealEntry, new Decimal(instrument.tickSize)),
+                );
+            // Market fills at the current price (parity with exchange avgPrice);
+            // Limit waits for a pullback to the zone equilibrium.
+            const entryPriceDecimal = useMarket ? currentPrice : idealEntry;
+
+            const { state: newState } = openTrade(
               state,
               entryCandle,
-              entryDecimal,
+              entryPriceDecimal,
               slDecimal,
               tpDecimal,
               side,
@@ -410,13 +596,26 @@ async function runBacktestForSymbol(
               instrument,
               routerResult.zoneDetails ?? undefined,
               routerResult.structureDetails ?? undefined,
-              undefined,
-              undefined,
+              orderType,
+              limitPrice,
               symbol,
-              new Decimal(config.maxWorkingCapital || 0)
+              new Decimal(config.maxWorkingCapital || 0),
+              {
+                leverage: config.leverage,
+                riskPercent: config.riskPercent,
+                reducedRiskPercent: config.reducedRiskPercent,
+              },
             );
 
-            if (tradeOpened) Object.assign(state, newState);
+            logger.warn(
+              `[${symbol}] Scenario ${routerResult.scenario!.id} signal at ${new Date(entryCandle.timestamp).toISOString()} | ${orderType} entry=${entryPriceDecimal.toString()} live=${currentPrice.toString()} SL=${slDecimal.toString()} TP=${tpDecimal.toString()} | filled=${!!newState.openTrade}`,
+            );
+
+            // Commit the state even when tradeOpened === false: the Limit branch
+            // returns false (not filled yet) but still carries pendingLimitOrder
+            // and the burned mitigation anchors. The old `if (tradeOpened)` guard
+            // silently discarded every Limit setup.
+            Object.assign(state, newState);
           }
         } catch (err) {
           logger.error(`[${symbol}] Backtest ERROR at index ${i} | ${err}`);
@@ -424,8 +623,18 @@ async function runBacktestForSymbol(
       }
     }
 
+  if (preflightSkipped > 0) {
+    logger.warn(
+      `[${symbol}] Pre-flight skipped ${preflightSkipped} dead setup(s) (SL breach / TP reached).`,
+    );
+  }
+
+  logger.warn(
+    `[${symbol}] End state: closedTrades=${results.length} | openPosition=${state.openTrade ? state.openTrade.side : 'none'} | pendingLimit=${state.pendingLimitOrder ? state.pendingLimitOrder.limitPrice.toString() : 'none'}`,
+  );
+
   logger.info(
-    `[${symbol}] Backtest finished successfully. Processed ${mainCandles.length} candles, generated ${results.length} trades. Max Drawdown: ${state.maxDrawdown.toFixed(2)}%`,
+    `[${symbol}] Backtest finished successfully. Processed ${mainCandles.length - loopStart} candles, generated ${results.length} trades. Max Drawdown: ${state.maxDrawdown.toFixed(2)}%`,
   );
   cleanupMemory(candlesHtf, candles1m, router, null);
   return { trades: results, maxDrawdown: state.maxDrawdown };
@@ -472,12 +681,34 @@ async function main(): Promise<void> {
       const instrument = instruments.get(symbol);
       if (!instrument) continue;
 
-      const [candlesLtf, candlesHtf] = await Promise.all([
+      // Warmup preload: fetch extra LTF/HTF candles BEFORE the report window.
+      // Live boots with a fully preloaded CandleFeed (historyCandles closed
+      // candles per timeframe), so without the warmup the first ~200 HTF candles
+      // of a run would be evaluated against a truncated pattern window (≈ 33 days
+      // of a 60-day backtest). LTF warmup additionally guarantees a full 7-day
+      // history for weekly macro levels. Warmup candles are CONTEXT ONLY:
+      // `ltfWarmupCount` marks where the simulated/report period begins.
+      const historyWindow = config.historyCandles ?? 200;
+      const ltfMinutesConfig = Number(config.ltfTimeframe);
+
+      // Weekly macro context (PWH/PWL/WO) is derived from a full 7-day window of
+      // LTF candles (`calculateWeeklyLevels`). Preloading fewer than that leaves
+      // weekly levels at zero for the opening days of the run. The warmup must
+      // therefore cover at least one week; the extra candle absorbs a `fromMs`
+      // anchored mid-candle (`getTimeRangeForDays` uses `Date.now()`), so a full
+      // week always sits strictly before the first simulated candle. Warmup is
+      // closed history only — strictly causal, never future data.
+      const candlesPerWeek = Math.floor((1440 * 7) / ltfMinutesConfig);
+      const ltfWarmupCandles = Math.max(historyWindow, candlesPerWeek + 1);
+      const ltfWarmupMs = ltfWarmupCandles * ltfMinutesConfig * 60 * 1000;
+      const htfWarmupMs = historyWindow * Number(config.htfTimeframe) * 60 * 1000;
+
+      const [candlesLtfWithWarmup, candlesHtf] = await Promise.all([
         loadCachedOrFetch(
           client,
           symbol,
           config.ltfTimeframe as Timeframe,
-          fromMs,
+          fromMs - ltfWarmupMs,
           toMs,
           config.useLocalCacheOnly
         ),
@@ -485,11 +716,31 @@ async function main(): Promise<void> {
           client,
           symbol,
           config.htfTimeframe as Timeframe,
-          fromMs,
+          fromMs - htfWarmupMs,
           toMs,
           config.useLocalCacheOnly
         ),
       ]);
+
+      // The simulated/report period starts at `fromMs`; everything before is warmup.
+      const ltfWarmupCount = Math.max(
+        0,
+        candlesLtfWithWarmup.findIndex((c) => c.timestamp >= fromMs),
+      );
+      const candlesLtf = candlesLtfWithWarmup.slice(ltfWarmupCount);
+      if (ltfWarmupCount > 0) {
+        logger.info(
+          `[${symbol}] Pattern warmup preloaded: ${ltfWarmupCount} extra ${config.ltfTimeframe}m candles (weekly window ${candlesPerWeek} candles; HTF fetch extended by ${historyWindow} × ${config.htfTimeframe}m).`,
+        );
+      }
+      if (ltfWarmupCount > 0 && ltfWarmupCount < candlesPerWeek) {
+        // Only reachable with a truncated source (e.g. `USE_LOCAL_CACHE_ONLY=true`
+        // against a cache that does not reach back a full week). Never silent:
+        // weekly macro levels stay zero until enough context exists.
+        logger.warn(
+          `[${symbol}] LTF warmup covers only ${ltfWarmupCount}/${candlesPerWeek} candles — PWH/PWL/WO will remain zero until a full week of history is available. Extend the cache or run online.`,
+        );
+      }
 
       const candles1m: Candle[] = [];
       if (config.enableSniperMode) {
@@ -516,15 +767,20 @@ async function main(): Promise<void> {
         continue;
       }
 
+      // Rejection counters are static (class-level) and printReport() runs once per
+      // symbol. Reset here so this symbol's report reflects only this symbol's run.
+      resetScenarioRejectionStats();
+
       const result = await runBacktestForSymbol(
         symbol,
         instrument,
         recognizer,
-        candlesLtf,
+        candlesLtfWithWarmup,
         candlesHtf,
         candles1m,
         Number(config.ltfTimeframe),
         config,
+        ltfWarmupCount,
       );
 
       const trades = result.trades;

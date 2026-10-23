@@ -57,6 +57,7 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     const validChochs = structures.filter(
       (s: any) =>
         s.type === "CHOCH" &&
+        s.timeframe === "15" &&
         s.direction === expectedChochDirection &&
         s.timestamp > sms.timestamp &&
         s.timestamp <= sms.timestamp + 8 * 3600 * 1000,
@@ -87,6 +88,7 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     const mbObs = zones.filter(
       (z: any) =>
         z.type === "OB" &&
+        z.timeframe === "15" &&
         z.direction === (smsDirection === "BEARISH" ? "BULLISH" : "BEARISH") &&
         z.timestamp < sms.timestamp &&
         !z.mitigated,
@@ -124,7 +126,7 @@ export class Scenario11_MitigationBlock extends BaseScenario {
     return entry.gt(equilibrium); // Short strictly in Premium
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     Scenario11_MitigationBlock.rejectionStats.totalEvals++;
 
     const { candles15m, structures, zones } = patternData;
@@ -139,8 +141,8 @@ export class Scenario11_MitigationBlock extends BaseScenario {
       return false;
     }
 
-    // Find the LAST (newest) SMS in the structures array
-    const smsList = structures.filter((s: any) => s.type === "SMS");
+    // Find the LAST (newest) 15m SMS in the structures array
+    const smsList = structures.filter((s: any) => s.type === "SMS" && s.timeframe === "15");
     if (!smsList.length) {
       this.logRejection("No SMS (Smart Money Shift) detected");
       Scenario11_MitigationBlock.rejectionStats.noSms++;

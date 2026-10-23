@@ -11,7 +11,7 @@ import { NewsService } from '../services/newsService';
 import { InstrumentInfo, StrategyState, Timeframe, BotConfig, MitigatedZone, MitigatedStructure } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
-import { evaluateTradeManagement } from '../risk/tradeManager';
+import { evaluateTradeManagement, initializeTradeManagement } from '../risk/tradeManager';
 import { formatPrice, formatQuantity } from '../utils/precision';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
@@ -42,9 +42,17 @@ interface ClosedPositionEvent {
 }
 
 function parseClosedPositions(payload: unknown, ownSymbol: string): ClosedPositionEvent[] {
-  if (!isRecord(payload) || !Array.isArray(payload.data)) return [];
+  // wsClient.routeUpdate() hands over the raw `event.data` array, while the full Bybit
+  // envelope `{ topic, data: [...] }` may still be passed by other callers/tests.
+  // Accept BOTH shapes so the Position channel is never silently dead (Invariant 35).
+  const dataArray = Array.isArray(payload)
+    ? payload
+    : isRecord(payload) && Array.isArray(payload.data)
+      ? payload.data
+      : null;
+  if (!dataArray) return [];
   const events: ClosedPositionEvent[] = [];
-  for (const item of payload.data) {
+  for (const item of dataArray) {
     if (!isRecord(item)) continue;
     if (item.symbol !== ownSymbol) continue;
 
@@ -79,6 +87,7 @@ export class StrategyEngine {
   private processing = false;
   private isProcessing = false;
   private isManaging = false;
+  private isClosingPosition = false;
   private noPositionRecheckAt = 0;
   private lastProcessedCandleTimestamp: number = 0;
   private latestTickPrice: string | null = null;
@@ -327,27 +336,31 @@ export class StrategyEngine {
 
       logger.info(`[${this.symbol}] Trade management signal: ${signal.action} - ${signal.reason}`);
 
-      if (signal.action === 'move_sl_to_entry' || signal.action === 'trail_sl_to_profit') {
-        if (signal.newStopLoss) {
-          // Use setTradingStop for position SL/TP updates (not amendOrder which is for pending orders)
-          await this.deps.client.setTradingStop({
-            symbol: this.symbol,
-            stopLoss: signal.newStopLoss,
-          });
-          
-          // Update management state in DB
-          await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
-          logger.info(`[${this.symbol}] Stop loss updated to ${signal.newStopLoss}`);
-        }
-      } else if (signal.action === 'close_partial_25' || signal.action === 'close_partial_50') {
+      const actualPosSize = new Decimal(position.size);
+      let actionPerformed = false;
+
+      // (a) Exchange partial close FIRST — reduce-only qty clamped to the real position size.
+      // An oversized reduce-only order is rejected by Bybit and the milestone would never
+      // progress, so the DB update must never run ahead of a confirmed exchange action.
+      if (signal.action === 'close_partial_25' || signal.action === 'close_partial_50') {
         if (signal.closeQty) {
-          // Place reduce-only market order to close partial position
+          let intendedCloseQty = new Decimal(signal.closeQty);
+          if (intendedCloseQty.gt(actualPosSize)) {
+            logger.warn(`[${this.symbol}] Clamped partial close qty ${intendedCloseQty.toString()} -> actual position size ${actualPosSize.toString()}`);
+            intendedCloseQty = actualPosSize;
+          }
+          // Invariant 16.21: never send an unformatted qty to the exchange.
+          const formattedCloseQty = formatQuantity(
+            intendedCloseQty,
+            new Decimal(this.deps.instrument.qtyStep),
+          );
+
           const closeSide = trade.side === 'Buy' ? 'Sell' : 'Buy';
-          
+
           const partialCloseResult = await this.deps.executionEngine.executePartialClose({
             symbol: this.symbol,
             side: closeSide as 'Buy' | 'Sell',
-            qty: signal.closeQty,
+            qty: formattedCloseQty,
             orderLinkId: `partial_${Date.now()}`,
           });
 
@@ -356,19 +369,28 @@ export class StrategyEngine {
             return;
           }
 
-          // Update management state in DB
-          await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
-          logger.info(`[${this.symbol}] Partial close executed: ${signal.closeQty} ${trade.side === 'Buy' ? 'Sell' : 'Buy'}`);
-          
-          // If we also need to move SL
-          if (signal.newStopLoss) {
-            await this.deps.client.setTradingStop({
-              symbol: this.symbol,
-              stopLoss: signal.newStopLoss,
-            });
-            await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
-          }
+          actionPerformed = true;
+          logger.info(`[${this.symbol}] Partial close executed: ${formattedCloseQty} ${closeSide}`);
         }
+      }
+
+      // (b) SL move only AFTER the partial close succeeded (if one was required).
+      if (signal.newStopLoss) {
+        // Use setTradingStop for position SL/TP updates (not amendOrder which is for pending orders)
+        await this.deps.client.setTradingStop({
+          symbol: this.symbol,
+          stopLoss: signal.newStopLoss,
+        });
+        actionPerformed = true;
+        logger.info(`[${this.symbol}] Stop loss updated to ${signal.newStopLoss}`);
+      }
+
+      if (!actionPerformed) return;
+
+      // (c) Persist the milestone exactly once, after every exchange action succeeded.
+      const dbOk = await this.deps.db.updateTradeManagementState(trade.id, signal.updatedState);
+      if (!dbOk) {
+        logger.error(`[${this.symbol}] CRITICAL: DB failed to update milestone state for trade ${trade.id} — exchange is managed but DB is stale.`);
       }
     } catch (error) {
       logger.error(`[${this.symbol}] Trade management error: ${error instanceof Error ? error.message : String(error)}`);
@@ -481,9 +503,26 @@ export class StrategyEngine {
     logger.info(`${this.symbol}: trade ${tradeId} approved, executing ${approvalResult.orderType} order${approvalResult.limitPrice ? ` @ ${approvalResult.limitPrice}` : ''}`);
     const result = await this.deps.executionEngine.execute(updatedPlan);
     if (!result.ok) {
-      logger.error(`[${this.symbol}] Order execution failed: ${result.reason}`);
-      this.burnSetup(updatedPlan);
-      this.transition(StrategyState.SCANNING);
+      // AMBIGUOUS FAILURE: a network timeout / retCode 0 may still have placed the order.
+      // Never reset to SCANNING before proving the exchange is flat (Invariant 23).
+      logger.error(`[${this.symbol}] Order execution failed: ${result.reason}. Verifying exchange state via orderLinkId=${result.orderLinkId}`);
+      const flattened = await this.panicCloseOrphan({
+        orderLinkId: result.orderLinkId,
+        orderType: updatedPlan.orderType,
+        verifyFlat: true,
+      });
+
+      if (flattened) {
+        this.burnSetup(updatedPlan);
+        this.plan = null;
+        this.transition(StrategyState.SCANNING);
+      } else {
+        logger.error(`[${this.symbol}] CRITICAL: ambiguous order failure could NOT be verified flat. Engine remains ${this.state}; manual intervention required.`);
+        // Exposure may still exist on Bybit. Force IN_TRADE so Reconciliation can see it —
+        // resetting to SCANNING here would orphan a live order (Invariant 23).
+        this.transition(StrategyState.IN_TRADE);
+      }
+
       // Throw error so Telegram handler catches it and shows rejection to user
       throw new Error(`Exchange Error: ${result.reason}`);
     }
@@ -493,7 +532,7 @@ export class StrategyEngine {
     // so an SL hit inside that window is caught by the WS closure handlers.
     if (updatedPlan.structureDetails && updatedPlan.structureDetails.timestamp) {
       this.mitigatedStructures.push({
-        type: (updatedPlan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+        type: (updatedPlan.structureDetails.type || 'CHoCH') as MitigatedStructure['type'],
         timestamp: updatedPlan.structureDetails.timestamp,
         price: updatedPlan.structureDetails.price?.toString() || updatedPlan.entryPrice.toString(),
         direction: updatedPlan.structureDetails.direction || (updatedPlan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
@@ -523,6 +562,16 @@ export class StrategyEngine {
         logger.warn(`[${this.symbol}] Failed to fetch actual entry price, using planned: ${e instanceof Error ? e.message : String(e)}`);
       }
 
+      // Adaptive Fractioning: persist the initial R:R + qty NOW. Without this the DB state
+      // stays `{}` and evaluateTradeManagement() treats every trade as Classic (TotalR=0),
+      // so the two-milestone Sniper branch (TotalR >= 4) can never activate live.
+      const managementState = initializeTradeManagement(
+        actualEntryPrice,
+        updatedPlan.stopLoss,
+        updatedPlan.takeProfit,
+        updatedPlan.qty,
+      );
+
       await this.deps.db.openTrade({
         id: result.orderId || tradeId,
         symbol: this.symbol,
@@ -542,6 +591,7 @@ export class StrategyEngine {
         zone_timestamp: updatedPlan.zoneDetails?.timestamp ?? null,
         order_type: updatedPlan.orderType,
         limit_price: updatedPlan.limitPrice,
+        management_state: managementState,
         order_id: result.orderId,
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
@@ -553,7 +603,11 @@ export class StrategyEngine {
         `[${this.symbol}] CRITICAL: order is live on the exchange but db.openTrade failed: ${dbError instanceof Error ? dbError.message : String(dbError)}. Attempting emergency flat close.`,
       );
 
-      const flattened = await this.panicCloseOrphan(result.orderId ?? null, updatedPlan.orderType);
+      const flattened = await this.panicCloseOrphan({
+        orderId: result.orderId ?? null,
+        orderLinkId: result.orderLinkId,
+        orderType: updatedPlan.orderType,
+      });
 
       if (flattened) {
         logger.error(
@@ -573,6 +627,22 @@ export class StrategyEngine {
   }
 
   private async onExchangePositionClosed(pnl: string | null, wsExitPrice?: string): Promise<void> {
+    // Dual-channel dedupe: the Position and Execution topics can both report the same closure.
+    // Running the close pipeline once prevents duplicate PnL sums, REST round-trips and
+    // Telegram notifications (Invariant 35 keeps BOTH channels subscribed).
+    if (this.isClosingPosition) {
+      logger.debug(`${this.symbol}: close event ignored — another close handler is already in flight`);
+      return;
+    }
+    this.isClosingPosition = true;
+    try {
+      await this.processClosedPosition(pnl, wsExitPrice);
+    } finally {
+      this.isClosingPosition = false;
+    }
+  }
+
+  private async processClosedPosition(pnl: string | null, wsExitPrice?: string): Promise<void> {
     const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (!trade) {
       logger.warn(`${this.symbol}: position close event but no open trade found`);
@@ -710,7 +780,7 @@ export class StrategyEngine {
   const sd = plan.structureDetails;
   if (sd && sd.timestamp != null && sd.timestamp > 0) {
     this.mitigatedStructures.push({
-      type: (sd.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+      type: (sd.type || 'CHoCH') as MitigatedStructure['type'],
       timestamp: sd.timestamp,
       price: sd.price?.toString() || plan.entryPrice.toString(),
       direction: sd.direction || 'BULLISH',
@@ -1031,11 +1101,29 @@ export class StrategyEngine {
     logger.info(`${this.symbol}: AUTO_TRADING=true, executing staged entry (${useMarket ? 'Market' : 'Limit'})`);
     let orderLive = false;
     let liveOrderId: string | null = null;
+    let liveOrderLinkId: string | null = null;
     let livePlanRef: PositionPlan | null = null;
     try {
       const result = await this.deps.executionEngine.execute(this.plan);
       if (!result.ok) {
-        logger.warn(`[${this.symbol}] Auto-trading order rejected: ${result.reason}. Burning setup.`);
+        // AMBIGUOUS FAILURE: the submitter may have reached Bybit (timeout / retCode 0)
+        // while the SDK reported an error. Verify by orderLinkId, never blind-reset.
+        logger.warn(`[${this.symbol}] Auto-trading order rejected/ambiguous: ${result.reason}. Verifying exchange state via orderLinkId=${result.orderLinkId}`);
+        const flattened = await this.panicCloseOrphan({
+          orderLinkId: result.orderLinkId,
+          orderType: this.plan.orderType,
+          verifyFlat: true,
+        });
+
+        if (!flattened) {
+          logger.error(`[${this.symbol}] CRITICAL: ambiguous order failure could NOT be verified flat. Engine remains ${this.state} for reconciliation supervision; manual intervention required.`);
+          if (this.state !== StrategyState.IN_TRADE) {
+            this.transition(StrategyState.IN_TRADE);
+          }
+          return;
+        }
+
+        logger.warn(`[${this.symbol}] Ambiguous order failure verified flat. Burning setup.`);
         this.burnSetup(this.plan);
         this.plan = null;
         this.transition(StrategyState.SCANNING);
@@ -1048,13 +1136,14 @@ export class StrategyEngine {
       // visible to handleExecutionPayload/handlePositionPayload (both require IN_TRADE).
       orderLive = true;
       liveOrderId = result.orderId;
+      liveOrderLinkId = result.orderLinkId;
       const livePlan = this.plan;
       livePlanRef = livePlan;
 
       // Burn the trigger structure immediately on entry (in-memory, zero latency).
       if (livePlan.structureDetails && livePlan.structureDetails.timestamp) {
         this.mitigatedStructures.push({
-          type: (livePlan.structureDetails.type || 'CHoCH') as 'CHoCH' | 'SMS' | 'BOS',
+          type: (livePlan.structureDetails.type || 'CHoCH') as MitigatedStructure['type'],
           timestamp: livePlan.structureDetails.timestamp,
           price: livePlan.structureDetails.price?.toString() || livePlan.entryPrice.toString(),
           direction: livePlan.structureDetails.direction || (livePlan.side === 'Buy' ? 'BULLISH' : 'BEARISH'),
@@ -1083,6 +1172,14 @@ export class StrategyEngine {
         logger.warn(`[${this.symbol}] Failed to fetch actual entry price, using planned: ${e instanceof Error ? e.message : String(e)}`);
       }
 
+      // Adaptive Fractioning: persist the initial R:R + qty at entry (see manual path note).
+      const managementState = initializeTradeManagement(
+        actualEntryPrice,
+        livePlan.stopLoss,
+        livePlan.takeProfit,
+        livePlan.qty,
+      );
+
       await this.deps.db.openTrade({
         id: result.orderId,
         symbol: this.symbol,
@@ -1102,6 +1199,7 @@ export class StrategyEngine {
         zone_timestamp: livePlan.zoneDetails?.timestamp ?? null,
         order_type: livePlan.orderType,
         limit_price: livePlan.limitPrice,
+        management_state: managementState,
         order_id: result.orderId,
       });
       logger.info(`${this.symbol}: order ${result.orderId} recorded, entering trade`);
@@ -1120,7 +1218,11 @@ export class StrategyEngine {
 
         // PANIC CLOSE: flatten the orphan so no unmanaged exposure survives the failure.
         // A reset to SCANNING is allowed only after the exchange is verified flat.
-        const flattened = await this.panicCloseOrphan(liveOrderId, livePlanRef?.orderType ?? 'Market');
+        const flattened = await this.panicCloseOrphan({
+          orderId: liveOrderId,
+          orderLinkId: liveOrderLinkId,
+          orderType: livePlanRef?.orderType ?? 'Market',
+        });
 
         if (flattened) {
           logger.error(
@@ -1163,35 +1265,44 @@ export class StrategyEngine {
    * A false result means exposure may still exist — the caller MUST keep the engine
    * IN_TRADE so Reconciliation and manual supervision can see it (Invariant 23).
    */
-  private async panicCloseOrphan(
-    orderId: string | null,
-    orderType: 'Market' | 'Limit' = 'Market',
-  ): Promise<boolean> {
+  private async panicCloseOrphan(ref: {
+    orderId?: string | null;
+    orderLinkId?: string | null;
+    orderType: 'Market' | 'Limit';
+    /** Ambiguous submission: no confirmed orderId and no settle window — poll for flatness. */
+    verifyFlat?: boolean;
+  }): Promise<boolean> {
+    const { orderId, orderLinkId, orderType, verifyFlat } = ref;
     try {
       // 1. Cancel a resting LIMIT order first so a partially filled order cannot keep filling.
       // Market orders are IOC and can never rest, so they skip this REST round-trip entirely.
+      // Matching accepts EITHER identifier: a post-fill failure knows orderId, while an
+      // ambiguous submission failure (timeout / retCode 0) only knows orderLinkId.
       let orderCancelled = true;
       let cancelledOrder = false;
       if (orderType === 'Limit') {
-        if (orderId) {
+        if (orderId || orderLinkId) {
           try {
             const openOrders = await this.deps.client.getOpenOrders(this.symbol);
             const liveOrder = openOrders.find(
               (order) =>
-                order.orderId === orderId &&
+                ((orderId !== null && orderId !== undefined && order.orderId === orderId) ||
+                  (orderLinkId !== null &&
+                    orderLinkId !== undefined &&
+                    order.orderLinkId === orderLinkId)) &&
                 (order.status === 'New' || order.status === 'PartiallyFilled'),
             );
             if (liveOrder) {
-              await this.deps.client.cancelOrder(this.symbol, orderId);
+              await this.deps.client.cancelOrder(this.symbol, liveOrder.orderId);
               cancelledOrder = true;
               logger.error(
-                `[${this.symbol}] PANIC CANCEL: cancelled live ${liveOrder.orderType} order ${orderId} (status=${liveOrder.status}).`,
+                `[${this.symbol}] PANIC CANCEL: cancelled live ${liveOrder.orderType} order ${liveOrder.orderId} (status=${liveOrder.status}).`,
               );
             }
           } catch (cancelError) {
             orderCancelled = false;
             logger.error(
-              `[${this.symbol}] PANIC CANCEL failed for order ${orderId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
+              `[${this.symbol}] PANIC CANCEL failed for order ${orderId ?? orderLinkId}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
             );
           }
         } else {
@@ -1256,6 +1367,22 @@ export class StrategyEngine {
           'CRITICAL DB FAILURE: Could not verify/cancel the orphaned exchange order. Manual intervention required.',
         );
         return false;
+      }
+
+      // Ambiguous submission failures have no confirmed orderId and no 500 ms settle window:
+      // Bybit may not yet reflect a just-filled IOC. Bounded polling confirms "strictly flat"
+      // before the caller is allowed to reset to SCANNING (Invariant 49).
+      if (verifyFlat === true && !cancelledOrder) {
+        const flat = await this.isExchangeFlat();
+        if (!flat) {
+          logger.error(
+            `[${this.symbol}] PANIC VERIFY: exchange still reports exposure after an ambiguous submission.`,
+          );
+          await this.notifyCriticalSafe(
+            'CRITICAL DB FAILURE: Ambiguous order submission — exposure still detected on the exchange. Manual intervention required.',
+          );
+          return false;
+        }
       }
 
       if (cancelledOrder) {

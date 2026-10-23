@@ -89,7 +89,9 @@ describe('StrategyEngine', () => {
       getRecentClosedTrades: jest.fn().mockResolvedValue([]),
       getAllTrades: jest.fn().mockResolvedValue([]),
       runIntegrationTest: jest.fn().mockResolvedValue(true),
-      updateTradeManagementState: jest.fn().mockResolvedValue(undefined),
+      // Real DB method returns Promise<boolean>. Resolving `undefined` made the engine
+      // treat every successful milestone write as a failure and log a false CRITICAL.
+      updateTradeManagementState: jest.fn().mockResolvedValue(true),
       close: jest.fn().mockResolvedValue(undefined),
     } as any;
 
@@ -117,8 +119,8 @@ describe('StrategyEngine', () => {
 
     // Mock ExecutionEngine
     mockExecutionEngine = {
-      execute: jest.fn().mockResolvedValue({ ok: true, orderId: 'order123' }),
-      executePartialClose: jest.fn().mockResolvedValue({ ok: true, orderId: 'pc123' }),
+      execute: jest.fn().mockResolvedValue({ ok: true, orderId: 'order123', orderLinkId: 'link-order123' }),
+      executePartialClose: jest.fn().mockResolvedValue({ ok: true, orderId: 'pc123', orderLinkId: 'link-pc123' }),
     } as any;
 
     // Mock TelegramNotifier
@@ -520,7 +522,7 @@ describe('StrategyEngine', () => {
 
     it('should NOT update milestone state when executePartialClose fails (Silent Desync guard)', async () => {
       setupInTradeWithSniperSetup();
-      mockExecutionEngine.executePartialClose.mockResolvedValue({ ok: false, reason: 'Rate limit exceeded' });
+      mockExecutionEngine.executePartialClose.mockResolvedValue({ ok: false, reason: 'Rate limit exceeded', orderLinkId: 'link-pc-fail' });
 
       await (engine as any).checkAndManagePosition();
 
@@ -534,17 +536,39 @@ describe('StrategyEngine', () => {
 
     it('should update milestone state and move SL only after successful partial close', async () => {
       setupInTradeWithSniperSetup();
-      mockExecutionEngine.executePartialClose.mockResolvedValue({ ok: true, orderId: 'pc123' });
+      mockExecutionEngine.executePartialClose.mockResolvedValue({ ok: true, orderId: 'pc123', orderLinkId: 'link-pc123' });
 
       await (engine as any).checkAndManagePosition();
 
       expect(mockExecutionEngine.executePartialClose).toHaveBeenCalledTimes(1);
-      // Once after partial close, once after SL move
-      expect(mockDb.updateTradeManagementState).toHaveBeenCalledTimes(2);
-      expect(mockClient.setTradingStop).toHaveBeenCalledWith({
-        symbol: 'BTCUSDT',
-        stopLoss: '100',
+      // Single atomic milestone write — after BOTH the partial close and the SL move succeeded
+      expect(mockDb.updateTradeManagementState).toHaveBeenCalledTimes(1);
+      expect(mockClient.setTradingStop).toHaveBeenCalledTimes(1);
+      // Now emitted with instrument precision (tickSize) instead of a raw entry string.
+      const stopLossCall = mockClient.setTradingStop.mock.calls[0][0];
+      expect(stopLossCall.symbol).toBe('BTCUSDT');
+      expect(new Decimal(stopLossCall.stopLoss!).eq(100)).toBe(true);
+    });
+
+    it('should clamp an oversized partial-close qty to the real exchange position size', async () => {
+      setupInTradeWithSniperSetup();
+      // The DB says qty=1, but only 0.1 is actually open (partial fill / manual trim).
+      // Requesting 0.25 reduce-only would be rejected by Bybit and stall the milestone.
+      mockClient.getOpenPositions.mockResolvedValue([
+        { symbol: 'BTCUSDT', size: new Decimal('0.1') },
+      ] as any);
+      mockExecutionEngine.executePartialClose.mockResolvedValue({
+        ok: true,
+        orderId: 'pc123',
+        orderLinkId: 'link-pc123',
       });
+
+      await (engine as any).checkAndManagePosition();
+
+      expect(mockExecutionEngine.executePartialClose).toHaveBeenCalledWith(
+        expect.objectContaining({ qty: '0.100' }),
+      );
+      expect(mockDb.updateTradeManagementState).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -562,9 +586,31 @@ describe('StrategyEngine', () => {
       balanceUsdt: '10000',
       scenarioId: 1,
       zoneDetails: null,
+      // A real scenario always carries a burn anchor. Without this, burnSetup()
+      // correctly logs a CRITICAL ("neither valid zoneDetails nor structureDetails")
+      // and the test console fills with a failure that never happened.
+      structureDetails: {
+        type: 'CHoCH',
+        timestamp: 1_000_000,
+        price: new Decimal('50000'),
+        direction: 'BULLISH',
+      },
       orderType: 'Market',
       limitPrice: null,
     } as any;
+
+    let errorLogSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      // These tests deliberately drive the engine into exchange/DB failure paths.
+      // Capture the expected logger.error output so the suite stays clean, and
+      // assert it explicitly in the individual negative tests below.
+      errorLogSpy = jest.spyOn(logger, 'error').mockImplementation();
+    });
+
+    afterEach(() => {
+      errorLogSpy.mockRestore();
+    });
 
     it('auto: transitions to IN_TRADE before db.openTrade and records the actual avgPrice', async () => {
       (engine as any).plan = stagedPlan;
@@ -584,12 +630,23 @@ describe('StrategyEngine', () => {
       expect(stateAtDbWrite).toBe(StrategyState.IN_TRADE);
       expect(engine.getState()).toBe(StrategyState.IN_TRADE);
       expect(mockDb.openTrade).toHaveBeenCalledWith(
-        expect.objectContaining({ entry_price: '50060' }),
+        expect.objectContaining({
+          entry_price: '50060',
+          // PATCH 2: Adaptive Fractioning state is initialized at entry (never left as {})
+          management_state: expect.objectContaining({
+            milestone1Triggered: false,
+            milestone2Triggered: false,
+            initialQty: '0.1',
+            initialTotalR: '2.63636364',
+          }),
+        }),
       );
       // No Assumed Fill: positions must be fetched before the DB row is written
       expect(mockClient.getOpenPositions.mock.invocationCallOrder[0]).toBeLessThan(
         mockDb.openTrade.mock.invocationCallOrder[0],
       );
+      // Happy path: no CRITICAL error may be logged.
+      expect(errorLogSpy).not.toHaveBeenCalled();
     });
 
     it('auto: DB failure after a live fill panic-closes the orphan, then burns and resets', async () => {
@@ -617,6 +674,9 @@ describe('StrategyEngine', () => {
       expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
         'CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close executed.',
       );
+      expect(errorLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining('CRITICAL DB FAILURE: orphan exposure verified flat'),
+      );
       expect(burnSpy).toHaveBeenCalledTimes(1);
       expect(engine.getState()).toBe(StrategyState.SCANNING);
       burnSpy.mockRestore();
@@ -639,6 +699,9 @@ describe('StrategyEngine', () => {
       expect(engine.getState()).toBe(StrategyState.IN_TRADE);
       expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
         expect.stringContaining('Emergency Market Close FAILED'),
+      );
+      expect(errorLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining('emergency flat close FAILED'),
       );
       burnSpy.mockRestore();
     });
@@ -677,6 +740,9 @@ describe('StrategyEngine', () => {
       expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
         'CRITICAL DB FAILURE: Orphan LIMIT order detected. Emergency Order Cancel executed.',
       );
+      expect(errorLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining('PANIC CANCEL'),
+      );
       expect(burnSpy).toHaveBeenCalledTimes(1);
       expect(engine.getState()).toBe(StrategyState.SCANNING);
       burnSpy.mockRestore();
@@ -707,6 +773,8 @@ describe('StrategyEngine', () => {
       expect(mockDb.openTrade).toHaveBeenCalledWith(
         expect.objectContaining({ entry_price: '50065' }),
       );
+      // Happy path: no CRITICAL error may be logged.
+      expect(errorLogSpy).not.toHaveBeenCalled();
     });
 
     it('manual: DB failure after a live fill panic-closes the orphan, then burns and resets', async () => {
@@ -739,6 +807,9 @@ describe('StrategyEngine', () => {
       expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
         'CRITICAL DB FAILURE: Orphan position detected. Emergency Market Close executed.',
       );
+      expect(errorLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining('CRITICAL DB FAILURE: orphan exposure verified flat'),
+      );
       expect(burnSpy).toHaveBeenCalledTimes(1);
       expect(engine.getState()).toBe(StrategyState.SCANNING);
       burnSpy.mockRestore();
@@ -767,7 +838,125 @@ describe('StrategyEngine', () => {
       expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
         expect.stringContaining('Emergency Market Close FAILED'),
       );
+      expect(errorLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining('emergency flat close FAILED'),
+      );
       burnSpy.mockRestore();
+    });
+
+    it('auto: ambiguous submission failure is verified by orderLinkId, never blind-reset', async () => {
+      // Premium long → resolves to a resting Limit order.
+      (engine as any).plan = {
+        ...stagedPlan,
+        entryPrice: '49500',
+        stopLoss: '49400',
+        takeProfit: '50500',
+      };
+      (engine as any).latestTickPrice = '50050';
+      const burnSpy = jest.spyOn(engine as any, 'burnSetup');
+      mockExecutionEngine.execute.mockResolvedValueOnce({
+        ok: false,
+        reason: 'request timeout (retCode 0)',
+        orderLinkId: 'link-ambiguous',
+      });
+      mockClient.getOpenOrders.mockResolvedValue([
+        {
+          orderId: 'order-amb',
+          orderLinkId: 'link-ambiguous',
+          symbol: 'BTCUSDT',
+          side: 'Buy',
+          orderType: 'Limit',
+          price: '49500',
+          qty: '0.1',
+          stopLoss: '49400',
+          takeProfit: '50500',
+          createdAt: Date.now(),
+          status: 'New',
+        },
+      ] as any);
+      mockClient.getOpenPositions.mockResolvedValue([] as any);
+
+      await (engine as any).executeStagedEntry();
+
+      // No orderId was ever returned — the order is located purely by orderLinkId.
+      expect(mockClient.cancelOrder).toHaveBeenCalledWith('BTCUSDT', 'order-amb');
+      expect(mockNotifier.notifyCriticalError).toHaveBeenCalledWith(
+        'CRITICAL DB FAILURE: Orphan LIMIT order detected. Emergency Order Cancel executed.',
+      );
+      expect(errorLogSpy).toHaveBeenCalledWith(
+        expect.stringContaining('PANIC CANCEL'),
+      );
+      expect(burnSpy).toHaveBeenCalledTimes(1);
+      expect(engine.getState()).toBe(StrategyState.SCANNING);
+      burnSpy.mockRestore();
+    });
+  });
+
+  describe('WS closure channels (Position + Execution)', () => {
+    const openTrade = {
+      id: 'trade-ws-1',
+      symbol: 'BTCUSDT',
+      scenario_id: 1,
+      entryPrice: '50000',
+      stopLoss: '49900',
+      takeProfit: '50300',
+      qty: '0.1',
+      pnl: null,
+      exitPrice: null,
+      status: 'OPEN',
+      reason: null,
+      openedAt: Date.now() - 60_000,
+      closedAt: null,
+      orderId: 'order-ws-1',
+      side: 'Buy',
+      zoneDetails: null,
+      managementState: null,
+    };
+
+    beforeEach(() => {
+      (engine as any).transition(StrategyState.IN_TRADE);
+      mockDb.getOpenTrade.mockResolvedValue(openTrade as any);
+      mockClient.getClosedPnl = jest.fn().mockResolvedValue([
+        {
+          symbol: 'BTCUSDT',
+          createdTime: Date.now(),
+          closedPnl: new Decimal('5'),
+          exitPrice: new Decimal('50060'),
+        },
+      ]) as any;
+    });
+
+    it('closes the trade from a RAW ARRAY Position payload (wsClient shape)', async () => {
+      await engine.handlePositionPayload([
+        { symbol: 'BTCUSDT', size: '0', side: 'None', closedPnl: '5' },
+      ]);
+
+      expect(mockDb.closeTrade).toHaveBeenCalledTimes(1);
+      expect(mockNotifier.notifyTradeClosed).toHaveBeenCalledTimes(1);
+      expect(engine.getState()).toBe(StrategyState.SCANNING);
+    });
+
+    it('still accepts the full { data: [...] } envelope', async () => {
+      await engine.handlePositionPayload({
+        topic: 'position',
+        data: [{ symbol: 'BTCUSDT', size: '0.0000', side: 'None', closedPnl: '5' }],
+      });
+
+      expect(mockDb.closeTrade).toHaveBeenCalledTimes(1);
+    });
+
+    it('deduplicates a simultaneous Execution + Position close (single close pipeline)', async () => {
+      await Promise.all([
+        engine.handleExecutionPayload([
+          { symbol: 'BTCUSDT', execType: 'Trade', closedSize: '0.1', execPrice: '50060' },
+        ]),
+        engine.handlePositionPayload([
+          { symbol: 'BTCUSDT', size: '0', side: 'None', closedPnl: '5' },
+        ]),
+      ]);
+
+      expect(mockDb.closeTrade).toHaveBeenCalledTimes(1);
+      expect(mockNotifier.notifyTradeClosed).toHaveBeenCalledTimes(1);
     });
   });
 });

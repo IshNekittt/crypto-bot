@@ -36,8 +36,8 @@ export interface OrderSubmitter {
 }
 
 export type ExecutionResult =
-  | { readonly ok: true; readonly orderId: string }
-  | { readonly ok: false; readonly reason: string };
+  | { readonly ok: true; readonly orderId: string; readonly orderLinkId: string }
+  | { readonly ok: false; readonly reason: string; readonly orderLinkId: string };
 
 function isCircuitBreakerError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -65,8 +65,11 @@ export class ExecutionEngine {
   }
 
   async execute(plan: PositionPlan): Promise<ExecutionResult> {
+    // Generated OUTSIDE the try so a failure can still return it: on an ambiguous failure
+    // (network timeout / retCode 0) the order may be live and must be traceable on Bybit
+    // by orderLinkId before the engine decides to reset state.
+    const orderLinkId = `${plan.symbol}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     try {
-      const orderLinkId = `${plan.symbol}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       let orderId: string;
 
       if (plan.orderType === 'Limit' && plan.limitPrice) {
@@ -104,7 +107,7 @@ export class ExecutionEngine {
         .catch((error) => {
           logger.error(`TG Notify error: ${error instanceof Error ? error.message : String(error)}`);
         });
-      return { ok: true, orderId };
+      return { ok: true, orderId, orderLinkId };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`Order failed for ${plan.symbol}: ${message}`);
@@ -113,18 +116,18 @@ export class ExecutionEngine {
         await this.notifier.notifyCriticalError(
           `${plan.symbol}: circuit breaker — отправка ордеров заблокирована на 60с (${message})`,
         );
-        return { ok: false, reason: `${plan.symbol}: circuit breaker — ${message}` };
+        return { ok: false, reason: `${plan.symbol}: circuit breaker — ${message}`, orderLinkId };
       }
 
       if (isThrottlingOrMarginError(error)) {
         await this.notifier.notifyCriticalError(
           `${plan.symbol}: rate limit / insufficient balance — ${message}`,
         );
-        return { ok: false, reason: `${plan.symbol}: rate limit — ${message}` };
+        return { ok: false, reason: `${plan.symbol}: rate limit — ${message}`, orderLinkId };
       }
 
       await this.notifier.notifyCriticalError(`${plan.symbol}: ордер отклонён — ${message}`);
-      return { ok: false, reason: message };
+      return { ok: false, reason: message, orderLinkId };
     }
   }
 
@@ -198,8 +201,9 @@ export class ExecutionEngine {
     qty: string;
     orderLinkId: string;
   }): Promise<ExecutionResult> {
+    // Hoisted out of the try so failure branches can still return the idempotency key.
+    const orderLinkId = params.orderLinkId;
     try {
-      const orderLinkId = params.orderLinkId;
       const orderId = await this.submitter.placeReduceOnlyMarketOrder({
         symbol: params.symbol,
         side: params.side,
@@ -209,7 +213,7 @@ export class ExecutionEngine {
       logger.info(
         `PARTIAL CLOSE Order placed: ${params.symbol} ${params.side} qty=${params.qty} reduceOnly id=${orderId}`,
       );
-      return { ok: true, orderId };
+      return { ok: true, orderId, orderLinkId };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`Partial close order failed for ${params.symbol}: ${message}`);
@@ -218,18 +222,18 @@ export class ExecutionEngine {
         await this.notifier.notifyCriticalError(
           `${params.symbol}: circuit breaker — partial close blocked for 60s (${message})`,
         );
-        return { ok: false, reason: `${params.symbol}: circuit breaker — ${message}` };
+        return { ok: false, reason: `${params.symbol}: circuit breaker — ${message}`, orderLinkId };
       }
 
       if (isThrottlingOrMarginError(error)) {
         await this.notifier.notifyCriticalError(
           `${params.symbol}: rate limit / insufficient balance — ${message}`,
         );
-        return { ok: false, reason: `${params.symbol}: rate limit — ${message}` };
+        return { ok: false, reason: `${params.symbol}: rate limit — ${message}`, orderLinkId };
       }
 
       await this.notifier.notifyCriticalError(`${params.symbol}: partial close rejected — ${message}`);
-      return { ok: false, reason: message };
+      return { ok: false, reason: message, orderLinkId };
     }
   }
 }

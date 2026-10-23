@@ -70,7 +70,7 @@ export class Scenario9_TurtleSoup extends BaseScenario {
     }
   }
 
-  override evaluate(patternData: any): boolean {
+  protected override evaluateInternal(patternData: any): boolean {
     Scenario9_TurtleSoup.rejectionStats.totalEvals++;
 
     // CRITICAL: Killzone check - London/NY only for Turtle Soup (bypassable via ENFORCE_KILLZONES=false)
@@ -149,7 +149,7 @@ export class Scenario9_TurtleSoup extends BaseScenario {
 
         // Set structure details for mitigation tracking (the sweep candle is the trigger)
         this.setStructureDetails({
-          type: 'CHoCH',
+          type: 'SWEEP',
           timestamp: lastCandle.timestamp,
           price: lastHigh,
           direction: 'BEARISH',
@@ -204,7 +204,7 @@ export class Scenario9_TurtleSoup extends BaseScenario {
 
         // Set structure details for mitigation tracking (the sweep candle is the trigger)
         this.setStructureDetails({
-          type: 'CHoCH',
+          type: 'SWEEP',
           timestamp: lastCandle.timestamp,
           price: lastLow,
           direction: 'BULLISH',
