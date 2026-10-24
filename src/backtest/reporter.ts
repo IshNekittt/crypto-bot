@@ -2,6 +2,7 @@ import { Decimal } from 'decimal.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { TradeResult } from './executionSimulator';
+import { Scenario1_HTFContinuation } from '../engine/scenarios/Scenario1_HTFContinuation';
 import { Scenario2_FVGFill } from '../engine/scenarios/Scenario2_FVGFill';
 import { Scenario4_MitigationChain } from '../engine/scenarios/Scenario4_MitigationChain';
 import { Scenario5_HTFLiquiditySweep } from '../engine/scenarios/Scenario5_HTFLiquiditySweep';
@@ -38,6 +39,7 @@ function sharePct(count: number, base: number): string {
  * run it was produced from.
  */
 export function resetScenarioRejectionStats(): void {
+  Scenario1_HTFContinuation.resetStats();
   Scenario2_FVGFill.resetStats();
   Scenario4_MitigationChain.resetStats();
   Scenario5_HTFLiquiditySweep.resetStats();
@@ -244,6 +246,7 @@ export function generateReport(
   lines.push('');
 
   // Rejection stats for key scenarios
+  const scenario1Stats = Scenario1_HTFContinuation.getRejectionStats();
   const scenario2Stats = Scenario2_FVGFill.getRejectionStats();
   const scenario4Stats = Scenario4_MitigationChain.getRejectionStats();
   const scenario5Stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
@@ -254,6 +257,8 @@ export function generateReport(
   const scenario11Stats = Scenario11_MitigationBlock.getRejectionStats();
 
   lines.push('📊 SCENARIO REJECTION STATS');
+  lines.push('   Scenario 1 (HTF Continuation):');
+  lines.push(`     Total: ${scenario1Stats.totalEvals} | Killzone: ${scenario1Stats.killzone} | NoCandles: ${scenario1Stats.noCandles} | NoOB: ${scenario1Stats.noOb} | NoTouch: ${scenario1Stats.noTouch} | WrongSide: ${scenario1Stats.wrongSide} | NoChoch: ${scenario1Stats.noChoch} | Displacement: ${scenario1Stats.displacement} | NoFvg: ${scenario1Stats.noFvg} | TpInvalid: ${scenario1Stats.tpInvalid}`);
   lines.push('   Scenario 2 (FVG Fill):');
   lines.push(`     Total: ${scenario2Stats.totalEvals} | Killzone: ${scenario2Stats.killzone} | NoHTFFVG: ${scenario2Stats.noHtfFvg} | NoTouch: ${scenario2Stats.noFvgTouch} | NoChoch: ${scenario2Stats.noChoch} | Disp: ${scenario2Stats.displacement} | PremDisc: ${scenario2Stats.premiumDiscount} | NoLiqCtx: ${scenario2Stats.noLiquidityContext}`);
   lines.push('   Scenario 4 (Mitigation Chain):');

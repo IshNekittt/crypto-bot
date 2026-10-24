@@ -3,208 +3,267 @@ import { Decimal } from 'decimal.js';
 import { BotConfig } from '../../config/env';
 import { resolveTakeProfit } from '../tpResolver';
 
-/**
- * A 4H window holds 16 fifteen-minute candles. The CHoCH and the entry FVG must
- * both form inside it, so a stale 4H POI cannot justify a trade hours later.
- */
-const HTF_TOUCH_WINDOW_CANDLES = 16;
-/** Higher-timeframe tags produced by `buildPatternData`. */
-const HTF_TIMEFRAMES = new Set<string>(['240', '360', '720', 'D', 'W', 'M']);
 /** 15m entry timeframe of this scenario. */
 const ENTRY_TIMEFRAME = '15';
-/** Fallback candle interval (ms) when the series is too short to infer it. */
-const DEFAULT_LTF_MS = 15 * 60 * 1000;
+/** Higher-timeframe tag of the order block that defines the trade direction. */
+const HTF_TIMEFRAME = '240';
+/** 15m candles in a 4H window: OB-touch → CHoCH causality budget. */
+const CAUSALITY_WINDOW_CANDLES = 16;
+/** CHoCH → FVG causality budget (one 4H window). */
+const CAUSALITY_WINDOW_MS = 4 * 60 * 60 * 1000;
+/** `detectFVGs()` stamps a gap at c1; it completes two bars later on c3. */
+const FVG_FORMATION_CANDLES = 2;
+/** Displacement floor for the confirming CHoCH (AGENTS.md §7.2). */
+const DISPLACEMENT_MULTIPLIER = 1.5;
 
 type Direction = 'BULLISH' | 'BEARISH';
 
-interface HtfOb {
-  readonly top: Decimal;
-  readonly bottom: Decimal;
+interface DirectionalSetup {
   readonly direction: Direction;
-  readonly timestamp: number;
-  readonly timeframe: string;
+  readonly ob: any;
+  readonly touchCandle: any;
 }
 
-interface ContinuationCandidate {
-  readonly ob: HtfOb;
-  readonly choch: any;
-  readonly fvg: any;
-  readonly touchTimestamp: number;
+/** Funnel counters surfaced in the backtest report (AGENTS.md §8.1). */
+interface Scenario1Stats {
+  totalEvals: number;
+  killzone: number;
+  noCandles: number;
+  noOb: number;
+  noTouch: number;
+  wrongSide: number;
+  noChoch: number;
+  displacement: number;
+  noFvg: number;
+  tpInvalid: number;
 }
+
+type SetupFailure = 'noTouch' | 'wrongSide' | null;
+type DirectionalFailure = 'none' | 'noChoch' | 'displacement' | 'noFvg' | 'tpInvalid';
 
 /**
  * Scenario 1 — HTF Continuation.
  *
- * 4H Order Block retest → 15m CHoCH → 15m FVG retest entry.
+ * Handbook §2: a 4H break establishes the trend, the 15m order block is
+ * retested, and a 15m CHoCH with displacement confirms continuation. The entry
+ * POI is the 15m FVG equilibrium.
  *
- * The direction is a property of the TESTED 4H ORDER BLOCK, never a label:
- * bullish demand produces longs, bearish supply produces shorts (Invariant 57).
- * Causality is enforced — the CHoCH must form at or after the touch that consumed
- * the OB, inside a 4H window, and the entry FVG must form at or after that CHoCH,
- * inside the same window.
+ * Restoration notes:
+ *  - Bidirectional: the direction is derived from the 4H OB that was tested, and
+ *    the OB direction MUST match the trade direction (demand for longs, supply
+ *    for shorts). The old long-only path could buy into 4H supply.
+ *  - Approach side: price must arrive at the block from its origin side and must
+ *    not have closed through it. A broken demand block tested from below is
+ *    supply, not continuation — buying there is the same failure mode as buying
+ *    into 4H supply.
+ *  - Causality: the CHoCH must form at/after the OB touch, and the FVG at/after
+ *    the CHoCH, both inside a 4H window.
+ *  - Target: `resolveTakeProfit()` replaces the blind 3R multiple.
  */
 export class Scenario1_HTFContinuation extends BaseScenario {
+  /** Last per-direction rejection, surfaced only when every setup fails. */
+  private lastFailure = '';
+  private lastFailureKind: DirectionalFailure = 'none';
+
+  private static stats: Scenario1Stats = {
+    totalEvals: 0,
+    killzone: 0,
+    noCandles: 0,
+    noOb: 0,
+    noTouch: 0,
+    wrongSide: 0,
+    noChoch: 0,
+    displacement: 0,
+    noFvg: 0,
+    tpInvalid: 0,
+  };
+
+  static getRejectionStats(): Scenario1Stats {
+    return { ...this.stats };
+  }
+
+  static resetStats(): void {
+    this.stats = {
+      totalEvals: 0,
+      killzone: 0,
+      noCandles: 0,
+      noOb: 0,
+      noTouch: 0,
+      wrongSide: 0,
+      noChoch: 0,
+      displacement: 0,
+      noFvg: 0,
+      tpInvalid: 0,
+    };
+  }
+
   constructor(config: BotConfig) {
     super(1, 'HTF Continuation', config);
   }
 
   protected override evaluateInternal(patternData: any): boolean {
-    if (!this.isInKillzone(patternData)) {
-      this.logRejection('Not in active killzone');
-      return false;
+    const stats = Scenario1_HTFContinuation.stats;
+    stats.totalEvals++;
+    this.lastFailure = '';
+    this.lastFailureKind = 'none';
+
+    // London/NY only. `isInKillzone()` intentionally accepts ASIAN for other
+    // scenarios, so the session gate is explicit here. Still bypassable globally
+    // via ENFORCE_KILLZONES=false for backtesting.
+    if (this.config.enforceKillzones !== false) {
+      const killzone = patternData.currentKillzone;
+      if (killzone !== 'LONDON' && killzone !== 'NY') {
+        this.logRejection('HTF Continuation requires London or NY killzone');
+        stats.killzone++;
+        return false;
+      }
     }
 
-    const candles15m: any[] = Array.isArray(patternData.candles15m) ? patternData.candles15m : [];
+    const candles15m: any[] = Array.isArray(patternData.candles15m)
+      ? patternData.candles15m
+      : [];
     if (candles15m.length === 0) {
       this.logRejection('No 15m candle available');
+      stats.noCandles++;
       return false;
     }
 
     const zones: any[] = Array.isArray(patternData.zones) ? patternData.zones : [];
-
-    // --- 1. Unmitigated 4H Order Blocks --------------------------------
-    // `zones` are timestamp-ascending, so reverse iteration walks newest -> oldest.
-    const htfObs: HtfOb[] = zones
-      .filter(
-        (z) =>
-          z.type === 'OB' &&
-          HTF_TIMEFRAMES.has(String(z.timeframe)) &&
-          z.mitigated !== true &&
-          this.isDirection(z.direction)
-      )
-      .map((z) => ({
-        top: new Decimal(z.top),
-        bottom: new Decimal(z.bottom),
-        direction: z.direction as Direction,
-        timestamp: Number(z.timestamp),
-        timeframe: String(z.timeframe),
-      }));
-
+    const htfObs = zones.filter(
+      (z) =>
+        z.type === 'OB' &&
+        String(z.timeframe) === HTF_TIMEFRAME &&
+        z.mitigated !== true,
+    );
     if (htfObs.length === 0) {
-      this.logRejection('No valid unmitigated 4H Order Block found');
+      this.logRejection('No valid 4H Order Block found');
+      stats.noOb++;
       return false;
     }
 
-    // --- 2. 15m CHoCH candidates ---------------------------------------
-    const chochs = (patternData.structures ?? []).filter(
-      (s: any) =>
-        s.type === 'CHOCH' &&
-        String(s.timeframe) === ENTRY_TIMEFRAME &&
-        this.isDirection(s.direction)
+    const { setups, failure, failureKind } = this.collectDirectionalSetups(
+      htfObs,
+      candles15m,
+    );
+    if (setups.length === 0) {
+      this.logRejection(failure);
+      if (failureKind === 'wrongSide') stats.wrongSide++;
+      else stats.noTouch++;
+      return false;
+    }
+
+    // Freshest zone interaction first: a newer supply test must not be shadowed
+    // by a stale demand touch (or vice versa).
+    for (const setup of setups) {
+      if (this.tryDirection(setup, patternData)) return true;
+    }
+
+    this.logRejection(
+      this.lastFailure ||
+        'No 15m CHoCH/FVG with displacement after the 4H OB touch',
     );
 
-    if (chochs.length === 0) {
-      this.logRejection('No 15m CHoCH found');
+    // One funnel bucket per evaluation: the last attempted direction names the
+    // binding constraint of the scan.
+    if (this.lastFailureKind !== 'none') {
+      stats[this.lastFailureKind]++;
+    }
+    return false;
+  }
+
+  /** Evaluate one direction end-to-end; returns true only when a trade is armed. */
+  private tryDirection(setup: DirectionalSetup, patternData: any): boolean {
+    const { direction, touchCandle } = setup;
+    const structures: any[] = Array.isArray(patternData.structures)
+      ? patternData.structures
+      : [];
+    const zones: any[] = Array.isArray(patternData.zones) ? patternData.zones : [];
+    const touchTimestamp = Number(touchCandle.timestamp);
+
+    // Causality: CHoCH at/after the OB touch, within one 4H window.
+    const chochs = structures.filter(
+      (s: any) =>
+        s.type === 'CHOCH' &&
+        s.direction === direction &&
+        String(s.timeframe) === ENTRY_TIMEFRAME &&
+        Number(s.timestamp) >= touchTimestamp &&
+        Number(s.timestamp) <= touchTimestamp + CAUSALITY_WINDOW_MS,
+    );
+    const choch = chochs[chochs.length - 1];
+    if (!choch) {
+      this.lastFailure = `No 15m ${direction} CHoCH after the 4H OB touch`;
+      this.lastFailureKind = 'noChoch';
       return false;
     }
 
-    const ltfMs = this.resolveLtfMs(candles15m);
-    const windowMs = HTF_TOUCH_WINDOW_CANDLES * ltfMs;
-
-    let firstFailure = '';
-    const candidates: ContinuationCandidate[] = [];
-
-    // Newest CHoCH first: a confirmed continuation is a fresh one, never the
-    // oldest structure the array happens to hold.
-    for (let c = chochs.length - 1; c >= 0; c--) {
-      const choch = chochs[c];
-      const direction: Direction = choch.direction;
-
-      // Displacement is a hard gate: a break without expansion is noise.
-      if (!this.isValidDisplacement(choch, 1.5)) {
-        if (!firstFailure) firstFailure = '15m CHoCH displacement < 1.5 ATR';
-        continue;
-      }
-
-      // --- 2a. 4H OB touch BEFORE the CHoCH, inside the 4H window ---
-      const windowStart = Number(choch.timestamp) - windowMs;
-      let touchedOb: HtfOb | null = null;
-      let touchTimestamp = 0;
-
-      for (let i = candles15m.length - 1; i >= 0; i--) {
-        const candle = candles15m[i];
-        const candleTs = Number(candle.timestamp);
-        if (candleTs > Number(choch.timestamp)) continue;
-        if (candleTs < windowStart) break;
-
-        // Newest matching OB wins: the freshest POI explains the reaction.
-        for (let o = htfObs.length - 1; o >= 0; o--) {
-          const ob = htfObs[o];
-          if (ob.direction !== direction) continue;
-          if (!this.candleTouchesZone(candle, ob.top, ob.bottom)) continue;
-          touchedOb = ob;
-          touchTimestamp = candleTs;
-          break;
-        }
-
-        if (touchedOb) break;
-      }
-
-      if (!touchedOb) {
-        if (!firstFailure) firstFailure = 'Price has not touched a matching 4H OB before the CHoCH';
-        continue;
-      }
-
-      // --- 2b. Entry FVG AT/AFTER the CHoCH, inside the same 4H window ---
-      const fvg = [...zones].reverse().find((z) => {
-        if (z.type !== 'FVG') return false;
-        if (String(z.timeframe) !== ENTRY_TIMEFRAME) return false;
-        if (z.direction !== direction) return false;
-        const ts = Number(z.timestamp);
-        return ts >= Number(choch.timestamp) && ts - touchTimestamp <= windowMs;
-      });
-
-      if (!fvg) {
-        if (!firstFailure) firstFailure = 'No 15m FVG found after CHoCH inside the 4H window';
-        continue;
-      }
-
-      candidates.push({ ob: touchedOb, choch, fvg, touchTimestamp });
-    }
-
-    if (candidates.length === 0) {
-      this.logRejection(firstFailure || 'No valid 4H continuation chain found');
+    // Displacement is a hard gate (AGENTS.md §7.2).
+    if (!this.isValidDisplacement(choch, DISPLACEMENT_MULTIPLIER)) {
+      this.lastFailure = '15m CHoCH displacement < 1.5 ATR';
+      this.lastFailureKind = 'displacement';
       return false;
     }
 
-    // Deterministic winner: newest CHoCH, then most recent OB touch.
-    candidates.sort((a, b) => {
-      const chochDelta = Number(b.choch.timestamp) - Number(a.choch.timestamp);
-      if (chochDelta !== 0) return chochDelta;
-      return b.touchTimestamp - a.touchTimestamp;
+    // FVG is the entry POI and must be fresh relative to the trigger.
+    //
+    // `detectFVGs()` stamps a gap at `c1.timestamp` — the candle TWO bars before
+    // the gap completes on `c3`. Comparing that raw stamp against the CHoCH
+    // candle excludes the impulse FVG the CHoCH itself leaves behind (c3 is the
+    // break candle, so the stamp sits 2 bars in the past) and leaves only rare
+    // later gaps. Causality is therefore measured on the COMPLETION bar, which
+    // is the moment the gap actually exists on the chart.
+    const candles15m: any[] = Array.isArray(patternData.candles15m)
+      ? patternData.candles15m
+      : [];
+    const entryCandleMs = this.resolveCandleMs(candles15m);
+    const completion = (z: any): number =>
+      Number(z.timestamp) + FVG_FORMATION_CANDLES * entryCandleMs;
+
+    const fvgs = zones.filter((z: any) => {
+      if (z.type !== 'FVG') return false;
+      if (z.direction !== direction) return false;
+      if (String(z.timeframe) !== ENTRY_TIMEFRAME) return false;
+      const completesAt = completion(z);
+      return (
+        completesAt >= Number(choch.timestamp) &&
+        completesAt <= Number(choch.timestamp) + CAUSALITY_WINDOW_MS
+      );
     });
+    const fvg = fvgs[fvgs.length - 1];
+    if (!fvg) {
+      this.lastFailure = 'No 15m FVG found after CHoCH inside the 4H window';
+      this.lastFailureKind = 'noFvg';
+      return false;
+    }
 
-    const { choch, fvg } = candidates[0];
-    const direction: Direction = choch.direction;
-
-    // --- 3. Entry at the FVG equilibrium (0.5) --------------------------
+    // Entry at 0.5 (equilibrium) of the FVG.
     const entry = new Decimal(fvg.top).plus(fvg.bottom).dividedBy(2);
     const fvgZone = {
       top: new Decimal(fvg.top),
       bottom: new Decimal(fvg.bottom),
       direction,
     };
-
-    // --- 4. Stop geometry + structural target --------------------------
-    const atr =
+    const atr15m =
       patternData.atr15m instanceof Decimal && patternData.atr15m.gt(0)
         ? patternData.atr15m
         : new Decimal('0.01');
 
-    const offsetMultiplier = this.config.smcSlAtrOffset
-      ? new Decimal(this.config.smcSlAtrOffset)
-      : new Decimal('0.5');
+    // Stop geometry stays in `calculateLevels` (rr = 1 is a placeholder here).
+    const base = this.calculateLevels(
+      entry,
+      fvgZone,
+      direction,
+      atr15m,
+      new Decimal(1),
+    );
 
-    // The stop comes from `calculateLevels()` through the shared base helper; the
-    // target from market structure (`tpResolver`). `skipMinorObstacles: false` keeps
-    // the legacy wall semantics: the NEAREST obstacle decides, and a target with no
-    // room rejects the setup instead of being clamped to a distance the market has
-    // already invalidated.
+    // Structural target. `skipMinorObstacles: false` keeps the legacy 15m
+    // semantics: the NEAREST obstacle is the honest target, and if it is closer
+    // than DYNAMIC_TP_MIN_RR the setup is rejected rather than clamped.
     const resolution = resolveTakeProfit({
       direction,
-      entry,
-      stopLoss: this.calculateLevels(entry, fvgZone, direction, atr, new Decimal(1)).stopLoss,
-      zones: patternData.zones ?? [],
+      entry: base.entry,
+      stopLoss: base.stopLoss,
+      zones,
       liquidityPools: patternData.liquidityPools ?? [],
       tradingRange: patternData.tradingRange ?? null,
       macroContext: patternData.macroContext ?? null,
@@ -218,7 +277,8 @@ export class Scenario1_HTFContinuation extends BaseScenario {
     });
 
     if (!resolution.ok) {
-      this.logRejection(`Take-profit rejected: ${resolution.reason}`);
+      this.lastFailure = `Take-profit rejected: ${resolution.reason}`;
+      this.lastFailureKind = 'tpInvalid';
       return false;
     }
 
@@ -226,9 +286,8 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       entry,
       fvgZone,
       direction,
-      atr,
+      atr15m,
       resolution.takeProfit,
-      offsetMultiplier
     );
 
     this.setLevels({
@@ -237,7 +296,8 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       takeProfit: levels.takeProfit,
     });
 
-    // Zone mitigation: the FVG we entered from.
+    // FVG is the entry zone; CHoCH is the trigger structure. Both are required
+    // for ghost-signal mitigation (Invariant 39).
     this.setZoneDetails({
       type: 'FVG',
       top: fvgZone.top,
@@ -247,7 +307,6 @@ export class Scenario1_HTFContinuation extends BaseScenario {
       timestamp: Number(fvg.timestamp),
     });
 
-    // Structure mitigation: the CHoCH that confirmed the continuation.
     this.setStructureDetails({
       type: 'CHoCH',
       timestamp: Number(choch.timestamp),
@@ -256,13 +315,143 @@ export class Scenario1_HTFContinuation extends BaseScenario {
     });
 
     this.setReason(
-      `HTF Continuation: ${direction} 4H OB touch + 15m CHoCH + 15m FVG entry`,
+      `HTF Continuation: 4H ${direction} OB touch + 15m ${direction} CHoCH + 15m FVG entry`,
     );
     return true;
   }
 
-  private isDirection(value: unknown): value is Direction {
-    return value === 'BULLISH' || value === 'BEARISH';
+  /**
+   * One candidate per direction: the freshest valid retest of an unmitigated 4H
+   * OB of that direction inside the 4H window.
+   *
+   * The causality anchor is the FIRST wick intersection, not the newest one. A
+   * 4H OB is wide enough that price often sits inside it for several 15m closes;
+   * advancing the anchor on every touch would push it past the confirming CHoCH
+   * and make the `choch >= touch` gate unsatisfiable for the whole test.
+   *
+   * The OB direction defines the trade direction — this is the guard that
+   * prevents buying into 4H supply.
+   */
+  private collectDirectionalSetups(
+    htfObs: any[],
+    candles15m: any[],
+  ): { setups: DirectionalSetup[]; failure: string; failureKind: SetupFailure } {
+    const byDirection = new Map<Direction, DirectionalSetup>();
+    const windowStart = Math.max(0, candles15m.length - CAUSALITY_WINDOW_CANDLES);
+    let sawTouch = false;
+
+    for (const ob of htfObs) {
+      const direction = ob.direction as Direction;
+      if (direction !== 'BULLISH' && direction !== 'BEARISH') continue;
+
+      // Zone top/bottom ordering is not guaranteed (Invariant 11).
+      const top = Decimal.max(new Decimal(ob.top), new Decimal(ob.bottom));
+      const bottom = Decimal.min(new Decimal(ob.top), new Decimal(ob.bottom));
+
+      // A 4H block only exists after its own 4H candle has closed, so the
+      // earliest genuine retest is `obTimestamp + 4h`. Within the formation
+      // candle price is still printing the block, not testing it.
+      const obTimestamp = Number(ob.timestamp);
+      const earliestRetest = obTimestamp + CAUSALITY_WINDOW_MS;
+
+      let firstTouch = -1;
+      for (let i = windowStart; i < candles15m.length; i++) {
+        const candle = candles15m[i];
+        if (Number(candle.timestamp) < earliestRetest) continue;
+        if (!this.candleTouchesZone(candle, top, bottom)) continue;
+        firstTouch = i;
+        break;
+      }
+      if (firstTouch === -1) continue;
+      sawTouch = true;
+
+      if (!this.isValidApproach(direction, candles15m, firstTouch, top, bottom)) {
+        continue;
+      }
+
+      // Freshest retest wins per direction; the newer OB breaks a tie.
+      const touchCandle = candles15m[firstTouch];
+      const existing = byDirection.get(direction);
+      const isFresher =
+        !existing ||
+        Number(touchCandle.timestamp) > Number(existing.touchCandle.timestamp) ||
+        (Number(touchCandle.timestamp) === Number(existing.touchCandle.timestamp) &&
+          Number(ob.timestamp) > Number(existing.ob.timestamp));
+      if (isFresher) {
+        byDirection.set(direction, { direction, ob, touchCandle });
+      }
+    }
+
+    const setups = [...byDirection.values()].sort(
+      (a, b) => Number(b.touchCandle.timestamp) - Number(a.touchCandle.timestamp),
+    );
+    if (setups.length > 0) return { setups, failure: '', failureKind: null };
+
+    return sawTouch
+      ? {
+          setups,
+          failure:
+            'Price approached the 4H OB from the wrong side (zone already broken through)',
+          failureKind: 'wrongSide',
+        }
+      : {
+          setups,
+          failure: 'Price has not touched 4H OB zone',
+          failureKind: 'noTouch',
+        };
+  }
+
+  /**
+   * Approach-side validation.
+   *
+   * A demand block is only valid while price arrives from ABOVE it; a supply
+   * block only while price arrives from BELOW. Two independent failures are
+   * rejected here:
+   *
+   *  1. Arrival side — the candle before the first intersection must close on the
+   *     origin side of the block. A rally into a bullish OB from below is a broken
+   *     block being tested as supply, not a demand retest.
+   *  2. Break-through — once price closes beyond the far edge, the block is
+   *     consumed and can no longer justify a continuation.
+   *
+   * The break-through scan starts at the first intersection: any earlier
+   * violation would have forced the arrival itself to come from behind.
+   */
+  private isValidApproach(
+    direction: Direction,
+    candles15m: any[],
+    firstTouchIndex: number,
+    top: Decimal,
+    bottom: Decimal,
+  ): boolean {
+    const reference =
+      firstTouchIndex > 0
+        ? new Decimal(candles15m[firstTouchIndex - 1].close)
+        : new Decimal(candles15m[firstTouchIndex].open);
+
+    const arrivedFromOrigin =
+      direction === 'BULLISH' ? reference.gte(top) : reference.lte(bottom);
+    if (!arrivedFromOrigin) return false;
+
+    for (let i = firstTouchIndex; i < candles15m.length; i++) {
+      const close = new Decimal(candles15m[i].close);
+      if (direction === 'BULLISH' ? close.lt(bottom) : close.gt(top)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /** Candle spacing of the entry series (ms) taken from the data, never assumed. */
+  private resolveCandleMs(candles: any[]): number {
+    const sample = Math.min(candles.length, 5);
+    for (let i = 1; i < sample; i++) {
+      const delta =
+        Number(candles[i].timestamp) - Number(candles[i - 1].timestamp);
+      if (Number.isFinite(delta) && delta > 0) return delta;
+    }
+    return CAUSALITY_WINDOW_MS / CAUSALITY_WINDOW_CANDLES;
   }
 
   /** Wick intersection counts as a touch: an OB is consumed by the wick that tests it. */
@@ -273,18 +462,5 @@ export class Scenario1_HTFContinuation extends BaseScenario {
     const zoneTop = Decimal.max(top, bottom);
     const zoneBottom = Decimal.min(top, bottom);
     return high.gte(zoneBottom) && low.lte(zoneTop);
-  }
-
-  /**
-   * Candles in a 4H window, derived from the actual candle spacing rather than a
-   * hardcoded 15-minute assumption (Invariant 12).
-   */
-  private resolveLtfMs(candles: any[]): number {
-    const sample = Math.min(candles.length, 5);
-    for (let i = 1; i < sample; i++) {
-      const delta = Number(candles[i].timestamp) - Number(candles[i - 1].timestamp);
-      if (Number.isFinite(delta) && delta > 0) return delta;
-    }
-    return DEFAULT_LTF_MS;
   }
 }

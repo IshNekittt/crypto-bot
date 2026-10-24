@@ -7,8 +7,8 @@ import { resolveTakeProfit } from '../tpResolver';
 const SWEEP_LOOKBACK_CANDLES = 16;
 /** 15m entry timeframe of this scenario. */
 const ENTRY_TIMEFRAME = '15';
-/** Fallback candle interval (ms) when the series is too short to infer it. */
-const DEFAULT_LTF_MS = 15 * 60 * 1000;
+/** 4H causality budget for sweep → CHoCH and CHoCH → FVG. */
+const CAUSALITY_WINDOW_MS = 4 * 60 * 60 * 1000;
 
 /**
  * Deterministic tie-break when several pools are swept by the SAME candle.
@@ -107,41 +107,47 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       return false;
     }
 
-    // === SWEEP SCAN (last 16 LTF candles) ===
+    // === SWEEP SCAN (last 4H of 15m candles) ===
+    // A sweep is not a "last candle" event: price can take a pool and only close
+    // back inside a few bars later. Scanning the whole 4H window is what makes
+    // the causality gate below meaningful.
     // SMC: sweep = wick pierces the level AND price closes back inside (SFP).
-    // Newest sweep wins; a tie on the same candle is resolved by POOL_PRIORITY so
-    // the outcome never depends on array order.
-    const lookback = candles15m.slice(-SWEEP_LOOKBACK_CANDLES);
+    const sweepWindow = candles15m.slice(-SWEEP_LOOKBACK_CANDLES);
+
+    // Deterministic pool ranking: on a timestamp tie the higher-ranked pool is the
+    // dominant liquidity event (PDH > PDL > PWH > PWL > BSL > SSL).
+    const rankedPools = [...htfPools].sort(
+      (a: any, b: any) =>
+        (POOL_PRIORITY[a.type] ?? 99) - (POOL_PRIORITY[b.type] ?? 99),
+    );
 
     let sweptPool: any = null;
     let sweepDirection: Direction | null = null;
     let sweptAt = 0;
 
-    for (let i = lookback.length - 1; i >= 0; i--) {
-      const candle = lookback[i];
-      const high = new Decimal(candle.high);
-      const low = new Decimal(candle.low);
-      const close = new Decimal(candle.close);
+    for (const pool of rankedPools) {
+      const level = pool.priceLevel;
 
-      const hits: Array<{ pool: any; direction: Direction }> = [];
+      // Newest -> oldest: the first hit is this pool's most recent sweep.
+      for (let i = sweepWindow.length - 1; i >= 0; i--) {
+        const candle = sweepWindow[i];
+        const high = new Decimal(candle.high);
+        const low = new Decimal(candle.low);
+        const close = new Decimal(candle.close);
 
-      for (const pool of htfPools) {
-        const level = pool.priceLevel;
-        if (high.gt(level) && close.lt(level)) {
-          hits.push({ pool, direction: 'BEARISH' });
-        } else if (low.lt(level) && close.gt(level)) {
-          hits.push({ pool, direction: 'BULLISH' });
+        const bearishSweep = high.gt(level) && close.lt(level);
+        const bullishSweep = low.lt(level) && close.gt(level);
+        if (!bearishSweep && !bullishSweep) continue;
+
+        // Latest sweep across ALL pools wins. Strict `>` keeps the higher-ranked
+        // pool on a timestamp tie (pools are iterated in rank order).
+        if (Number(candle.timestamp) > sweptAt) {
+          sweptAt = Number(candle.timestamp);
+          sweptPool = pool;
+          sweepDirection = bearishSweep ? 'BEARISH' : 'BULLISH';
         }
+        break;
       }
-
-      if (hits.length === 0) continue;
-
-      hits.sort((a, b) => POOL_PRIORITY[a.pool.type] - POOL_PRIORITY[b.pool.type]);
-
-      sweptPool = hits[0].pool;
-      sweepDirection = hits[0].direction;
-      sweptAt = Number(candle.timestamp);
-      break;
     }
 
     if (!sweptPool || !sweepDirection) {
@@ -151,16 +157,18 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     }
 
     const direction: Direction = sweepDirection;
-    const ltfMs = this.resolveLtfMs(candles15m);
-    const windowMs = SWEEP_LOOKBACK_CANDLES * ltfMs;
 
-    // === 15m CHoCH AT/AFTER THE SWEEP (within the 4H reaction window) ===
+    // === CAUSALITY: the CHoCH must FOLLOW the sweep ===
+    // The replaced code measured a lower bound from the LAST candle, so a CHoCH
+    // printed BEFORE the sweep passed. Causality now runs from `sweptAt`; the
+    // same candle is allowed because sweep and break can print together.
     const chochs = (structures ?? []).filter(
       (s: any) =>
         s.type === 'CHOCH' &&
         s.direction === direction &&
+        String(s.timeframe) === ENTRY_TIMEFRAME &&
         Number(s.timestamp) >= sweptAt &&
-        Number(s.timestamp) <= sweptAt + windowMs
+        Number(s.timestamp) <= sweptAt + CAUSALITY_WINDOW_MS
     );
 
     const choch = chochs[chochs.length - 1];
@@ -184,7 +192,7 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
         z.direction === direction &&
         String(z.timeframe) === ENTRY_TIMEFRAME &&
         Number(z.timestamp) >= Number(choch.timestamp) &&
-        Number(z.timestamp) <= Number(choch.timestamp) + windowMs
+        Number(z.timestamp) <= Number(choch.timestamp) + CAUSALITY_WINDOW_MS
     );
 
     if (!fvg) {
@@ -270,21 +278,8 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     });
 
     this.setReason(
-      `HTF Liquidity Sweep: ${sweptPool.type} swept in killzone + 15m CHoCH + FVG 0.5 entry`
+      `HTF Liquidity Sweep: ${sweptPool.type} swept at ${sweptAt} in killzone + 15m CHoCH + FVG 0.5 entry`
     );
     return true;
-  }
-
-  /**
-   * Candles in the reaction window, derived from the actual candle spacing rather
-   * than a hardcoded 15-minute assumption (Invariant 12).
-   */
-  private resolveLtfMs(candles: any[]): number {
-    const sample = Math.min(candles.length, 5);
-    for (let i = 1; i < sample; i++) {
-      const delta = Number(candles[i].timestamp) - Number(candles[i - 1].timestamp);
-      if (Number.isFinite(delta) && delta > 0) return delta;
-    }
-    return DEFAULT_LTF_MS;
   }
 }

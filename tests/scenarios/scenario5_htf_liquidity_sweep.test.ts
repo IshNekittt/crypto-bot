@@ -91,6 +91,8 @@ interface FixtureOptions {
   readonly withFvg?: boolean;
   readonly extraPools?: Array<{ type: string; price: string }>;
   readonly killzone?: string;
+  /** Timeframe tag of the confirming structure (15m by default). */
+  readonly structureTimeframe?: string;
 }
 
 /**
@@ -140,7 +142,7 @@ function buildPatternData(options: FixtureOptions = {}) {
       timestamp: candles[chochIndex].timestamp,
       isValidated: true,
       impulseFactor: new Decimal(options.displacement ?? '2.0'),
-      timeframe: '15',
+      timeframe: options.structureTimeframe ?? '15',
     },
   ];
 
@@ -220,13 +222,21 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
       expect(levels.takeProfit.gt(levels.entry)).toBe(true);
     });
 
-    it('finds a sweep that happened several candles before the latest candle', () => {
-      // Sweep 13 candles before the end — the legacy last-candle-only scan missed it.
+    it('finds a sweep that happened at the very start of the 16-candle window', () => {
+      // Index 14 is the OLDEST candle in the 4H scan (30-candle fixture). A
+      // last-candle-only scan could never see it.
       const result = scenario.evaluate(
-        buildPatternData({ direction: 'BEARISH', sweepIndex: SWEEP_INDEX })
+        buildPatternData({ direction: 'BEARISH', sweepIndex: 29 - 15 }),
       );
 
       expect(result).toBe(true);
+    });
+
+    it('reports the sweep timestamp in the reason', () => {
+      expect(scenario.evaluate(buildPatternData())).toBe(true);
+
+      const sweptAt = BASE_TS + SWEEP_INDEX * LTF_MS;
+      expect(scenario.getReason()).toContain(`swept at ${sweptAt}`);
     });
 
     it('works in the NY killzone', () => {
@@ -276,6 +286,32 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
     it('rejects a CHoCH that formed BEFORE the sweep', () => {
       const result = scenario.evaluate(
         buildPatternData({ chochIndex: SWEEP_INDEX - 4 })
+      );
+
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('No aggressive 15m CHoCH');
+    });
+
+    it('rejects a CHoCH that precedes a NEWER sweep of the same pool', () => {
+      // Sweep at 16, CHoCH at 20, then PDH is swept again at 22. The causality
+      // anchor is the latest sweep, so the CHoCH at 20 can no longer justify it.
+      const data = buildPatternData({ direction: 'BEARISH' });
+      data.candles15m[SWEEP_INDEX + 6] = candle(SWEEP_INDEX + 6, {
+        open: '104',
+        high: '106',
+        low: '103.8',
+        close: '104',
+      });
+
+      const result = scenario.evaluate(data);
+
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('No aggressive 15m CHoCH');
+    });
+
+    it('rejects a 4H CHoCH as the reaction structure (15m filter)', () => {
+      const result = scenario.evaluate(
+        buildPatternData({ structureTimeframe: '240' })
       );
 
       expect(result).toBe(false);
