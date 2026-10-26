@@ -3,9 +3,12 @@ import { Candle, SniperZone, StructureType } from "../types";
 import { logger } from "../utils/logger";
 import { evaluateTradeManagement, initializeTradeManagement, TradeContext } from "../risk/tradeManager";
 import { formatPrice, formatQuantity } from "../utils/precision";
+import { MAKER_FEE_RATE, TAKER_FEE_RATE } from "../config/fees";
 
-export const TAKER_FEE_RATE = new Decimal("0.00055");
-export const MAKER_FEE_RATE = new Decimal("0.00020"); // 0.020% Maker (Limit orders)
+// Fee constants live in `src/config/fees.ts` so the live engine, the arithmetic
+// gates and the simulator can never drift apart. Re-exported here because the
+// simulation suite imports them from this module.
+export { MAKER_FEE_RATE, TAKER_FEE_RATE };
 export const INITIAL_BALANCE = new Decimal("1000");
 export const BASE_RISK_PERCENT = new Decimal("2");
 export const REDUCED_RISK_PERCENT = new Decimal("1");
@@ -53,6 +56,7 @@ export interface TradeResult {
   scenarioId: number;
   scenarioName: string;
   closedBy: "TP" | "SL" | "BOTH";
+  orderType?: "Market" | "Limit";
   // Structure details for mitigation tracking
   structureType?: StructureType;
   structureTimestamp?: number;
@@ -489,7 +493,7 @@ export function openTrade(
     structureType: structureDetails?.type,
     structureTimestamp: structureDetails?.timestamp,
     structurePrice: structureDetails?.price,
-    orderType: "Market",
+    orderType,
     managementState,
     realizedGrossPnl: "0",
   };
@@ -1019,6 +1023,7 @@ export function checkAndCloseTrade(
         scenarioId: trade.scenarioId,
         scenarioName: trade.scenarioName,
         closedBy,
+        orderType: trade.orderType ?? "Market",
         structureType: trade.structureType,
         structureTimestamp: trade.structureTimestamp,
         structurePrice: trade.structurePrice,

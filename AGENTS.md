@@ -72,29 +72,55 @@ To run V4 Classic and V5 Sniper simultaneously, **complete infrastructure separa
 - State corruption from shared `StrategyEngine` instances
 - DB conflicts from concurrent `trades` table writes
 
-**Deployment Pattern**: Use two Render/Oracle Cloud services pointing to the same Docker image but with different `.env` files:
-```bash
-# V4 Service (.env.subaru)
-ENABLE_SNIPER_MODE=false
-ACTIVE_SCENARIOS=1
-SCENARIOS_LINKUSDT=1,5
-SCENARIOS_BTCUSDT=1,5
-SCENARIOS_SOLUSDT=1,5
-SCENARIOS_AVAXUSDT=1
-SCENARIOS_NEARUSDT=1
-SYMBOLS=LINKUSDT,BTCUSDT,SOLUSDT,AVAXUSDT,NEARUSDT
-ENABLE_FUNDING_MONITOR=true
-DATABASE_URL=postgresql://postgres:SubaruSecurePass123@db-subaru:5432/smc_subaru
+**Deployment Pattern**: Two services from the same Docker image, each with its own frozen profile file. Both profiles are **secret-free**: credentials are injected by the platform (Render dashboard, Docker `env_file` chain, systemd `EnvironmentFile`) and `loadConfig()` hard-fails when any of the six is missing.
 
-# V5 Service (.env.emilia)  
+```bash
+# V4 Classic Tank (.env.subaru) — Scenarios 1 + 5
+SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+ENABLE_SNIPER_MODE=false
+ACTIVE_SCENARIOS=1,5
+LTF_TIMEFRAME=15
+HTF_TIMEFRAME=240
+HISTORY_CANDLES=200
+MACRO_CANDLES=1000
+COOLDOWN_CANDLES=16
+LIMIT_EXPIRATION_CANDLES=6
+ENABLE_DYNAMIC_TP=true
+DYNAMIC_TP_MIN_RR=1.5
+DYNAMIC_TP_MAX_RR=6.0
+SMC_SL_ATR_OFFSET=0.5
+SMC_DISPLACEMENT_MULTIPLIER=1.5
+SMART_ENTRY_THRESHOLD_PCT=0.15
+PREFLIGHT_BUFFER_PCT=0.05
+ENABLE_FUNDING_MONITOR=true
+# No SCENARIOS_<SYMBOL>: ACTIVE_SCENARIOS=1,5 applies to all three symbols, and an
+# override would NARROW a symbol rather than extend the global list.
+# No MIN_NET_RR / MIN_VOLATILITY_FEE_RATIO / MIN_TP_DISTANCE_PCT: S12-only gates.
+
+# V5 Sniper (.env.emilia) — Scenario 12 only
+SYMBOLS=NEARUSDT,APTUSDT
 ENABLE_SNIPER_MODE=true
 ACTIVE_SCENARIOS=12
-SCENARIOS_SOLUSDT=12
-SCENARIOS_AVAXUSDT=12
-SYMBOLS=SOLUSDT,AVAXUSDT
+ENABLE_DYNAMIC_TP=true
+DYNAMIC_TP_MIN_RR=1.5
+DYNAMIC_TP_MAX_RR=6.0
+S12_SESSION_SWEEPS=true
+S12_EQH_EQL_SWEEPS=true
+MIN_NET_RR=1.5
+MIN_VOLATILITY_FEE_RATIO=1.5
+SMC_SWEEP_MIN_WICK_RATIO=0.25
+SMC_SL_ATR_OFFSET=0.5
+MIN_TP_DISTANCE_PCT=0.0035
+SNIPER_LIMIT_EXPIRATION_CANDLES=15
+SMC_SL_ATR_OFFSET_APTUSDT=0.60
+SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
 ENABLE_FUNDING_MONITOR=false
-DATABASE_URL=postgresql://postgres:EmiliaSecurePass123@db-emilia:5432/smc_emilia
 ```
+
+**Profile invariants**:
+1. Never copy a secret into `.env.subaru` / `.env.emilia` — they are templates, and the repo convention is that only `.env.example` is tracked (`.env` and `.env.*` are gitignored).
+2. Never let a Classic deployment carry S12-only knobs (`MIN_NET_RR`, `MIN_VOLATILITY_FEE_RATIO`, `MIN_TP_DISTANCE_PCT`, `S12_*`, `SNIPER_*`). They are evaluated **only** inside Scenario 12, so listing them in a Tank profile is dead configuration that reads as protection (§7.13.5).
+3. `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>` is resolved through `resolveLimitExpirationCandles()`; confirm the resolved minutes in the run log rather than trusting the file (§7.13.3).
 
 ---
 
@@ -1614,7 +1640,29 @@ Against the 3-symbol subset of the §7.13.3 baseline (**+$227.04 / 40 trades / 5
 
 > **Boundary note**: the fee floor is measured against `idealEntry` (as specified). A Market fill at a premium can realize a slightly shorter target distance; the LINK 2026-10-22 trade is the observed edge case (planned 0.353%, realized 0.287%). Extending the floor to the actual fill is a deliberate future decision, not a silent clamp.
 
----
+#### 7.13.5 S12 P0 Arithmetic Shields — Net R:R + ATR-to-Fee Admission — **NEW v2026-10-26**
+
+Two arithmetic gates reject fee-dominated geometry **before** an order is ever staged. Both read fees from `src/config/fees.ts` (`ROUND_TRIP_TAKER_FEE = 0.110%`), so the live engine, the backtester and the shields can never disagree about what a round trip costs.
+
+| Gate | Env | Rejection bucket | Rule |
+| --- | --- | --- | --- |
+| **Volatility admission** | `MIN_VOLATILITY_FEE_RATIO` (default `1.0`) | `insufficientVolatility` | `atr1m / close ≥ ratio × ROUND_TRIP_TAKER_FEE`. At `1.5` the 1m ATR must be ≥ **~0.165%** of price. |
+| **Net reward:risk** | `MIN_NET_RR` (default `1.0`) | `insufficientNetR` | `netRr = (targetDistance − roundTripFeeInPrice) / (stopDistance + roundTripFeeInPrice) ≥ ratio`. Fees are added to the **denominator** as well, so a tight stop is punished exactly as much as a short target. |
+
+**Why both, and why two separate buckets**:
+- The volatility gate answers *"is this market worth paying to trade at all?"* — a 1m ATR narrower than the round-trip fee makes the stop noise-wide relative to its own cost, and no win rate survives that. It fires **before** CHoCH detection, so a dead-volatility minute never even reaches structure matching.
+- The net-R gate answers *"does this specific geometry still pay after both legs?"* — it fires **after** `resolveTakeProfit()`, because it needs the resolved target. A setup can clear the volatility gate and still fail here when the structural target sits close relative to the stop.
+- Collapsing them into one bucket would destroy the funnel's diagnostic value: `insufficientVolatility` clusters by market regime, `insufficientNetR` clusters by stop/target geometry. They are reported separately in the backtest summary.
+
+**Placement invariants**:
+1. The volatility gate reads the **latest 1m close** as the ATR reference and fails closed on a non-positive price (`invalidAtr`).
+2. The net-R gate runs on `baseLevels` (the pre-target geometry) and rejects on zero stop distance (`geometry`) before dividing.
+3. Neither gate clamps, rounds or "adjusts" a target — rejection only. Widening a stop or shrinking a target to satisfy a ratio would silently rewrite the scenario's structure.
+4. Both are resolved per symbol through `resolveSymbolConfig()`, so `MIN_NET_RR_<SYMBOL>` and `MIN_VOLATILITY_FEE_RATIO_<SYMBOL>` calibrate one pair without touching the portfolio.
+
+**Scope**: both parameters are read **exclusively** by `Scenario12_SniperTouch.ts`. Scenarios 1–11 never consult them, which is why a Classic deployment (`.env.subaru`) must not carry them — a knob that is never evaluated is worse than an absent one, because it reads as protection.
+
+**Verified Sniper calibration** (`.env.emilia`): `MIN_NET_RR=1.5`, `MIN_VOLATILITY_FEE_RATIO=1.5`.
 
 ---
 
@@ -1980,22 +2028,26 @@ ENFORCE_KILLZONES=false              # bypass London/NY killzone gates
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | **1**  | HTF Continuation    | Tested 4H OB → 15m CHoCH at/after the touch → 15m FVG at/after the CHoCH (both inside the 4h window) | 4H OB direction defines the side; 16-candle causality window; displacement + dynamic TP |
-| **2**  | FVG Fill            | 15m FVG → retest at 50%                                    | **Liquidity Context**: sweep/CHoCH in prior 10-15 candles (`NoLiqCtx`)        |
-| **3**  | IDM (Inducement)    | Local extreme swept → true OB beyond                       | Swing detection                                                               |
-| **4**  | Mitigation Chain    | OB → BOS within 24h → retest                               | **Strength Context**: OB must make BOS (`NoBOS`)                              |
+| **2**  | FVG Fill            | Direction from the tested **HTF** FVG (4H) → fill to 0.5 → 15m CHoCH at/after the fill | Mirrored Premium/Discount (bullish gap in discount, bearish in premium) + liquidity context before the gap formed (`NoLiqCtx`) + 15m CHoCH displacement |
+| **3**  | IDM (Inducement)    | Structural level swept (wick beyond + body back inside) → real 15m OB beyond the level, reached by the same wick | Bidirectional; level from `structures.price` (no `brokenSwing`); proximity `max(2 × ATR, 0.5%)`; block must pre-exist the trigger candle |
+| **4**  | Mitigation Chain    | 15m OB mitigated (bounce) → BOS strictly **after** the bounce (24h) → retest of the new block's equilibrium | Bidirectional + Premium/Discount; no CHoCH gate (a chain is a BOS continuation, not a reversal) |
 | **5**  | HTF Liquidity Sweep | PDH/PDL/PWH/PWL/BSL/SSL sweep in the last 16 LTF candles → CHoCH at/after the sweep | Killzone + sweep wick (SFP) + deterministic pool priority (`PDH > PDL > PWH > PWL > BSL > SSL`) + dynamic TP |
-| **6**  | SMS (Failure Swing) | Failed HH/LL → CHoCH opposite                              | Displacement ≥ 1.5 ATR on CHoCH candle                                        |
-| **7**  | AMD (Asian Range)   | Asian 20:00-24:00 high/low → sweep → reversal              | `detectSessionRanges()` per day                                               |
-| **8**  | Range Deviation     | Range High/Low deviation → reclaim                         | Wick back inside, equilibrium target                                          |
-| **9**  | Turtle Soup         | Range High sweep (EQH) → short                             | EQH tolerance + SFP on range boundary                                         |
-| **10** | Breaker Block       | OB broken with displacement → retest                       | Body close beyond OB + FVG nearby                                             |
-| **11** | Mitigation Block    | **Only after SMS** → retest block that formed failed swing | **Strict SMS pattern**: failed HH → CHoCH down (`NoSms`, `InvalidSmsPattern`). **FRESHNESS**: Always takes newest SMS (`smsList[smsList.length-1]`), newest CHoCH after SMS (`validChochs[validChochs.length-1]`), newest OB before SMS (`mbObs[mbObs.length-1]`). **RETEST**: Current 15m candle must test MB zone with wicks, close inside zone in trade direction, within 12h of CHoCH. **P/D**: Entry close tested against SMS→CHoCH impulse equilibrium (Long=Discount, Short=Premium). |
-| **12** | Sniper Touch        | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
+| **6**  | SMS (Failure Swing) | Failed HH/LL → 15m CHoCH at/after the SMS → mitigation of the failed leg's 15m OB (0.5 entry) | **Strict 15m** for SMS/CHoCH/OB; causality `ob < sms ≤ choch`; 72h looking window; displacement ≥ 1.5 ATR on the CHoCH; `resolveTakeProfit` (`skipMinorObstacles: false`) |
+| **7**  | AMD (Asian Range)   | Freshest Asian extreme swept (strict SFP) → 15m CHoCH at/after the sweep → 15m FVG 0.5 entry | **Bidirectional** (Asian low → long to Asian high; Asian high → short to Asian low); newest-first sweep scan; CHoCH causality `>= sweep` inside 8h; range height ≤ 3 × ATR4H; opposing session extreme via `resolveTakeProfit` (no manual TP override) |
+| **8**  | Range Deviation     | Freshest boundary excursion → reclaim (body back inside) → 15m CHoCH at/after the reclaim → 15m FVG/OB 0.5 entry | **Bidirectional** (below low → long; above high → short); backwards scan; penetration `max(0.1 × ATR, 0.05%)`; a close through the opposite boundary voids the chain; 15m-only POI inside the range; TP = `RANGE_EQUILIBRIUM` / opposing boundary |
+| **9**  | Turtle Soup         | Last closed 15m candle SFP through the range boundary (EQH/EQL) → entry at the SFP close | **Bidirectional** (EQH sweep → short; EQL sweep → long); single-bar trigger; `sweptLevel = max/min(boundary, EQH/EQL)`; body closes strictly inside; wick ratio ≥ `SMC_SWEEP_MIN_WICK_RATIO`; SFP-range stop; TP = range equilibrium / opposing cluster |
+| **10** | Breaker Block       | 15m block whose far extreme was swept → broken by a 15m BOS with displacement + FVG → retest of the mirrored zone (0.5 entry) | **BOS-only** break (a CHoCH is a reversal, not a breaker break); block strictly before the break and ≤ 24h old; body close clears the WHOLE block; retest = current candle, wick in + body holding, within 4h; FVG window measured on the completion bar; `resolveTakeProfit` (`skipMinorObstacles: false`) |
+| **11** | Mitigation Block    | **Only after SMS** → 15m CHoCH (inside 8h) → mitigation of the failed leg's 15m OB inside 12h | **Strict 15m** for SMS/CHoCH/MB; chain `ob < sms ≤ choch < retest` inside a 72h looking window; displacement ≥ 1.5 ATR on the CHoCH; retest closes inside the block in the trade direction; P/D on the SMS→CHoCH impulse; `resolveTakeProfit` (`skipMinorObstacles: false`) |
+| **12** | Sniper Touch        | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + P0 shields (`MIN_VOLATILITY_FEE_RATIO` ATR-to-fee admission, `MIN_NET_RR` fee-inclusive R:R) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
 | **13** | ~~Top-Down Order Flow~~ | **ARCHIVED** — `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts`, not registered | Kept for reference; `ACTIVE_SCENARIOS` accepts 1–12 |
 
 ### 8.1 Scenario Overview
 
 The table above lists all 12 active scenarios implemented in `src/engine/scenarios/`. Scenarios 1–11 are classic SMC patterns (15m/4H) and Scenario 12 is V5 Sniper Mode (single-pass 1m evaluation against swept levels). Scenario 13 (Top-Down Order Flow) is archived in `src/engine/scenarios/archive/` and is not registered; its §8.6 documentation is retained as a design reference. Each active scenario has dedicated rejection statistics for observability.
+
+### S1 & S5 FVG Completion-Bar Timing
+
+**Scenarios 1 and 5 use the FVG completion bar, not the candle timestamp that `detectFVGs()` stamps.** `detectFVGs()` assigns the zone timestamp to `c1` (the first candle), while the three-bar FVG becomes complete only on `c3`. Both scenarios therefore evaluate `timestamp + 2 × LTF spacing` as the completion time (the spacing is measured from the series, never assumed to be 15 minutes — Invariant 12). CHoCH/FVG causality means the completed FVG must exist at or after the CHoCH; the impulse FVG left behind by the CHoCH is valid because the break candle is `c3`, but a later FVG can only be used within the 4H causality window. Comparing raw `c1` timestamps would incorrectly exclude a valid same-CHoCH FVG (the exact gap the break itself creates, which S5 previously discarded) or admit a gap that is not yet complete.
 
 ### 8.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
@@ -2007,7 +2059,11 @@ The table above lists all 12 active scenarios implemented in `src/engine/scenari
 
 | Scenario                  | Filter                                       | Rejection Stat               |
 | ------------------------- | -------------------------------------------- | ---------------------------- |
-| **11 (Mitigation Block)** | Valid SMS pattern (failed HH → CHoCH down)   | `NoSms`, `InvalidSmsPattern` |
+| **6 (SMS)**               | Confirming 15m CHoCH with displacement, at/after the SMS, inside the 72h window | `noSms`, `noOb`, `noChoch`, `displacement`, `tpInvalid` |
+| **10 (Breaker Block)**    | BOS-only break, whole-block body close, 24h block freshness, liquidity grab, displacement FVG, 4h retest | `noBreak`, `bodyClose`, `displacement`, `noBrokenOb`, `obNotFresh`, `noLiquiditySweep`, `noFvg`, `noRetest`, `tpInvalid` |
+| **11 (Mitigation Block)** | Valid SMS chain (15m, ordered, 72h) + P/D on the SMS→CHoCH impulse | `noSms`, `noChoch`, `displacement`, `noMitigationBlock`, `noRetest`, `premiumDiscount`, `tpInvalid` |
+
+All three also expose `totalEvals` / `noData` / `killzone`, and report only the **deepest** rejection of the chain (`fail()` keeps the highest stage), so the bucket describes how far the setup got rather than which gate happened to run first.
 
 ---
 
@@ -2021,24 +2077,32 @@ The table above lists all 12 active scenarios implemented in `src/engine/scenari
 3. The Order Block that formed the failed swing extreme becomes the Mitigation Block
 4. Trade triggers on retest of this MB by current 15m candle
 
-**Critical Implementation Details (v2026-09-21 — Critical Bug Fixes):**
+**Critical Implementation Details (refactored v2026-10-26):**
 
 | Aspect | Implementation | Why Critical |
 |--------|---------------|--------------|
-| **SMS Selection** | `structures.filter(s => s.type === 'SMS')` → `smsList[smsList.length-1]` | `.find()` returns OLDEST; must take NEWEST SMS |
-| **CHoCH Selection** | `structures.filter(s => ...)` → `validChochs[validChochs.length-1]` | Must take NEWEST CHoCH after the chosen SMS |
-| **MB Selection** | `zones.filter(...)` → `mbObs[mbObs.length-1]` | Must take NEWEST OB before SMS (formed the failed swing) |
+| **SMS Selection** | `structures.filter(s => s.type === 'SMS' && s.timeframe === '15')` → sorted by timestamp descending → `slice(0, 3)` fan-out | Never trusts array order (`detectStructureBreaks()` appends SMS **after** the chronological pass); the fan-out lets a freshest-SMS-without-a-block fall through to a valid older chain |
+| **CHoCH Selection** | `type === 'CHOCH' && direction === sms.direction && timeframe === '15' && ts >= sms.ts && ts <= sms.ts + 8h && ts <= retest.ts` → newest | Strict causality in **both** halves: the CHoCH confirms the SMS, so it can never precede it; the 8h budget blocks stale reversals |
+| **MB Selection** | `type === 'OB' && direction === opposite(sms.direction) && timeframe === '15' && ts < sms.ts` and inside the 72h window of **both** the SMS and the CHoCH → newest | The block of the **failed leg** sits opposite the SMS direction and pre-exists it; the window stops a month-old block from being paired with a fresh break |
 | **Retest Logic** | **Current 15m candle ONLY** (`candles15m[candles15m.length-1]`) | No historical search — trade triggers NOW |
 | **Time Window** | `0 < timeSinceChoch ≤ 12h` | Blocks stale setups; 12h max hold |
-| **Retest Condition** | Current candle wicks touch MB zone (`high ≥ mbBottom && low ≤ mbTop`) AND closes inside zone in trade direction | Confirms institutional interest at MB |
-| **Premium/Discount** | Dynamic equilibrium from `SMS price → CHoCH price` impulse | Long = Discount (below eq), Short = Premium (above eq) |
-| **Rejection Stats** | `NoSms`, `InvalidSmsPattern`, `NoChoch`, `Displacement`, `NoMB`, `NoRetest`, `PremDisc` | Full observability |
+| **Retest Condition** | Wick touches the block (`low ≤ mbTop && high ≥ mbBottom`) **and** the body closes inside it **in the trade direction** (bullish body for a long, bearish for a short) | Confirms institutional interest at the MB; a body closing against the trade absorbs the level instead of rejecting it |
+| **Entry** | `retestClose` (documented S11 behaviour — unlike S6/S10, which enter at the block midpoint) | The mitigation print is the entry price |
+| **Stop** | Block edge **widened by the retest wick**, then `calculateLevels()` | A wick that already traded through the edge is part of the entry, not a level the position may be stopped by afterwards |
+| **Premium/Discount** | Dynamic equilibrium from the `SMS price → CHoCH price` impulse | Long = Discount (below eq), Short = Premium (above eq) |
+| **Take-Profit** | `resolveTakeProfit({ skipMinorObstacles: false })` | Nearest obstacle is a hard wall: no room → reject (`tpInvalid`), never clamp |
+| **Rejection Stats** | `noSms`, `noChoch`, `displacement`, `noMitigationBlock`, `noRetest`, `premiumDiscount`, `tpInvalid` (+ `noData`, `killzone`, `totalEvals`) | Full observability |
+
+**Removed legacy logic (v2026-10-26)**:
+- `validateSmsPattern()` returned a rejection **string** that the caller re-parsed with `includes()` to pick a stats bucket — a bucket could be mis-attributed by wording. The funnel now reports the stage directly.
+- The fixed `calculateLevels(..., rr = 3)` target, which restated the stop distance instead of consulting the market.
+- `!z.mitigated` as the only freshness guard: `Zone.mitigated` is always `false` from the recognizer, so it never filtered anything.
 
 **Key Invariants:**
-- `structures` and `zones` arrays are timestamp-ascending (oldest first)
-- **Always use `[array.length-1]` for "newest"** — never `[0]` or `.find()`
+- `structures` and `zones` arrays are **not** guaranteed chronological for SMS (SMS entries are appended last) — always sort by timestamp before selecting
+- **Never use `[0]` or a forward `.find()`** for "newest" — sort descending, or `[...arr].reverse().find(...)`
 - Retest is **current candle only** — no historical search
-- P/D equilibrium calculated from `SMS price → CHoCH price` impulse
+- P/D equilibrium calculated from the `SMS price → CHoCH price` impulse
 - Maximum 12h from CHoCH to retest (prevents stale setups)
 
 ---
@@ -2280,12 +2344,27 @@ COOLDOWN_CANDLES=16
 # SMC parameters
 SMC_SL_ATR_OFFSET=0.5              # ATR multiplier for SL offset
 SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR
-SMC_SWEEP_MIN_WICK_RATIO=0.25      # S12: min rejection wick share of candle range (0 < x < 1)
+SMC_SWEEP_MIN_WICK_RATIO=0.25      # S12 + S9: min rejection wick share of candle range (0 < x < 1)
 
 # S12 sweep sources (opt-in; macro PDH/PDL/PWH/PWL is always armed)
 S12_SESSION_SWEEPS=false           # true = newest ASIAN high/low becomes a sweepable level
 S12_EQH_EQL_SWEEPS=false           # true = 15m EQH/EQL pools become sweepable levels
 MIN_TP_DISTANCE_PCT=0.0035         # S12 fee floor: reject targets < 0.35% from idealEntry (must be > 0 and < 0.1)
+
+# S12 P0 shields (see §7.13.5). Inert for Scenarios 1-11.
+MIN_NET_RR=1.0                     # fee-inclusive R:R floor: (target - fee) / (stop + fee)
+MIN_VOLATILITY_FEE_RATIO=1.0       # require 1m ATR% >= ratio x round-trip taker fee (~0.110%)
+
+# Per-symbol calibration overrides — `<PARAM>_<SYMBOL>` twins reach every scenario,
+# tpResolver and the reconciliation sweep via resolveSymbolConfig(). Matched against
+# SYMBOLS only: an override for an unconfigured pair is silently dropped.
+#   SMC_SL_ATR_OFFSET_<SYMBOL>              DYNAMIC_TP_MIN_RR_<SYMBOL>
+#   MIN_TP_DISTANCE_PCT_<SYMBOL>            MIN_NET_RR_<SYMBOL>
+#   MIN_VOLATILITY_FEE_RATIO_<SYMBOL>       SMC_SWEEP_MIN_WICK_RATIO_<SYMBOL>
+#   SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>
+# DYNAMIC_TP_MAX_RR is global only; each per-symbol floor is validated against it.
+SMC_SL_ATR_OFFSET_APTUSDT=0.60       # verified V5 Sniper calibration (Emilia)
+SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
 
 # Entry filters (day-of-week + killzone)
 ALLOWED_DAYS_OF_WEEK=1,2,3,4,5     # ISO weekdays in UTC (1=Mon ... 7=Sun) allowed for NEW entries
@@ -2317,7 +2396,7 @@ LOG_LEVEL=info                     # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (558 tests / 36 suites, all green)
+npm test             # jest (790 tests / 36 suites, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -2338,7 +2417,7 @@ docker compose up -d
 | **Money, Precision & Capacity** | 1, 30, 34, 55 |
 | **Execution Physics** (pre-flight → fill → bookkeeping) | 6, 18, 23, 24, 29, 31, 33, 34, 38, 39, 47, 49, 52, 54 |
 | **Exchange Truth & Reconciliation** | 7, 26, 27, 28, 35, 40, 53 |
-| **State Machine & Concurrency** | 6, 16, 23, 36, 37, 47, 49 |
+| **State Machine & Concurrency** | 6, 16, 23, 36, 37, 47, 49, 60 |
 | **Ghost Signals & Mitigation** | 4, 5, 14, 15, 19, 21, 25, 36, 39 |
 | **SMC Mathematics** | 2, 3, 11, 18, 51, 56, 57 |
 | **Adaptive Fractioning** | 26, 41, 53, 55 |
@@ -2442,6 +2521,8 @@ docker compose up -d
 58. **Persistent 4H Trend Gate (S12)** — Scenario 12 MUST require the last **closed** 4H close to be aligned with the reversal via a causal SMA50 of `patternData.candles4h`: shorts need `close ≤ sma50 × 1.002`, longs need `close ≥ sma50 × 0.998`, unless price is at the unmitigated opposing 4H POI (`isAtOpposingHtfZone`). With fewer than **20** closed 4H candles the gate fails closed. The SMA is the primary gate; the 4H BOS/CHoCH direction check remains secondary. The SMA is never recomputed from the forming 4H candle.
 
 59. **Fee-Aware TP Distance Floor (S12)** — After `resolveTakeProfit()` succeeds, Scenario 12 MUST reject any setup whose resolved target sits closer than `MIN_TP_DISTANCE_PCT` (default `0.35%`) from `idealEntry`: `|target − idealEntry| / idealEntry`. The floor applies to structural and fixed-R targets alike, uses `Decimal`, and rejects with the `insufficientRoom` bucket. `MIN_TP_DISTANCE_PCT` is parsed as `Decimal` and validated in `(0, 0.1)`.
+
+60. **A WS Close Event May Only End a Trade It Can See** — In `processClosedPosition()`, when `db.getOpenTrade(symbol)` returns `null`, the handler MUST log and `return` **without** calling `transition(...)` or `burnSetup()`. An empty DB row while the engine is `IN_TRADE` means the entry pipeline is still inside the Invariant 47 bookkeeping window (`transition(IN_TRADE)` → 500 ms → `getOpenPositions()` → `db.openTrade()`), not that the state must be reset. Forcing `SCANNING` there leaves a live trade whose Adaptive Fractioning is permanently disabled — the position rides an unmanaged full stop-loss. Any genuine instant close during that window is adopted by the 10-minute ReconciliationLoop (Invariant 27, §3.4) once the row lands as `OPEN`. Resetting on absence of evidence is strictly forbidden. See §16.3.9.
 
 ---
 
@@ -2725,6 +2806,19 @@ if (isZeroSize || isClosedSide) { /* position closed */ }
 **Fix**: Full infrastructure separation from one image: separate process, database, Telegram bot, Bybit sub-account and `.env`.
 **Rule**: One mode per instance.
 
+#### 16.3.9 A close event must never steal the state machine from the entry pipeline
+**Root Cause**: `executeStagedEntry()` / `handleTradeApproval()` transition to `IN_TRADE` on exchange confirmation (Invariant 47) and only write the `trades` row afterwards — a 500 ms wait, `getOpenPositions()`, then the DB round-trip. A WS `Execution`/`Position` close event landing inside that window found an empty table, and the `!trade` branch of `processClosedPosition()` forced `SCANNING`. The row then landed one tick later, leaving the engine `SCANNING` with a **live trade whose Adaptive Fractioning was permanently disabled** — the position rode an unmanaged full stop-loss. Two consecutive live trades on NEARUSDT reproduced it:
+
+```
+00:58:00 [INFO]  NEARUSDT: state → IN_TRADE
+00:58:00 [WARN]  NEARUSDT: position close event but no open trade found
+00:58:00 [INFO]  NEARUSDT: state → SCANNING
+00:58:01 [INFO]  NEARUSDT: order ... recorded, entering trade
+```
+
+**Fix**: The `!trade` branch now logs and returns. It calls neither `transition()` nor `burnSetup()`. The entry pipeline owns the state until bookkeeping completes; if the position genuinely closed during that window, the row lands as `OPEN` and the 10-minute ReconciliationLoop detects the missing exchange position and closes it (Invariant 27, §3.4). A bounded self-healing delay is strictly better than blinding the state machine mid-entry. The early return also precedes the `3 × 2s` `getClosedPnl` retry loop, so a phantom event cannot trigger a REST storm.
+**Rule**: A WS close event may only end a trade it can actually see. An empty DB row inside `IN_TRADE` means **bookkeeping is in flight**, not that the state must be reset — never transition on absence of evidence.
+
 ### 16.4 Ghost Signals & Mitigation
 
 #### 16.4.1 The router must receive `mitigatedStructures`
@@ -2882,4 +2976,4 @@ const evaluationData: PatternData = { ...basePd, structures: safeStructures, zon
 
 ---
 
-_Last updated: 2026-10-23. S12 Production Refinements (persistent 4H SMA50 trend gate + fee-aware TP distance floor, `MIN_TP_DISTANCE_PCT`), Scenario Revival (S13 archived, S12 per-CHoCH sweep pairing + opt-in sweep sources, S1 bidirectional, S5 sweep causality): invariants 1–59, anti-patterns consolidated into §16.1–§16.8. Toolchain: typecheck clean, 558 tests / 36 suites green, build passing._
+_Last updated: 2026-10-26. V4 Classic scenario refactor — batch 1 (S1 bidirectional + S5 sweep causality/FVG completion bar), batch 2 (S2 HTF-FVG direction + fill-anchored causality, S3 structural-sweep IDM without `brokenSwing`, S4 bounce → BOS-after-bounce → continuation-block retest), batch 3 (S7 strict bidirectional AMD sweep → CHoCH → FVG with the Asian extreme resolved as a `SESSION_RANGE` target, S8 fresh excursion → reclaim → 15m POI with `RANGE_EQUILIBRIUM` targeting, S9 single-bar EQH/EQL turtle soup with a `SWEEP` anchor) and batch 4 (S6 failure swing with a 72h chain window and the failed leg's opposite-direction 15m OB, S10 BOS-only breaker with a linear liquidity-grab test and a completion-bar FVG window, S11 mitigation block with a strictly ordered 15m `ob < sms ≤ choch < retest` chain): every active classic scenario now enforces 15m timeframe isolation, chain causality windows, a stop widened by the trigger/retest wick, and a structural target through `resolveTakeProfit({ skipMinorObstacles: false })` — rejection over clamping. Invariants 1–60, anti-patterns consolidated into §16.1–§16.8. Live hotfix (v2026-10-26): `processClosedPosition()` no longer resets the state machine when a WS close event lands on an empty `trades` row during the entry-bookkeeping window (§16.3.9, Invariant 60). Toolchain: typecheck clean, 790 tests / 36 suites green, build passing._

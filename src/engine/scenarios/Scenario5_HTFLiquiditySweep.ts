@@ -7,13 +7,16 @@ import { resolveTakeProfit } from '../tpResolver';
 const SWEEP_LOOKBACK_CANDLES = 16;
 /** 15m entry timeframe of this scenario. */
 const ENTRY_TIMEFRAME = '15';
-/** 4H causality budget for sweep → CHoCH and CHoCH → FVG. */
-const CAUSALITY_WINDOW_MS = 4 * 60 * 60 * 1000;
+/** `detectFVGs()` stamps a gap at c1; it completes two bars later on c3. */
+const FVG_FORMATION_CANDLES = 2;
+/** Fallback LTF spacing when the candle series is too short to measure. */
+const DEFAULT_LTF_MS = 15 * 60 * 1000;
 
 /**
  * Deterministic tie-break when several pools are swept by the SAME candle.
- * Price order alone is not reproducible (two pools can sit at equal distance),
- * so the ranking is explicit: macro session extremes first, then swing liquidity.
+ * Recency remains the primary causal key: the CHoCH must react to the latest
+ * liquidity event. Priority only decides which pool is reported when two events
+ * share a timestamp, so the output never depends on array order.
  */
 const POOL_PRIORITY: Record<string, number> = {
   PDH: 0,
@@ -22,6 +25,23 @@ const POOL_PRIORITY: Record<string, number> = {
   PWL: 3,
   BSL: 4,
   SSL: 5,
+};
+
+/**
+ * Which side of the market each pool represents.
+ *
+ * A high is swept by a wick ABOVE it that closes back below (bearish SFP); a low
+ * is swept by a wick BELOW it that closes back above (bullish SFP). Enforcing
+ * the side prevents a "PDH sweep" from being manufactured by a downward move
+ * that never took buy-side liquidity.
+ */
+const POOL_SIDE: Record<string, 'HIGH' | 'LOW'> = {
+  PDH: 'HIGH',
+  PWH: 'HIGH',
+  BSL: 'HIGH',
+  PDL: 'LOW',
+  PWL: 'LOW',
+  SSL: 'LOW',
 };
 
 const SWEEP_POOL_TYPES = Object.keys(POOL_PRIORITY);
@@ -34,11 +54,17 @@ type Direction = 'BULLISH' | 'BEARISH';
  * PDH/PDL/PWH/PWL/BSL/SSL sweep in a London/NY killzone → 15m CHoCH → 15m FVG
  * retest entry.
  *
- * The sweep is searched across the last 16 LTF candles, not only the latest one:
- * a sweep is frequently confirmed a few candles after the wick that produced it,
- * and requiring the CHoCH on the very next candle discarded most valid sequences.
- * Causality stays strict — `CHoCH.timestamp >= sweptAt` — so a structure that
- * formed BEFORE the sweep can never justify it.
+ * Causal contract:
+ *  1. The sweep is searched across the last 16 LTF candles (4H on 15m), not only
+ *     the latest one — a sweep is frequently confirmed a few candles after the
+ *     wick that produced it.
+ *  2. When several pools are swept, the LATEST sweep is the causal event; pool
+ *     priority only breaks same-candle ties deterministically.
+ *  3. The CHoCH must print at/after `sweptAt` (`>=`, so a same-candle break is
+ *     allowed) and inside one 4H window. A structure that formed BEFORE the
+ *     sweep can never justify it.
+ *  4. The FVG must COMPLETE at/after the CHoCH. Raw `c1` stamps are two bars
+ *     early and would discard the impulse gap the CHoCH itself creates.
  */
 export class Scenario5_HTFLiquiditySweep extends BaseScenario {
   private static rejectionStats = {
@@ -77,10 +103,13 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     const stats = Scenario5_HTFLiquiditySweep.rejectionStats;
     stats.totalEvals++;
 
-    // CRITICAL: Killzone check - sweep must happen in London/NY killzone only (not ASIAN)
-    // Bypassable globally via ENFORCE_KILLZONES=false (backtesting)
+    // Sweep must happen in a London/NY killzone (not ASIAN). Bypassable globally
+    // via ENFORCE_KILLZONES=false (backtesting).
     const killzone = patternData.currentKillzone;
-    if (this.config.enforceKillzones !== false && (!killzone || (killzone !== 'LONDON' && killzone !== 'NY'))) {
+    if (
+      this.config.enforceKillzones !== false &&
+      (!killzone || (killzone !== 'LONDON' && killzone !== 'NY'))
+    ) {
       this.logRejection('HTF Liquidity Sweep requires London or NY killzone');
       stats.killzone++;
       return false;
@@ -98,14 +127,19 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
         SWEEP_POOL_TYPES.includes(pool.type) &&
         !pool.isTaken &&
         pool.priceLevel instanceof Decimal &&
-        pool.priceLevel.gt(0)
+        pool.priceLevel.gt(0),
     );
 
     if (!htfPools.length) {
-      this.logRejection('No HTF liquidity pools (PDH/PDL/PWH/PWL/BSL/SSL) available');
+      this.logRejection(
+        'No HTF liquidity pools (PDH/PDL/PWH/PWL/BSL/SSL) available',
+      );
       stats.noPools++;
       return false;
     }
+
+    const ltfMs = this.resolveCandleMs(candles15m);
+    const causalityWindowMs = SWEEP_LOOKBACK_CANDLES * ltfMs;
 
     // === SWEEP SCAN (last 4H of 15m candles) ===
     // A sweep is not a "last candle" event: price can take a pool and only close
@@ -113,9 +147,14 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     // the causality gate below meaningful.
     // SMC: sweep = wick pierces the level AND price closes back inside (SFP).
     const sweepWindow = candles15m.slice(-SWEEP_LOOKBACK_CANDLES);
+    if (sweepWindow.length === 0) {
+      this.logRejection('No 15m candle available');
+      stats.noPools++;
+      return false;
+    }
 
-    // Deterministic pool ranking: on a timestamp tie the higher-ranked pool is the
-    // dominant liquidity event (PDH > PDL > PWH > PWL > BSL > SSL).
+    // Deterministic pool ranking: on a timestamp tie the higher-ranked pool is
+    // the dominant liquidity event (PDH > PDL > PWH > PWL > BSL > SSL).
     const rankedPools = [...htfPools].sort(
       (a: any, b: any) =>
         (POOL_PRIORITY[a.type] ?? 99) - (POOL_PRIORITY[b.type] ?? 99),
@@ -127,6 +166,8 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
 
     for (const pool of rankedPools) {
       const level = pool.priceLevel;
+      const side = POOL_SIDE[pool.type];
+      if (!side) continue;
 
       // Newest -> oldest: the first hit is this pool's most recent sweep.
       for (let i = sweepWindow.length - 1; i >= 0; i--) {
@@ -135,16 +176,20 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
         const low = new Decimal(candle.low);
         const close = new Decimal(candle.close);
 
-        const bearishSweep = high.gt(level) && close.lt(level);
-        const bullishSweep = low.lt(level) && close.gt(level);
-        if (!bearishSweep && !bullishSweep) continue;
+        const isSweep =
+          side === 'HIGH'
+            ? high.gt(level) && close.lt(level)
+            : low.lt(level) && close.gt(level);
+        if (!isSweep) continue;
 
-        // Latest sweep across ALL pools wins. Strict `>` keeps the higher-ranked
-        // pool on a timestamp tie (pools are iterated in rank order).
-        if (Number(candle.timestamp) > sweptAt) {
-          sweptAt = Number(candle.timestamp);
+        // The LATEST sweep across ALL pools is the causal liquidity event.
+        // Strict `>` keeps the higher-ranked pool on a timestamp tie, because
+        // pools are iterated in rank order.
+        const candleTimestamp = Number(candle.timestamp);
+        if (candleTimestamp > sweptAt) {
+          sweptAt = candleTimestamp;
           sweptPool = pool;
-          sweepDirection = bearishSweep ? 'BEARISH' : 'BULLISH';
+          sweepDirection = side === 'HIGH' ? 'BEARISH' : 'BULLISH';
         }
         break;
       }
@@ -159,42 +204,53 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     const direction: Direction = sweepDirection;
 
     // === CAUSALITY: the CHoCH must FOLLOW the sweep ===
-    // The replaced code measured a lower bound from the LAST candle, so a CHoCH
-    // printed BEFORE the sweep passed. Causality now runs from `sweptAt`; the
-    // same candle is allowed because sweep and break can print together.
-    const chochs = (structures ?? []).filter(
-      (s: any) =>
-        s.type === 'CHOCH' &&
-        s.direction === direction &&
-        String(s.timeframe) === ENTRY_TIMEFRAME &&
-        Number(s.timestamp) >= sweptAt &&
-        Number(s.timestamp) <= sweptAt + CAUSALITY_WINDOW_MS
-    );
+    // A CHoCH that printed before the sweep describes the previous reaction and
+    // must never validate this one. The same candle is allowed because sweep and
+    // break can print together.
+    const chochs = (structures ?? [])
+      .filter(
+        (s: any) =>
+          s.type === 'CHOCH' &&
+          s.direction === direction &&
+          String(s.timeframe) === ENTRY_TIMEFRAME &&
+          Number(s.timestamp) >= sweptAt &&
+          Number(s.timestamp) <= sweptAt + causalityWindowMs,
+      )
+      .sort((a: any, b: any) => Number(a.timestamp) - Number(b.timestamp));
 
     const choch = chochs[chochs.length - 1];
     if (!choch) {
-      this.logRejection(`No aggressive 15m CHoCH ${direction} after ${sweptPool.type} sweep`);
+      this.logRejection(
+        `No aggressive 15m CHoCH ${direction} after ${sweptPool.type} sweep`,
+      );
       stats.noChoch++;
       return false;
     }
 
-    // MUST check Displacement - body >= 1.5 * ATR
+    // MUST check Displacement - body >= 1.5 * ATR (AGENTS.md §7.2)
     if (!this.isValidDisplacement(choch, 1.5)) {
       this.logRejection('15m CHoCH displacement < 1.5 ATR after sweep');
       stats.displacement++;
       return false;
     }
 
-    // Check for 15m FVG after CHoCH in sweep direction (up to 4H after the CHoCH)
-    const fvg = [...(zones ?? [])].reverse().find(
-      (z: any) =>
-        z.type === 'FVG' &&
-        z.direction === direction &&
-        String(z.timeframe) === ENTRY_TIMEFRAME &&
-        Number(z.timestamp) >= Number(choch.timestamp) &&
-        Number(z.timestamp) <= Number(choch.timestamp) + CAUSALITY_WINDOW_MS
-    );
+    // === FVG after the CHoCH (completion-bar causality) ===
+    // `detectFVGs()` stamps the gap at c1, two bars before it completes on c3.
+    // Measuring from the completion bar admits the impulse FVG left by the CHoCH
+    // while still rejecting a gap that fully formed before the trigger.
+    const fvgs = (zones ?? []).filter((z: any) => {
+      if (z.type !== 'FVG') return false;
+      if (z.direction !== direction) return false;
+      if (String(z.timeframe) !== ENTRY_TIMEFRAME) return false;
+      const completesAt =
+        Number(z.timestamp) + FVG_FORMATION_CANDLES * ltfMs;
+      return (
+        completesAt >= Number(choch.timestamp) &&
+        completesAt <= Number(choch.timestamp) + causalityWindowMs
+      );
+    });
 
+    const fvg = fvgs[fvgs.length - 1];
     if (!fvg) {
       this.logRejection('No 15m FVG found after CHoCH following sweep');
       stats.noFvg++;
@@ -218,14 +274,23 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       ? new Decimal(this.config.smcSlAtrOffset)
       : new Decimal('0.5');
 
-    // The stop comes from `calculateLevels()` (single source of truth); the target
-    // from market structure. `skipMinorObstacles: false` keeps the legacy wall
-    // semantics — the nearest obstacle decides, and no room means no trade.
+    // The stop comes from `calculateLevels()` (single source of truth); the
+    // target from market structure. `skipMinorObstacles: false` keeps the legacy
+    // wall semantics — the nearest obstacle decides, and no room means no trade.
+    const base = this.calculateLevels(
+      entry,
+      fvgZone,
+      direction,
+      atr,
+      new Decimal(1),
+      offsetMultiplier,
+    );
+
     const resolution = resolveTakeProfit({
       direction,
-      entry,
-      stopLoss: this.calculateLevels(entry, fvgZone, direction, atr, new Decimal(1)).stopLoss,
-      zones: patternData.zones ?? [],
+      entry: base.entry,
+      stopLoss: base.stopLoss,
+      zones: zones ?? [],
       liquidityPools: patternData.liquidityPools ?? [],
       tradingRange: patternData.tradingRange ?? null,
       macroContext: patternData.macroContext ?? null,
@@ -250,7 +315,7 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       direction,
       atr,
       resolution.takeProfit,
-      offsetMultiplier
+      offsetMultiplier,
     );
 
     this.setLevels({
@@ -269,7 +334,7 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       timestamp: Number(fvg.timestamp),
     });
 
-    // Set structure details for mitigation tracking (the CHoCH is the trigger structure)
+    // Set structure details for mitigation tracking (the CHoCH is the trigger)
     this.setStructureDetails({
       type: 'CHoCH',
       timestamp: Number(choch.timestamp),
@@ -278,8 +343,25 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     });
 
     this.setReason(
-      `HTF Liquidity Sweep: ${sweptPool.type} swept at ${sweptAt} in killzone + 15m CHoCH + FVG 0.5 entry`
+      `HTF Liquidity Sweep: ${sweptPool.type} swept at ${sweptAt} in killzone + 15m CHoCH + FVG 0.5 entry`,
     );
     return true;
+  }
+
+  /**
+   * Candle spacing of the entry series, in milliseconds.
+   *
+   * The sweep / CHoCH / FVG windows are all "16 LTF candles", so the budget must
+   * be expressed in the LTF actually in use, never assumed to be 15 minutes
+   * (Invariant 12).
+   */
+  private resolveCandleMs(candles: any[]): number {
+    const start = Math.max(1, candles.length - 5);
+    for (let i = start; i < candles.length; i++) {
+      const delta =
+        Number(candles[i].timestamp) - Number(candles[i - 1].timestamp);
+      if (Number.isFinite(delta) && delta > 0) return delta;
+    }
+    return DEFAULT_LTF_MS;
   }
 }

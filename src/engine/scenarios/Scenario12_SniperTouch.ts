@@ -1,9 +1,25 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../../config/env';
+import { ROUND_TRIP_TAKER_FEE } from '../../config/fees';
 import { PatternData, MacroContext, Structure } from '../../smc/patternRecognizer';
 import { resolveTakeProfit } from '../tpResolver';
 import { logger } from '../../utils/logger';
+
+/**
+ * Asset admission floor: the 1m ATR must clear the round-trip taker cost by this
+ * multiple. 0.110% × 1.5 = 0.165%. Below it the tape is quieter than the fee it
+ * pays, and the win rate required to break even becomes unattainable.
+ */
+/**
+ * Minimum fee-inclusive reward:risk:
+ *
+ *   netRr = (targetDistance − roundTripFee) / (stopDistance + roundTripFee)
+ *
+ * A nominal 1.5R target with a stop smaller than the fee is a net loser even
+ * when it hits. This floor is measured in price units on the SAME entry the
+ * trade will be booked against, so it cannot be gamed by a favourable fill.
+ */
 
 /** CHoCH / OB must sit within 0.3% of the swept level (or the source's ATR band, whichever is wider). */
 const MIN_PROXIMITY_PCT = new Decimal('0.003');
@@ -95,12 +111,14 @@ const EMPTY_REJECTION_STATS = {
   // --- post-sweep ---
   htfContradiction: 0,
   invalidAtr: 0,
+  insufficientVolatility: 0,
   noChoch: 0,
   bodyClose: 0,
   noOb: 0,
   proximity: 0,
   premiumDiscount: 0,
   geometry: 0,
+  insufficientNetR: 0,
   insufficientRoom: 0,
   tpInvalid: 0,
   // --- informational (not part of the exclusive partition) ---
@@ -199,6 +217,29 @@ export class Scenario12_SniperTouch extends BaseScenario {
     const atr1m = this.calculateATR(candles1m, 14);
     if (atr1m.lte(0)) {
       return this.reject('invalidAtr', 'Invalid ATR');
+    }
+
+    // === FILTER 3A: ASSET ADMISSION (VIABILITY RATIO) ===
+    // The 1m ATR is the tape's natural unit of risk; the round-trip fee is the
+    // exchange's fixed unit of cost. When ATR is comparable to (or smaller than)
+    // the fee, the stop is noise-wide relative to the cost of placing it and the
+    // trade is fee-dominated regardless of win rate. Linked at 1.5x so the fee
+    // can never consume more than two thirds of one ATR of movement.
+    const atrReferencePrice = new Decimal(candles1m[candles1m.length - 1].close);
+    if (atrReferencePrice.lte(0)) {
+      return this.reject('invalidAtr', 'Invalid reference price for ATR viability');
+    }
+    const atr1mPct = atr1m.div(atrReferencePrice);
+    const minViableAtrPct = ROUND_TRIP_TAKER_FEE.mul(this.config.minVolatilityFeeRatio);
+    if (atr1mPct.lt(minViableAtrPct)) {
+      return this.reject(
+        'insufficientVolatility',
+        `1m ATR ${atr1mPct.mul(100).toFixed(3)}% < viability floor ${minViableAtrPct
+          .mul(100)
+          .toFixed(3)}% (${this.config.minVolatilityFeeRatio.toString()}x round-trip fee ${ROUND_TRIP_TAKER_FEE.mul(
+          100
+        ).toFixed(3)}%)`
+      );
     }
 
     // Detect structure breaks on 1m candles
@@ -423,7 +464,36 @@ export class Scenario12_SniperTouch extends BaseScenario {
       return this.reject(key, `Take-profit rejected: ${resolution.reason}`);
     }
 
-    // === FILTER 4: FEE-AWARE TARGET DISTANCE FLOOR ===
+    // === FILTER 4A: FEE-INCLUSIVE NET R:R FLOOR ===
+    // Nominal R:R is a lie once the exchange is paid. Both legs of the trade are
+    // charged, so the fee is subtracted from the reward AND added to the risk:
+    //
+    //   netRr = (targetDistance − roundTripFee) / (stopDistance + roundTripFee)
+    //
+    // This is the deterministic kill switch for the sub-1.0 Net-RR trades: a
+    // target that is nominally 1.5R but sits inside the fee envelope is rejected
+    // here instead of being discovered as a loss on the exchange.
+    const stopDistance = baseLevels.entry.minus(baseLevels.stopLoss).abs();
+    if (stopDistance.lte(0)) {
+      return this.reject('geometry', 'Zero stop distance — Net-R undefined');
+    }
+    const targetDistance = resolution.takeProfit.minus(baseLevels.entry).abs();
+    const roundTripFeeInPrice = baseLevels.entry.mul(ROUND_TRIP_TAKER_FEE);
+    const netRr = targetDistance.minus(roundTripFeeInPrice).div(stopDistance.plus(roundTripFeeInPrice));
+
+    if (netRr.lt(this.config.minNetRr)) {
+      return this.reject(
+        'insufficientNetR',
+        `Net R:R ${netRr.toFixed(3)} < ${this.config.minNetRr.toString()} (target ${targetDistance
+          .div(baseLevels.entry)
+          .mul(100)
+          .toFixed(3)}% | stop ${stopDistance.div(baseLevels.entry).mul(100).toFixed(3)}% | fee ${ROUND_TRIP_TAKER_FEE.mul(
+          100
+        ).toFixed(3)}%)`
+      );
+    }
+
+    // === FILTER 4B: FEE-AWARE TARGET DISTANCE FLOOR ===
     // Bybit charges ~0.11% round-trip taker fees. A target closer than
     // `minTpDistancePct` (default 0.35%) hands 30-45% of the gross move to the
     // exchange, so the trade is fee-dominated even when it reaches TP. This is a

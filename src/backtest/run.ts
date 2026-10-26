@@ -3,12 +3,13 @@ import { BybitClient } from "../api/bybitClient";
 import { PatternRecognizer } from "../smc/patternRecognizer";
 import { ScenarioRouter } from "../engine/scenarioRouter";
 import type { RouterResult } from "../engine/scenarioRouter";
-import { loadConfig, resolveLimitExpirationCandles } from "../config/env";
+import { loadConfig, resolveLimitExpirationCandles, resolveSymbolConfig } from "../config/env";
 import { logger } from "../utils/logger";
 import { Candle, Timeframe } from "../types";
 import { InstrumentInfo } from "./executionSimulator";
 import { Decimal } from "decimal.js";
 import { formatPrice } from "../utils/precision";
+import { shouldUseMarketEntry } from "../config/fees";
 import { loadCachedOrFetch, getTimeRangeForDays } from "./historyLoader";
 import {
   openTrade,
@@ -40,7 +41,7 @@ const MIN_PATTERN_CANDLES = 20;
 function parseArgs(config: any): string[] {
   const args = process.argv.slice(2);
   const targetSymbol = args.find((a) => !a.startsWith("-"));
-  if (targetSymbol && config.symbols.includes(targetSymbol)) {
+  if (targetSymbol) {
     return [targetSymbol];
   }
   return config.symbols;
@@ -190,12 +191,17 @@ async function runBacktestForSymbol(
     `[${symbol}] Active scenarios for backtest: ${symbolScenarios.join(",")}`,
   );
 
+  // Asset-specific calibration is applied ONCE here and consumed by both the router
+  // (scenario evaluation + tpResolver inputs) and the execution simulator (limit
+  // lifetime). Resolving twice would risk the two disagreeing.
+  const symbolConfig = resolveSymbolConfig(config, symbol);
+
   const router = new ScenarioRouter({
     symbol,
     patternRecognizer: recognizer,
     notifier: { sendMessage: async () => false } as any,
     activeScenarios: symbolScenarios,
-    config: config as any,
+    config: symbolConfig as any,
   });
 
   // --- Кэширование PatternData (только 15m контекст) ---
@@ -370,8 +376,9 @@ async function runBacktestForSymbol(
             cooldownCandles: config.cooldownCandles,
             ltfTimeframe: config.ltfTimeframe,
             // Effective lifetime in EXECUTION candles: Sniper counts 1m candles,
-            // Classic counts LTF candles. Resolved centrally so live and backtest agree.
-            limitExpirationCandles: resolveLimitExpirationCandles(config),
+            // Classic counts LTF candles. Resolved centrally so live and backtest
+            // agree, from the SYMBOL-resolved config so a per-symbol lifetime holds.
+            limitExpirationCandles: resolveLimitExpirationCandles(symbolConfig),
             enableSniperMode: config.enableSniperMode,
           },
           instrument,
@@ -556,21 +563,18 @@ async function runBacktestForSymbol(
               continue;
             }
 
-            // Hybrid Smart Entry — parity with StrategyEngine.executeStagedEntry():
-            // the Market/Limit decision is made at the live tick (here: the signal
-            // candle close). A discount (price better than idealEntry) always forces
-            // Market, otherwise the 0.15% threshold decides.
-            const isDiscount = isLong
-              ? currentPrice.lte(idealEntry)
-              : currentPrice.gte(idealEntry);
+            // Hybrid Smart Entry — parity with live execution.
+            // Any favorable discount uses Market (Discount Trap). At-entry and
+            // adverse movement can use Market only inside the tight threshold.
             const threshold = new Decimal(
               config.smartEntryThresholdPct || "0.0015",
             );
-            const priceDiffPct = idealEntry
-              .minus(currentPrice)
-              .div(idealEntry)
-              .abs();
-            const useMarket = isDiscount || priceDiffPct.lte(threshold);
+            const useMarket = shouldUseMarketEntry(
+              idealEntry,
+              currentPrice,
+              isLong,
+              threshold,
+            );
 
             const orderType: "Market" | "Limit" = useMarket
               ? "Market"

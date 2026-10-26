@@ -2,7 +2,7 @@ import { PositionListSource } from '../api/bybitClient';
 import { PostgresDatabase } from '../db/database';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
-import { BotConfig, resolveLimitExpirationCandles, resolveLimitExpirationMs } from '../config/env';
+import { BotConfig, resolveLimitExpirationCandles, resolveLimitExpirationMs, resolveSymbolConfig } from '../config/env';
 
 export const RECONCILIATION_INTERVAL_MS = 10 * 60 * 1000;
 export const CLOCK_DRIFT_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -95,9 +95,11 @@ export class ReconciliationLoop {
           const openOrders = await this.source.getOpenOrders(engine.symbol);
           
           // Expiration is mode-aware: Sniper Mode counts 1m candles, Classic counts LTF
-          // candles. Resolving through the shared helper keeps live and backtest aligned.
-          const expirationCandles = resolveLimitExpirationCandles(this.config);
-          const expirationMs = resolveLimitExpirationMs(this.config);
+          // candles. Resolving through the shared helper keeps live and backtest aligned;
+          // the symbol-resolved config honours SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>.
+          const symbolConfig = resolveSymbolConfig(this.config, engine.symbol);
+          const expirationCandles = resolveLimitExpirationCandles(symbolConfig);
+          const expirationMs = resolveLimitExpirationMs(symbolConfig);
           const now = Date.now();
           
           const activeLimits = openOrders.filter(
@@ -220,12 +222,14 @@ export class ReconciliationLoop {
 
   private async cancelExpiredLimitOrders(): Promise<void> {
     // Mode-aware lifetime: 1m candles in Sniper Mode, LTF candles in Classic.
-    const expirationCandles = resolveLimitExpirationCandles(this.config);
-    const limitExpirationMs = resolveLimitExpirationMs(this.config);
+    // Resolved per engine so a per-symbol lifetime applies to its own orders only.
     const now = Date.now();
 
     for (const engine of this.engines) {
       const symbol = engine.symbol;
+      const symbolConfig = resolveSymbolConfig(this.config, symbol);
+      const expirationCandles = resolveLimitExpirationCandles(symbolConfig);
+      const limitExpirationMs = resolveLimitExpirationMs(symbolConfig);
       try {
         const openOrders = await this.source.getOpenOrders(symbol);
         

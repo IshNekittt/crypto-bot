@@ -43,6 +43,8 @@ const mockConfig: BotConfig = {
     dynamicTpMinRr: new Decimal('1.5'),
     dynamicTpMaxRr: new Decimal(6),
     dynamicTpRequireTarget: false,
+    minNetRr: new Decimal(1),
+    minVolatilityFeeRatio: new Decimal(1),
     minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
@@ -315,5 +317,55 @@ describe('ScenarioRouter', () => {
       expect(result.triggered).toBe(true);
       expect(mockScenarios[0].evaluate).toHaveBeenCalledTimes(1);
     });
+  });
+});
+describe('ScenarioRouter — per-symbol calibration', () => {
+  const buildRouter = (symbol: string, config: BotConfig) =>
+    new ScenarioRouter({
+      symbol,
+      patternRecognizer: mockPatternRecognizer,
+      notifier: mockNotifier,
+      activeScenarios: [12],
+      config,
+    });
+
+  it('hands the symbol-resolved config to the scenarios it owns', () => {
+    // The router is the single resolution point: whatever it holds is what
+    // Scenario 12 reads for MIN_TP_DISTANCE_PCT, wick ratio, SL offset and the
+    // dynamic-TP floor.
+    const config: BotConfig = {
+      ...mockConfig,
+      symbolOverrides: new Map([
+        [
+          'APTUSDT',
+          {
+            minTpDistancePct: new Decimal('0.006'),
+            minNetRr: new Decimal('1.2'),
+            minVolatilityFeeRatio: new Decimal('1.3'),
+            smcSweepMinWickRatio: new Decimal('0.18'),
+            smcSlAtrOffset: '0.75',
+            dynamicTpMinRr: new Decimal('2'),
+            sniperLimitExpirationCandles: 25,
+          },
+        ],
+      ]),
+    };
+
+    const apt = (buildRouter('APTUSDT', config) as any).config;
+    expect(apt.minTpDistancePct.toString()).toBe('0.006');
+    expect(apt.minNetRr.toString()).toBe('1.2');
+    expect(apt.minVolatilityFeeRatio.toString()).toBe('1.3');
+    expect(apt.smcSweepMinWickRatio.toString()).toBe('0.18');
+    expect(apt.smcSlAtrOffset).toBe('0.75');
+    expect(apt.dynamicTpMinRr.toString()).toBe('2');
+    expect(apt.sniperLimitExpirationCandles).toBe(25);
+
+    // A sibling symbol keeps the global calibration — no cross-asset bleed.
+    const near = (buildRouter('NEARUSDT', config) as any).config;
+    expect(near.minTpDistancePct.toString()).toBe('0.0035');
+    expect(near.smcSweepMinWickRatio.toString()).toBe('0.25');
+    expect(near.smcSlAtrOffset).toBe('0.5');
+    expect(near.dynamicTpMinRr.toString()).toBe('1.5');
+    expect(near.sniperLimitExpirationCandles).toBe(15);
   });
 });

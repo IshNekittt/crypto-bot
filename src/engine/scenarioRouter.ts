@@ -3,7 +3,7 @@ import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { DateTime } from 'luxon';
 import { ZoneDetails } from '../types';
-import { BotConfig } from '../config/env';
+import { BotConfig, resolveSymbolConfig } from '../config/env';
 import { PatternData } from '../smc/patternRecognizer';
 import { Scenario1_HTFContinuation } from './scenarios/Scenario1_HTFContinuation';
 import { Scenario2_FVGFill } from './scenarios/Scenario2_FVGFill';
@@ -44,7 +44,11 @@ export class ScenarioRouter {
   constructor(deps: ScenarioRouterDeps) {
     this.symbol = deps.symbol;
     this.patternRecognizer = deps.patternRecognizer;
-    this.config = deps.config;
+    // Single resolution point for per-symbol calibration: the router is created
+    // once per symbol (StrategyEngine live, run.ts backtest), so every scenario it
+    // owns — Scenario 12 included — and the `tpResolver` inputs it feeds are
+    // already symbol-correct. An uncalibrated symbol returns the same object.
+    this.config = resolveSymbolConfig(deps.config, deps.symbol);
 
     const allScenarios: IScenario[] = [
       // Priority 1: Complex, high-precision scenarios (checked first)

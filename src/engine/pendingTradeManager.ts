@@ -4,6 +4,7 @@ import { Markup } from 'telegraf';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../config/env';
 import { formatPrice } from '../utils/precision';
+import { shouldUseMarketEntry } from '../config/fees';
 
 export interface PendingTrade {
   id: string;
@@ -184,15 +185,14 @@ export class PendingTradeManager {
           }
         }
         
-        // Calculate price difference from idealEntry
+        const useMarketOrder = shouldUseMarketEntry(
+          idealEntry,
+          currentPrice,
+          isLong,
+          smartThreshold,
+        );
         const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
 
-        // Discount Trap fix (mirrors executeStagedEntry): if the live price is BETTER than
-        // the ideal entry (discount), a Limit at idealEntry would be marketable on arrival
-        // and fill at a price different from the planned entry. Force Market in that case.
-        const isDiscount = isLong ? currentPrice.lte(idealEntry) : currentPrice.gte(idealEntry);
-        const useMarketOrder = isDiscount || priceDiffPct.lte(smartThreshold);
-        
         logger.info(`[Dynamic Approval] ${tradeId}: idealEntry=${idealEntry.toFixed(4)} currentPrice=${currentPriceStr} diff=${priceDiffPct.mul(100).toFixed(4)}% threshold=${smartThreshold.mul(100).toFixed(2)}% -> ${useMarketOrder ? 'Market' : 'Limit'}`);
 
         // Manual-path Slippage Guard parity with executeStagedEntry (BUG B4).

@@ -2,6 +2,7 @@ import {
   loadConfig,
   resolveLimitExpirationCandles,
   resolveLimitExpirationMs,
+  resolveSymbolConfig,
 } from '../../src/config/env';
 
 const BASE_ENV: NodeJS.ProcessEnv = {
@@ -240,5 +241,145 @@ describe('loadConfig — S12 fee-aware target floor', () => {
     expect(() => loadConfig(env({ MIN_TP_DISTANCE_PCT: 'abc' }))).toThrow(
       /MIN_TP_DISTANCE_PCT must be a valid number/,
     );
+  });
+});
+
+describe('loadConfig — per-symbol overrides', () => {
+  const twoSymbols = (overrides: NodeJS.ProcessEnv = {}) =>
+    env({ SYMBOLS: 'NEARUSDT,APTUSDT', ...overrides });
+
+  it('leaves symbolOverrides empty when no key is set', () => {
+    const config = loadConfig(twoSymbols());
+
+    expect(config.symbolOverrides).toBeInstanceOf(Map);
+    expect(config.symbolOverrides?.size).toBe(0);
+  });
+
+  it('parses all five per-symbol parameters with their own validation', () => {
+    const config = loadConfig(
+      twoSymbols({
+        DYNAMIC_TP_MIN_RR_APTUSDT: '2.5',
+        MIN_TP_DISTANCE_PCT_APTUSDT: '0.006',
+        SMC_SWEEP_MIN_WICK_RATIO_APTUSDT: '0.18',
+        SMC_SL_ATR_OFFSET_APTUSDT: '0.75',
+        SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT: '25',
+      }),
+    );
+
+    const apt = config.symbolOverrides?.get('APTUSDT');
+    expect(apt?.dynamicTpMinRr?.toString()).toBe('2.5');
+    expect(apt?.minTpDistancePct?.toString()).toBe('0.006');
+    expect(apt?.smcSweepMinWickRatio?.toString()).toBe('0.18');
+    expect(apt?.smcSlAtrOffset).toBe('0.75');
+    expect(apt?.sniperLimitExpirationCandles).toBe(25);
+    // NEARUSDT set nothing, so it must not appear at all.
+    expect(config.symbolOverrides?.has('NEARUSDT')).toBe(false);
+  });
+
+  it('keeps symbols independent — calibrating one never touches another', () => {
+    const config = loadConfig(
+      twoSymbols({
+        MIN_TP_DISTANCE_PCT_NEARUSDT: '0.0035',
+        MIN_TP_DISTANCE_PCT_APTUSDT: '0.006',
+      }),
+    );
+
+    expect(config.symbolOverrides?.get('NEARUSDT')?.minTpDistancePct?.toString()).toBe('0.0035');
+    expect(config.symbolOverrides?.get('APTUSDT')?.minTpDistancePct?.toString()).toBe('0.006');
+    // Globals are untouched by symbol calibration.
+    expect(config.minTpDistancePct.toString()).toBe('0.0035');
+  });
+
+  it('ignores overrides for symbols outside SYMBOLS', () => {
+    const config = loadConfig(
+      env({ SYMBOLS: 'NEARUSDT', MIN_TP_DISTANCE_PCT_OLDUSDT: '0.009' }),
+    );
+
+    expect(config.symbolOverrides?.size).toBe(0);
+  });
+
+  it.each([
+    ['DYNAMIC_TP_MIN_RR_APTUSDT', '0', /DYNAMIC_TP_MIN_RR_APTUSDT must be a strictly positive number/],
+    ['MIN_TP_DISTANCE_PCT_APTUSDT', '0.2', /MIN_TP_DISTANCE_PCT_APTUSDT must be < 0.1/],
+    ['SMC_SWEEP_MIN_WICK_RATIO_APTUSDT', '1', /SMC_SWEEP_MIN_WICK_RATIO_APTUSDT must be a ratio strictly between 0 and 1/],
+    ['SMC_SL_ATR_OFFSET_APTUSDT', 'abc', /SMC_SL_ATR_OFFSET_APTUSDT must be a valid number/],
+    ['SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT', '2.5', /SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT must be an integer/],
+  ])('rejects a malformed %s (%s) and names the full variable', (key, value, message) => {
+    expect(() => loadConfig(twoSymbols({ [key]: value }))).toThrow(message);
+  });
+
+  it('rejects a per-symbol RR floor above the global ceiling', () => {
+    // No per-symbol max exists, so a floor above DYNAMIC_TP_MAX_RR would make the
+    // resolver bounds unsatisfiable at evaluation time.
+    expect(() =>
+      loadConfig(twoSymbols({ DYNAMIC_TP_MIN_RR_APTUSDT: '9' })),
+    ).toThrow(/DYNAMIC_TP_MIN_RR_APTUSDT \(9\) must be <= DYNAMIC_TP_MAX_RR \(6\)/);
+  });
+});
+
+describe('resolveSymbolConfig', () => {
+  it('returns the same object identity for an uncalibrated symbol', () => {
+    const config = loadConfig(env({ SYMBOLS: 'NEARUSDT,APTUSDT' }));
+
+    // Identity, not deep equality: the uncalibrated path must be free and
+    // byte-for-byte identical to the pre-override behaviour.
+    expect(resolveSymbolConfig(config, 'NEARUSDT')).toBe(config);
+    expect(resolveSymbolConfig(config, 'UNKNOWNUSDT')).toBe(config);
+  });
+
+  it('applies only the keys that were overridden', () => {
+    const config = loadConfig(
+      env({
+        SYMBOLS: 'APTUSDT',
+        DYNAMIC_TP_MIN_RR: '1.5',
+        MIN_TP_DISTANCE_PCT: '0.0035',
+        SMC_SL_ATR_OFFSET: '0.5',
+        SMC_SWEEP_MIN_WICK_RATIO: '0.25',
+        SNIPER_LIMIT_EXPIRATION_CANDLES: '15',
+        MIN_TP_DISTANCE_PCT_APTUSDT: '0.006',
+      }),
+    );
+
+    const resolved = resolveSymbolConfig(config, 'APTUSDT');
+    expect(resolved.minTpDistancePct.toString()).toBe('0.006');
+    // Everything else falls back to the global value silently.
+    expect(resolved.dynamicTpMinRr.toString()).toBe('1.5');
+    expect(resolved.smcSlAtrOffset).toBe('0.5');
+    expect(resolved.smcSweepMinWickRatio.toString()).toBe('0.25');
+    expect(resolved.sniperLimitExpirationCandles).toBe(15);
+  });
+
+  it('matches the symbol case-insensitively', () => {
+    const config = loadConfig(
+      env({ SYMBOLS: 'aptusdt', MIN_TP_DISTANCE_PCT_APTUSDT: '0.006' }),
+    );
+
+    expect(resolveSymbolConfig(config, 'APTUSDT').minTpDistancePct.toString()).toBe('0.006');
+    expect(resolveSymbolConfig(config, ' aptusdt ').minTpDistancePct.toString()).toBe('0.006');
+  });
+
+  it('is idempotent', () => {
+    const config = loadConfig(
+      env({ SYMBOLS: 'APTUSDT', MIN_TP_DISTANCE_PCT_APTUSDT: '0.006' }),
+    );
+
+    const once = resolveSymbolConfig(config, 'APTUSDT');
+    const twice = resolveSymbolConfig(once, 'APTUSDT');
+    expect(twice.minTpDistancePct.toString()).toBe('0.006');
+  });
+
+  it('feeds the per-symbol limit lifetime into the shared resolver', () => {
+    const config = loadConfig(
+      env({
+        SYMBOLS: 'NEARUSDT,APTUSDT',
+        ENABLE_SNIPER_MODE: 'true',
+        SNIPER_LIMIT_EXPIRATION_CANDLES: '15',
+        SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT: '25',
+      }),
+    );
+
+    expect(resolveLimitExpirationCandles(config)).toBe(15);
+    expect(resolveLimitExpirationCandles(resolveSymbolConfig(config, 'NEARUSDT'))).toBe(15);
+    expect(resolveLimitExpirationCandles(resolveSymbolConfig(config, 'APTUSDT'))).toBe(25);
   });
 });

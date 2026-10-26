@@ -958,5 +958,54 @@ describe('StrategyEngine', () => {
       expect(mockDb.closeTrade).toHaveBeenCalledTimes(1);
       expect(mockNotifier.notifyTradeClosed).toHaveBeenCalledTimes(1);
     });
+
+    // === REGRESSION: WS close event racing the entry bookkeeping window ===
+    // `executeStagedEntry()` / `handleTradeApproval()` transition to IN_TRADE on
+    // exchange confirmation (Invariant 47) and write the `trades` row ~500 ms later.
+    // A close event inside that window finds an empty table. Resetting to SCANNING
+    // there left a live trade with Adaptive Fractioning permanently disabled.
+    it('does NOT reset the state machine when an Execution close event hits an empty DB row', async () => {
+      mockDb.getOpenTrade.mockResolvedValue(null);
+
+      await engine.handleExecutionPayload([
+        { symbol: 'BTCUSDT', execType: 'Trade', closedSize: '0.1', execPrice: '50060' },
+      ]);
+
+      expect(engine.getState()).toBe(StrategyState.IN_TRADE);
+      expect(mockDb.closeTrade).not.toHaveBeenCalled();
+      expect(mockNotifier.notifyTradeClosed).not.toHaveBeenCalled();
+      // No phantom PnL sweep: the early return precedes the 3 × 2s retry loop.
+      expect(mockClient.getClosedPnl).not.toHaveBeenCalled();
+    });
+
+    it('does NOT reset the state machine when a Position close event hits an empty DB row', async () => {
+      mockDb.getOpenTrade.mockResolvedValue(null);
+
+      await engine.handlePositionPayload([
+        { symbol: 'BTCUSDT', size: '0', side: 'None', closedPnl: '5' },
+      ]);
+
+      expect(engine.getState()).toBe(StrategyState.IN_TRADE);
+      expect(mockDb.closeTrade).not.toHaveBeenCalled();
+    });
+
+    it('keeps the engine IN_TRADE once bookkeeping lands after the dropped event', async () => {
+      mockDb.getOpenTrade.mockResolvedValue(null);
+
+      await engine.handleExecutionPayload([
+        { symbol: 'BTCUSDT', execType: 'Trade', closedSize: '0.1', execPrice: '50060' },
+      ]);
+
+      // db.openTrade() completes after the WS event.
+      mockDb.getOpenTrade.mockResolvedValue(openTrade as any);
+      const livePrice = jest.spyOn(engine, 'getLivePrice').mockReturnValue('50010');
+
+      await (engine as any).checkAndManagePosition();
+
+      livePrice.mockRestore();
+      // Management ran against the real row instead of being switched off.
+      expect(engine.getState()).toBe(StrategyState.IN_TRADE);
+      expect(mockDb.getOpenTrade).toHaveBeenCalled();
+    });
   });
 });

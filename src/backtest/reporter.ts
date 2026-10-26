@@ -4,8 +4,10 @@ import * as path from 'path';
 import { TradeResult } from './executionSimulator';
 import { Scenario1_HTFContinuation } from '../engine/scenarios/Scenario1_HTFContinuation';
 import { Scenario2_FVGFill } from '../engine/scenarios/Scenario2_FVGFill';
+import { Scenario3_IDM } from '../engine/scenarios/Scenario3_IDM';
 import { Scenario4_MitigationChain } from '../engine/scenarios/Scenario4_MitigationChain';
 import { Scenario5_HTFLiquiditySweep } from '../engine/scenarios/Scenario5_HTFLiquiditySweep';
+import { Scenario6_SMS } from '../engine/scenarios/Scenario6_SMS';
 import { Scenario7_AMD } from '../engine/scenarios/Scenario7_AMD';
 import { Scenario8_RangeDeviationReclaim } from '../engine/scenarios/Scenario8_RangeDeviationReclaim';
 import { Scenario9_TurtleSoup } from '../engine/scenarios/Scenario9_TurtleSoup';
@@ -41,8 +43,10 @@ function sharePct(count: number, base: number): string {
 export function resetScenarioRejectionStats(): void {
   Scenario1_HTFContinuation.resetStats();
   Scenario2_FVGFill.resetStats();
+  Scenario3_IDM.resetStats();
   Scenario4_MitigationChain.resetStats();
   Scenario5_HTFLiquiditySweep.resetStats();
+  Scenario6_SMS.resetStats();
   Scenario7_AMD.resetStats();
   Scenario8_RangeDeviationReclaim.resetStats();
   Scenario9_TurtleSoup.resetStats();
@@ -223,7 +227,7 @@ export function generateReport(
       
       lines.push(`  ↳ ${symbol} | Scenario ${trade.scenarioId} (${trade.scenarioName}) | ${resultLabel}`);
       lines.push(`     Entry: ${entryTime} | Exit: ${exitTime}`);
-      lines.push(`     Entry: ${trade.entryPrice} | SL: ${trade.slPrice} | TP: ${trade.tpPrice} | Qty: ${trade.qty}`);
+      lines.push(`     Entry: ${trade.entryPrice} | SL: ${trade.slPrice} | TP: ${trade.tpPrice} | Qty: ${trade.qty} | Type: ${trade.orderType || 'Market'}`);
       lines.push(`     PnL: ${pnlSign}$${trade.pnl.toFixed(2)} (${pnlPctSign}${trade.pnlPercent.toFixed(2)}%) | Fees: $${trade.feesPaid.toFixed(2)}`);
     }
     lines.push('');
@@ -248,8 +252,10 @@ export function generateReport(
   // Rejection stats for key scenarios
   const scenario1Stats = Scenario1_HTFContinuation.getRejectionStats();
   const scenario2Stats = Scenario2_FVGFill.getRejectionStats();
+  const scenario3Stats = Scenario3_IDM.getRejectionStats();
   const scenario4Stats = Scenario4_MitigationChain.getRejectionStats();
   const scenario5Stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
+  const scenario6Stats = Scenario6_SMS.getRejectionStats();
   const scenario7Stats = Scenario7_AMD.getRejectionStats();
   const scenario8Stats = Scenario8_RangeDeviationReclaim.getRejectionStats();
   const scenario9Stats = Scenario9_TurtleSoup.getRejectionStats();
@@ -260,21 +266,25 @@ export function generateReport(
   lines.push('   Scenario 1 (HTF Continuation):');
   lines.push(`     Total: ${scenario1Stats.totalEvals} | Killzone: ${scenario1Stats.killzone} | NoCandles: ${scenario1Stats.noCandles} | NoOB: ${scenario1Stats.noOb} | NoTouch: ${scenario1Stats.noTouch} | WrongSide: ${scenario1Stats.wrongSide} | NoChoch: ${scenario1Stats.noChoch} | Displacement: ${scenario1Stats.displacement} | NoFvg: ${scenario1Stats.noFvg} | TpInvalid: ${scenario1Stats.tpInvalid}`);
   lines.push('   Scenario 2 (FVG Fill):');
-  lines.push(`     Total: ${scenario2Stats.totalEvals} | Killzone: ${scenario2Stats.killzone} | NoHTFFVG: ${scenario2Stats.noHtfFvg} | NoTouch: ${scenario2Stats.noFvgTouch} | NoChoch: ${scenario2Stats.noChoch} | Disp: ${scenario2Stats.displacement} | PremDisc: ${scenario2Stats.premiumDiscount} | NoLiqCtx: ${scenario2Stats.noLiquidityContext}`);
+  lines.push(`     Total: ${scenario2Stats.totalEvals} | Killzone: ${scenario2Stats.killzone} | NoHTFFVG: ${scenario2Stats.noHtfFvg} | NoTouch: ${scenario2Stats.noFvgTouch} | NoChoch: ${scenario2Stats.noChoch} | Disp: ${scenario2Stats.displacement} | PremDisc: ${scenario2Stats.premiumDiscount} | NoLiqCtx: ${scenario2Stats.noLiquidityContext} | TpInvalid: ${scenario2Stats.tpInvalid}`);
+  lines.push('   Scenario 3 (IDM):');
+  lines.push(`     Total: ${scenario3Stats.totalEvals} | Killzone: ${scenario3Stats.killzone} | NoOB: ${scenario3Stats.noOb} | NoStructure: ${scenario3Stats.noStructure} | NoSweep: ${scenario3Stats.noSweep} | NoRealOB: ${scenario3Stats.noRealOb} | Proximity: ${scenario3Stats.proximity} | NoOBTest: ${scenario3Stats.noObTest} | TpInvalid: ${scenario3Stats.tpInvalid}`);
   lines.push('   Scenario 4 (Mitigation Chain):');
-  lines.push(`     Total: ${scenario4Stats.totalEvals} | Killzone: ${scenario4Stats.killzone} | NoOB: ${scenario4Stats.noValidOb} | NoTouch: ${scenario4Stats.noObTouch} | NoChoch: ${scenario4Stats.noChoch} | Disp: ${scenario4Stats.displacement} | PremDisc: ${scenario4Stats.premiumDiscount} | NoBOS: ${scenario4Stats.noBosAfterBounce}`);
+  lines.push(`     Total: ${scenario4Stats.totalEvals} | Killzone: ${scenario4Stats.killzone} | NoOB: ${scenario4Stats.noValidOb} | PremDisc: ${scenario4Stats.premiumDiscount} | NoBounce: ${scenario4Stats.noBounce} | NoBOS: ${scenario4Stats.noBos} | NoRetest: ${scenario4Stats.noRetest} | TpInvalid: ${scenario4Stats.tpInvalid}`);
   lines.push('   Scenario 5 (HTF Sweep):');
   lines.push(`     Total: ${scenario5Stats.totalEvals} | Killzone: ${scenario5Stats.killzone} | NoPools: ${scenario5Stats.noPools} | NoSweep: ${scenario5Stats.noSweep} | NoChoch: ${scenario5Stats.noChoch} | Displacement: ${scenario5Stats.displacement} | NoFvg: ${scenario5Stats.noFvg} | TpInvalid: ${scenario5Stats.tpInvalid}`);
+  lines.push('   Scenario 6 (Failure Swing):');
+  lines.push(`     Total: ${scenario6Stats.totalEvals} | NoData: ${scenario6Stats.noData} | Killzone: ${scenario6Stats.killzone} | NoSms: ${scenario6Stats.noSms} | NoOb: ${scenario6Stats.noOb} | NoChoch: ${scenario6Stats.noChoch} | Displacement: ${scenario6Stats.displacement} | TpInvalid: ${scenario6Stats.tpInvalid}`);
   lines.push('   Scenario 7 (AMD):');
-  lines.push(`     Total: ${scenario7Stats.totalEvals} | Killzone: ${scenario7Stats.killzone} | NoAsianRange: ${scenario7Stats.noAsianRange} | TooWide: ${scenario7Stats.asianRangeTooWide} | NoSweep: ${scenario7Stats.noSweep} | NoChoch: ${scenario7Stats.noChoch} | Displacement: ${scenario7Stats.displacement} | NoFvg: ${scenario7Stats.noFvg}`);
+  lines.push(`     Total: ${scenario7Stats.totalEvals} | Killzone: ${scenario7Stats.killzone} | NoAsianRange: ${scenario7Stats.noAsianRange} | TooWide: ${scenario7Stats.asianRangeTooWide} | NoSweep: ${scenario7Stats.noSweep} | NoChoch: ${scenario7Stats.noChoch} | Displacement: ${scenario7Stats.displacement} | NoFvg: ${scenario7Stats.noFvg} | TpInvalid: ${scenario7Stats.tpInvalid}`);
   lines.push('   Scenario 8 (Range Deviation):');
-  lines.push(`     Total: ${scenario8Stats.totalEvals} | Killzone: ${scenario8Stats.killzone} | NoRange: ${scenario8Stats.noTradingRange} | NoDeviation: ${scenario8Stats.noDeviation} | NoReclaim: ${scenario8Stats.noReclaim} | NoChoch: ${scenario8Stats.noChoch} | Displacement: ${scenario8Stats.displacement} | NoFvg: ${scenario8Stats.noFvg} | RR: ${scenario8Stats.rr}`);
+  lines.push(`     Total: ${scenario8Stats.totalEvals} | Killzone: ${scenario8Stats.killzone} | NoRange: ${scenario8Stats.noTradingRange} | NoDeviation: ${scenario8Stats.noDeviation} | NoReclaim: ${scenario8Stats.noReclaim} | NoChoch: ${scenario8Stats.noChoch} | Displacement: ${scenario8Stats.displacement} | NoPoi: ${scenario8Stats.noPoi} | TpInvalid: ${scenario8Stats.tpInvalid}`);
   lines.push('   Scenario 9 (Turtle Soup):');
-  lines.push(`     Total: ${scenario9Stats.totalEvals} | Killzone: ${scenario9Stats.killzone} | NoRange: ${scenario9Stats.noTradingRange} | NoEqhEql: ${scenario9Stats.noEqhEql} | NoSfp: ${scenario9Stats.noSfp} | NoRejectionWick: ${scenario9Stats.noRejectionWick} | RR: ${scenario9Stats.rr} | PremDisc: ${scenario9Stats.premiumDiscount}`);
+  lines.push(`     Total: ${scenario9Stats.totalEvals} | Killzone: ${scenario9Stats.killzone} | NoRange: ${scenario9Stats.noTradingRange} | NoEqhEql: ${scenario9Stats.noEqhEql} | NoSweep: ${scenario9Stats.noSweep} | BodyClose: ${scenario9Stats.bodyClose} | WeakWick: ${scenario9Stats.weakWick} | TpInvalid: ${scenario9Stats.tpInvalid}`);
   lines.push('   Scenario 10 (Breaker Block):');
-  lines.push(`     Total: ${scenario10Stats.totalEvals} | Killzone: ${scenario10Stats.killzone} | NoBreak: ${scenario10Stats.noBreak} | NoBrokenOB: ${scenario10Stats.noBrokenOb} | NoLiqSweep: ${scenario10Stats.noLiquiditySweep} | NotBOS: ${scenario10Stats.notBos} | OBNotFresh: ${scenario10Stats.obNotFresh} | NoFvg: ${scenario10Stats.noFvg} | NoRetest: ${scenario10Stats.noRetest} | Disp: ${scenario10Stats.displacement} | BodyClose: ${scenario10Stats.bodyClose}`);
+  lines.push(`     Total: ${scenario10Stats.totalEvals} | NoData: ${scenario10Stats.noData} | Killzone: ${scenario10Stats.killzone} | NoBreak: ${scenario10Stats.noBreak} | BodyClose: ${scenario10Stats.bodyClose} | Displacement: ${scenario10Stats.displacement} | NoBrokenOB: ${scenario10Stats.noBrokenOb} | OBNotFresh: ${scenario10Stats.obNotFresh} | NoLiqSweep: ${scenario10Stats.noLiquiditySweep} | NoFvg: ${scenario10Stats.noFvg} | NoRetest: ${scenario10Stats.noRetest} | TpInvalid: ${scenario10Stats.tpInvalid}`);
   lines.push('   Scenario 11 (Mitigation Block):');
-  lines.push(`     Total: ${scenario11Stats.totalEvals} | Killzone: ${scenario11Stats.killzone} | NoSms: ${scenario11Stats.noSms} | InvalidSms: ${scenario11Stats.invalidSmsPattern} | NoChoch: ${scenario11Stats.noChoch} | Displacement: ${scenario11Stats.displacement} | NoMB: ${scenario11Stats.noMitigationBlock} | NoRetest: ${scenario11Stats.noRetest} | PremDisc: ${scenario11Stats.premiumDiscount}`);
+  lines.push(`     Total: ${scenario11Stats.totalEvals} | NoData: ${scenario11Stats.noData} | Killzone: ${scenario11Stats.killzone} | NoSms: ${scenario11Stats.noSms} | NoChoch: ${scenario11Stats.noChoch} | Displacement: ${scenario11Stats.displacement} | NoMB: ${scenario11Stats.noMitigationBlock} | NoRetest: ${scenario11Stats.noRetest} | PremDisc: ${scenario11Stats.premiumDiscount} | TpInvalid: ${scenario11Stats.tpInvalid}`);
 
   // Scenario 12 is reported as a FUNNEL rather than a flat counter line: the sweep
   // gate is evaluated on every 1m candle, so raw counts are dominated by "no sweep
@@ -285,7 +295,7 @@ export function generateReport(
   lines.push(`     Total: ${scenario12Stats.totalEvals} | Triggered: ${scenario12Stats.triggered} | Killzone: ${scenario12Stats.killzone} | NoMacroLevels: ${scenario12Stats.noMacroLevels} | Disabled: ${scenario12Stats.disabled} | InsufficientCandles: ${scenario12Stats.insufficientCandles}`);
   lines.push(`     Sweep stage: Touched: ${scenario12Stats.levelTouched} | WeakWick: ${scenario12Stats.weakWick} (${sharePct(scenario12Stats.weakWick, scenario12Stats.levelTouched)} of touches) | NoSweep: ${scenario12Stats.noSweep} | SweepFound: ${scenario12Stats.sweepFound}`);
   lines.push(`     Post-sweep (base ${scenario12Stats.sweepFound}): HtfContradiction: ${scenario12Stats.htfContradiction} (${sharePct(scenario12Stats.htfContradiction, scenario12Stats.sweepFound)}) | NoChoch: ${scenario12Stats.noChoch} (${sharePct(scenario12Stats.noChoch, scenario12Stats.sweepFound)}) | BodyClose: ${scenario12Stats.bodyClose} (${sharePct(scenario12Stats.bodyClose, scenario12Stats.sweepFound)}) | NoOB: ${scenario12Stats.noOb} (${sharePct(scenario12Stats.noOb, scenario12Stats.sweepFound)})`);
-  lines.push(`     Entry gates (base ${scenario12Stats.sweepFound}): Proximity: ${scenario12Stats.proximity} (${sharePct(scenario12Stats.proximity, scenario12Stats.sweepFound)}) | PremDisc: ${scenario12Stats.premiumDiscount} (${sharePct(scenario12Stats.premiumDiscount, scenario12Stats.sweepFound)}) | InsufficientRoom: ${scenario12Stats.insufficientRoom} (${sharePct(scenario12Stats.insufficientRoom, scenario12Stats.sweepFound)}) | TpInvalid: ${scenario12Stats.tpInvalid} | Geometry: ${scenario12Stats.geometry} | InvalidAtr: ${scenario12Stats.invalidAtr}`);
+  lines.push(`     Entry gates (base ${scenario12Stats.sweepFound}): Proximity: ${scenario12Stats.proximity} (${sharePct(scenario12Stats.proximity, scenario12Stats.sweepFound)}) | PremDisc: ${scenario12Stats.premiumDiscount} (${sharePct(scenario12Stats.premiumDiscount, scenario12Stats.sweepFound)}) | InsufficientNetR: ${scenario12Stats.insufficientNetR} (${sharePct(scenario12Stats.insufficientNetR, scenario12Stats.sweepFound)}) | InsufficientVolatility: ${scenario12Stats.insufficientVolatility} (${sharePct(scenario12Stats.insufficientVolatility, scenario12Stats.sweepFound)}) | InsufficientRoom: ${scenario12Stats.insufficientRoom} (${sharePct(scenario12Stats.insufficientRoom, scenario12Stats.sweepFound)}) | TpInvalid: ${scenario12Stats.tpInvalid} | Geometry: ${scenario12Stats.geometry} | InvalidAtr: ${scenario12Stats.invalidAtr}`);
   lines.push('');
 
   return lines.join('\n');

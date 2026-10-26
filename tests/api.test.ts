@@ -60,6 +60,8 @@ function makeClient(
     dynamicTpMaxRr: new Decimal(6),
     dynamicTpRequireTarget: false,
     minTpDistancePct: new Decimal('0.0035'),
+    minNetRr: new Decimal('1'),
+    minVolatilityFeeRatio: new Decimal('1'),
     backtestDays: 60,
     useLocalCacheOnly: false,
     maxWorkingCapital: 0,

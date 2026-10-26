@@ -48,6 +48,8 @@ describe('PendingTradeManager', () => {
     dynamicTpMinRr: new Decimal('1.5'),
     dynamicTpMaxRr: new Decimal(6),
     dynamicTpRequireTarget: false,
+    minNetRr: new Decimal(1),
+    minVolatilityFeeRatio: new Decimal(1),
     minTpDistancePct: new Decimal('0.0035'),
     sniperDisplacementMultiplier: undefined,
     backtestDays: 60,
@@ -432,6 +434,21 @@ maxWorkingCapital: 0,
       manager.cancelAll();
     });
 
+    it('should return Market order for a 0.036% discount beyond the fee delta (Long)', async () => {
+      const manager = createManagerWithPrice('99.964');
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10', '100', undefined, '0.01'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
     it('should return Market order when livePrice is a DISCOUNT beyond the threshold (Long)', async () => {
       // idealEntry=100, currentPrice=99.50 → better than entry (discount) even though
       // the deviation (0.5%) exceeds the 0.15% threshold. A Limit at 100 would be
@@ -464,6 +481,22 @@ maxWorkingCapital: 0,
 
       expect(result.approved).toBe(true);
       expect(result.orderType).toBe('Market');
+      await expect(promise).resolves.toBe(true);
+      manager.cancelAll();
+    });
+
+    it('should return Market for a small 0.01% favorable discount', async () => {
+      const manager = createManagerWithPrice('99.99');
+      const promise = manager.queueTrade(
+        'SOLUSDT', '100', '99', '103', 1, 'Test', 'Buy', '10', '100', undefined, '0.01'
+      );
+
+      const tradeId = Array.from((manager as any).pendingTrades.keys())[0] as string;
+      const result = manager.handleApproval(tradeId, true);
+
+      expect(result.approved).toBe(true);
+      expect(result.orderType).toBe('Market');
+      expect(result.limitPrice).toBeUndefined();
       await expect(promise).resolves.toBe(true);
       manager.cancelAll();
     });

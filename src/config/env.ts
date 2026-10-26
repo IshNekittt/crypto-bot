@@ -6,6 +6,39 @@ export interface RiskConfig {
   readonly reducedRiskPercent: string;
 }
 
+/**
+ * Per-symbol calibration overrides (`<PARAM>_<SYMBOL>`, following the
+ * `SCENARIOS_<SYMBOL>` precedent).
+ *
+ * Assets do not share a volatility regime, ATR or tick size, so a global value
+ * that is calibrated for one symbol silently mis-calibrates every other one.
+ * These overrides let a symbol be pinned to its own numbers without forking the
+ * engine or contaminating the global defaults.
+ *
+ * Every field is optional. An absent key falls back to the global value with no
+ * warning: "this asset has not been individually calibrated" is the normal state
+ * of the system, not a configuration error. Only malformed values throw.
+ *
+ * Resolve through `resolveSymbolConfig()` — never read the map directly, or a
+ * consumer will silently ignore calibration for every symbol.
+ */
+export interface SymbolOverrides {
+  /** `DYNAMIC_TP_MIN_RR_<SYMBOL>` — structural target floor in R multiples. */
+  readonly dynamicTpMinRr?: Decimal;
+  /** `MIN_TP_DISTANCE_PCT_<SYMBOL>` — fee-aware target floor, fraction of price. */
+  readonly minTpDistancePct?: Decimal;
+  /** `MIN_NET_RR_<SYMBOL>` — fee-inclusive reward:risk floor. */
+  readonly minNetRr?: Decimal;
+  /** `MIN_VOLATILITY_FEE_RATIO_<SYMBOL>` — ATR-to-fee admission multiple. */
+  readonly minVolatilityFeeRatio?: Decimal;
+  /** `SMC_SWEEP_MIN_WICK_RATIO_<SYMBOL>` — sweep absorption floor, ratio in (0,1). */
+  readonly smcSweepMinWickRatio?: Decimal;
+  /** `SMC_SL_ATR_OFFSET_<SYMBOL>` — ATR multiple used to offset the stop. */
+  readonly smcSlAtrOffset?: string;
+  /** `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>` — limit lifetime in 1m candles. */
+  readonly sniperLimitExpirationCandles?: number;
+}
+
 export interface BotConfig {
   readonly apiKey: string;
   readonly apiSecret: string;
@@ -32,6 +65,16 @@ export interface BotConfig {
   readonly fundingAlertThresholdPct: string;
   readonly fundingRestoreThresholdPct: string;
   readonly symbolScenarios: Map<string, number[]>;
+  /**
+   * Per-symbol parameter overrides, keyed by the uppercased `SYMBOLS` entry.
+   *
+   * Only symbols with at least one `<PARAM>_<SYMBOL>` key present appear here,
+   * so an empty map means "every symbol uses the global calibration". Declared
+   * optional so hand-built `BotConfig` fixtures keep compiling. Consume via
+   * `resolveSymbolConfig()`, which falls back to `config` unchanged when a symbol
+   * has no entry.
+   */
+  readonly symbolOverrides?: ReadonlyMap<string, SymbolOverrides>;
   readonly backtestCsvPath: string | null;
   readonly cooldownCandles: number;
   readonly smcSlAtrOffset: string;
@@ -88,6 +131,8 @@ export interface BotConfig {
    * is almost certainly a percentage written without dividing by 100.
    */
   readonly minTpDistancePct: Decimal;
+  readonly minNetRr: Decimal;
+  readonly minVolatilityFeeRatio: Decimal;
   readonly smartEntryThresholdPct: string;
   readonly preflightBufferPct: string;
   readonly enableSniperMode: boolean;
@@ -284,6 +329,10 @@ function parseRatioOrDefault(
  * count means very different wall-clock lifetimes. Every consumer (live
  * reconciliation, backtest simulator) resolves through this single helper so the
  * two can never drift apart.
+ *
+ * Pass a symbol-resolved config (`resolveSymbolConfig(config, symbol)`) when the
+ * caller knows which symbol it is acting on, so `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>`
+ * is honoured.
  */
 export function resolveLimitExpirationCandles(config: {
   enableSniperMode: boolean;
@@ -310,6 +359,44 @@ export function resolveLimitExpirationMs(config: {
   );
 }
 
+/**
+ * Return `config` with every per-symbol override for `symbol` applied.
+ *
+ * Single resolution point for asset-specific calibration: callers that evaluate
+ * a specific symbol (the per-symbol `ScenarioRouter`, the backtest loop, the
+ * reconciliation sweep) call this once and then consume the returned config
+ * exactly as they consumed the global one. That keeps every scenario and the
+ * `tpResolver` symbol-aware without threading a symbol through their signatures.
+ *
+ * A symbol with no overrides returns the **same object identity** — no
+ * allocation, no behaviour change, so an uncalibrated deployment is byte-for-byte
+ * the previous code path. Resolution is idempotent: resolving an already-resolved
+ * config yields the same values.
+ *
+ * Note: only `DYNAMIC_TP_MIN_RR_<SYMBOL>` is overridable, not the max. `loadConfig`
+ * therefore validates each symbol's floor against the global `DYNAMIC_TP_MAX_RR`
+ * at parse time, so a symbol can never be configured with floor > ceiling.
+ */
+export function resolveSymbolConfig(config: BotConfig, symbol: string): BotConfig {
+  const overrides = config.symbolOverrides?.get(symbol.trim().toUpperCase());
+  if (!overrides) return config;
+
+  return {
+    ...config,
+    dynamicTpMinRr: overrides.dynamicTpMinRr ?? config.dynamicTpMinRr,
+    minTpDistancePct: overrides.minTpDistancePct ?? config.minTpDistancePct,
+    minNetRr: overrides.minNetRr ?? config.minNetRr,
+    minVolatilityFeeRatio:
+      overrides.minVolatilityFeeRatio ?? config.minVolatilityFeeRatio,
+    smcSweepMinWickRatio:
+      overrides.smcSweepMinWickRatio ?? config.smcSweepMinWickRatio,
+    smcSlAtrOffset: overrides.smcSlAtrOffset ?? config.smcSlAtrOffset,
+    sniperLimitExpirationCandles:
+      overrides.sniperLimitExpirationCandles ??
+      config.sniperLimitExpirationCandles,
+  };
+}
+
 function parseSymbolScenarios(
   env: NodeJS.ProcessEnv,
   symbols: string[],
@@ -331,6 +418,113 @@ function parseSymbolScenarios(
       }
     }
   }
+  return map;
+}
+
+/**
+ * Parse `<PARAM>_<SYMBOL>` overrides for every configured symbol.
+ *
+ * Iterates `symbols` (the parsed `SYMBOLS` list) rather than scanning the whole
+ * environment, so a stray `..._OLDUSDT` key from a previous run cannot resurrect
+ * calibration for a pair the bot no longer trades. Symbols with no keys are
+ * omitted entirely — that is what makes the fallback silent.
+ *
+ * Errors name the full variable (`MIN_TP_DISTANCE_PCT_APTUSDT`), not the bare
+ * parameter, so a typo in the suffix is obvious from the message.
+ */
+function parseSymbolOverrides(
+  env: NodeJS.ProcessEnv,
+  symbols: string[],
+  globalMaxRr: Decimal,
+): Map<string, SymbolOverrides> {
+  const map = new Map<string, SymbolOverrides>();
+
+  for (const symbol of symbols) {
+    const overrides: {
+      dynamicTpMinRr?: Decimal;
+      minTpDistancePct?: Decimal;
+      minNetRr?: Decimal;
+      minVolatilityFeeRatio?: Decimal;
+      smcSweepMinWickRatio?: Decimal;
+      smcSlAtrOffset?: string;
+      sniperLimitExpirationCandles?: number;
+    } = {};
+    let hasAny = false;
+
+    const minRrKey = `DYNAMIC_TP_MIN_RR_${symbol}`;
+    const minRrRaw = optionalEnv(env, minRrKey);
+    if (minRrRaw !== null) {
+      const parsed = parsePositiveDecimalOrDefault(minRrRaw, "1.5", minRrKey);
+      // No per-symbol ceiling is supported, so a floor above the global ceiling
+      // would make the resolver's bounds unsatisfiable at evaluation time.
+      if (parsed.gt(globalMaxRr)) {
+        throw new Error(
+          `${minRrKey} (${parsed.toString()}) must be <= DYNAMIC_TP_MAX_RR (${globalMaxRr.toString()})`,
+        );
+      }
+      overrides.dynamicTpMinRr = parsed;
+      hasAny = true;
+    }
+
+    const minTpKey = `MIN_TP_DISTANCE_PCT_${symbol}`;
+    const minTpRaw = optionalEnv(env, minTpKey);
+    if (minTpRaw !== null) {
+      const parsed = parsePositiveDecimalOrDefault(minTpRaw, "0.0035", minTpKey);
+      if (parsed.gte(new Decimal("0.1"))) {
+        throw new Error(
+          `${minTpKey} must be < 0.1 (10%), got: ${parsed.toString()}`,
+        );
+      }
+      overrides.minTpDistancePct = parsed;
+      hasAny = true;
+    }
+
+    const minNetRrKey = `MIN_NET_RR_${symbol}`;
+    const minNetRrRaw = optionalEnv(env, minNetRrKey);
+    if (minNetRrRaw !== null) {
+      overrides.minNetRr = parsePositiveDecimalOrDefault(minNetRrRaw, "1.0", minNetRrKey);
+      hasAny = true;
+    }
+
+    const minVolatilityFeeRatioKey = `MIN_VOLATILITY_FEE_RATIO_${symbol}`;
+    const minVolatilityFeeRatioRaw = optionalEnv(env, minVolatilityFeeRatioKey);
+    if (minVolatilityFeeRatioRaw !== null) {
+      overrides.minVolatilityFeeRatio = parsePositiveDecimalOrDefault(
+        minVolatilityFeeRatioRaw,
+        "1.0",
+        minVolatilityFeeRatioKey,
+      );
+      hasAny = true;
+    }
+
+    const wickKey = `SMC_SWEEP_MIN_WICK_RATIO_${symbol}`;
+    const wickRaw = optionalEnv(env, wickKey);
+    if (wickRaw !== null) {
+      overrides.smcSweepMinWickRatio = parseRatioOrDefault(wickRaw, "0.25", wickKey);
+      hasAny = true;
+    }
+
+    const slKey = `SMC_SL_ATR_OFFSET_${symbol}`;
+    const slRaw = optionalEnv(env, slKey);
+    if (slRaw !== null) {
+      overrides.smcSlAtrOffset = parseDecimalOrDefault(slRaw, "0.5", slKey);
+      hasAny = true;
+    }
+
+    const expKey = `SNIPER_LIMIT_EXPIRATION_CANDLES_${symbol}`;
+    const expRaw = optionalEnv(env, expKey);
+    if (expRaw !== null) {
+      const parsed = parsePositiveNumberOrDefault(expRaw, "15", expKey);
+      if (!Number.isInteger(parsed)) {
+        throw new Error(`${expKey} must be an integer, got: ${parsed}`);
+      }
+      overrides.sniperLimitExpirationCandles = parsed;
+      hasAny = true;
+    }
+
+    if (hasAny) map.set(symbol, overrides);
+  }
+
   return map;
 }
 
@@ -506,6 +700,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     );
   }
 
+  const minNetRr = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "MIN_NET_RR"),
+    "1.0",
+    "MIN_NET_RR",
+  );
+  const minVolatilityFeeRatio = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "MIN_VOLATILITY_FEE_RATIO"),
+    "1.0",
+    "MIN_VOLATILITY_FEE_RATIO",
+  );
+
   const limitExpirationCandles = parsePositiveNumberOrDefault(
     optionalEnv(env, "LIMIT_EXPIRATION_CANDLES"),
     "6",
@@ -586,6 +791,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     );
   }
 
+  // Per-symbol calibration (`<PARAM>_<SYMBOL>`). Parsed after the globals so each
+  // symbol's value can be validated against the global bounds it inherits.
+  const symbolOverrides = parseSymbolOverrides(env, symbols, dynamicTpMaxRr);
+
   const dynamicTpRequireTarget =
     (optionalEnv(env, "DYNAMIC_TP_REQUIRE_TARGET") ?? "false").toLowerCase() ===
     "true";
@@ -653,6 +862,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     fundingAlertThresholdPct,
     fundingRestoreThresholdPct,
     symbolScenarios,
+    symbolOverrides,
     backtestCsvPath,
     smcSlAtrOffset,
     smcDisplacementMultiplier,
@@ -660,6 +870,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     s12SessionSweeps,
     s12EqhEqlSweeps,
     minTpDistancePct,
+    minNetRr,
+    minVolatilityFeeRatio,
     limitExpirationCandles,
     sniperLimitExpirationCandles,
     smartEntryThresholdPct,

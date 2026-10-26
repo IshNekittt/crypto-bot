@@ -13,6 +13,7 @@ import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { evaluateTradeManagement, initializeTradeManagement } from '../risk/tradeManager';
 import { formatPrice, formatQuantity } from '../utils/precision';
+import { shouldUseMarketEntry } from '../config/fees';
 
 export const WAITING_ANTI_STUCK_CANDLES_4H = 30;
 const NO_POSITION_RECHECK_MS = 30_000;
@@ -645,8 +646,27 @@ export class StrategyEngine {
   private async processClosedPosition(pnl: string | null, wsExitPrice?: string): Promise<void> {
     const trade = await this.deps.db.getOpenTrade(this.symbol);
     if (!trade) {
-      logger.warn(`${this.symbol}: position close event but no open trade found`);
-      this.transition(StrategyState.SCANNING);
+      // ENTRY-PIPELINE OWNERSHIP — the state machine MUST NOT be touched here.
+      //
+      // `executeStagedEntry()` / `handleTradeApproval()` transition to IN_TRADE the
+      // instant the exchange confirms the order (Invariant 47) and only write the
+      // `trades` row afterwards — 500 ms wait, then `getOpenPositions()`, then the
+      // DB round-trip. A WS Execution/Position close event landing inside that
+      // window finds an empty table. Resetting to SCANNING here (the v2026-10-26
+      // defect) handed the state machine away from the entry pipeline while the
+      // bookkeeping was still in flight: the row then appeared one tick later and
+      // the engine was left SCANNING with a live trade whose Adaptive Fractioning
+      // was permanently disabled, riding an unmanaged position into a full SL.
+      //
+      // The event is dropped and the state is left exactly as the entry pipeline
+      // (or the trade that is actually open) put it. If the position genuinely
+      // closed during bookkeeping, the row lands as OPEN and the 10-minute
+      // ReconciliationLoop detects the missing exchange position and closes it
+      // safely (Invariant 27, §3.4). A bounded, self-healing delay is strictly
+      // better than blinding the state machine mid-entry.
+      logger.warn(
+        `${this.symbol}: position close event but no open trade found — entry bookkeeping still in flight, state left as ${this.state}`,
+      );
       return;
     }
 
@@ -931,10 +951,10 @@ export class StrategyEngine {
       const idealEntry = new Decimal(result.levels.entry);
       const currentPrice = new Decimal(lastCandle.close);
       const smartThreshold = new Decimal(this.deps.config.smartEntryThresholdPct); // e.g., 0.0015 = 0.15%
-      
+      const isLong = idealEntry.gt(new Decimal(result.levels.stopLoss));
+      const useMarketOrder = shouldUseMarketEntry(idealEntry, currentPrice, isLong, smartThreshold);
       const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
-      const useMarketOrder = priceDiffPct.lte(smartThreshold);
-      
+
       const orderType = useMarketOrder ? 'Market' : 'Limit';
       const limitPrice = useMarketOrder
         ? null
@@ -1062,13 +1082,10 @@ export class StrategyEngine {
     // This determines order type BEFORE checking slippage
     const idealEntry = new Decimal(this.plan.entryPrice);
     const threshold = new Decimal(this.deps.config.smartEntryThresholdPct || 0.0015);
-    const priceDiffPct = idealEntry.minus(livePrice).div(idealEntry).abs();
-    
-    // Check if current price is actually BETTER than ideal entry (a discount)
-    const isDiscount = isLong ? livePrice.lte(idealEntry) : livePrice.gte(idealEntry);
-    
-    // ALWAYS use Market if we have a discount (prevents Limit [10001] trap) OR if diff <= threshold
-    const useMarket = isDiscount || priceDiffPct.lte(threshold);
+
+    // Discount Trap: any favorable discount uses Market. At-entry/adverse prices
+    // may use Market only while they remain inside the tight execution threshold.
+    const useMarket = shouldUseMarketEntry(idealEntry, livePrice, isLong, threshold);
 
     // Create new PositionPlan with updated orderType and limitPrice (both are readonly)
     // Use instrument's tickSize for proper price formatting (anti-pattern 16.3)

@@ -42,6 +42,8 @@ const mockConfig: BotConfig = {
     dynamicTpMinRr: new Decimal('1.5'),
     dynamicTpMaxRr: new Decimal(6),
     dynamicTpRequireTarget: false,
+    minNetRr: new Decimal(1),
+    minVolatilityFeeRatio: new Decimal(1),
     minTpDistancePct: new Decimal('0.0035'),
     backtestDays: 60,
     useLocalCacheOnly: false,
@@ -53,398 +55,459 @@ const mockConfig: BotConfig = {
     enableTradeNotifications: true,
 };
 
+/** 15m entry series. */
+const LTF_MS = 15 * 60 * 1000;
+/** 100 15m candles ≈ 25h of history — several 4H windows. */
+const CANDLE_COUNT = 100;
+const T0 = 1_788_652_800_000;
+/** Index of the candle whose timestamp carries the 4H FVG stamp. */
+const FVG_INDEX = 10;
+/** Index of the fill bar — inside the last 16 candles (one 4H window). */
+const FILL_INDEX = 90;
+/** Index of the confirming 15m CHoCH. */
+const CHOCH_INDEX = 95;
+
+/**
+ * A 4H zone is stamped with a 4H candle timestamp, which is NOT on the 15m grid.
+ * Deliberately offsetting it by 5 minutes is what exercises the anchor fix in
+ * `hasLiquidityContext()` (the legacy code used `findIndex(timestamp === …)` and
+ * therefore could never match a single 4H stamp).
+ */
+const OFF_GRID_OFFSET = 5 * 60 * 1000;
+
+const indexTimestamp = (index: number): number => T0 + index * LTF_MS;
+
+interface CandleShape {
+  readonly open?: string;
+  readonly high: string;
+  readonly low: string;
+  readonly close: string;
+}
+
+const candle = (index: number, shape: CandleShape) => ({
+  timestamp: indexTimestamp(index),
+  open: shape.open ?? shape.close,
+  high: shape.high,
+  low: shape.low,
+  close: shape.close,
+  volume: '1000',
+});
+
+type Direction = 'BULLISH' | 'BEARISH';
+
+interface FvgFixtureOptions {
+  readonly direction?: Direction;
+  /** Dealing-range equilibrium returned by the mocked recognizer. */
+  readonly pdEquilibrium?: string;
+  readonly fvgTop?: string;
+  readonly fvgBottom?: string;
+  readonly withLiquidityPool?: boolean;
+  readonly withChoch?: boolean;
+  readonly chochTimeframe?: string;
+  readonly chochIndex?: number;
+  readonly chochImpulse?: string;
+  readonly currentLow?: string;
+  readonly currentHigh?: string;
+  readonly currentClose?: string;
+}
+
+/**
+ * Scenario 2 fixture.
+ *
+ * Geometry: the 4H FVG is 98 → 100 (equilibrium 99). Its stamp sits at
+ * `FVG_INDEX`, so it completes 2 × 4H later (`FVG_FORMATION_CANDLES` measured in
+ * the GAP's own timeframe). Every bar before `FILL_INDEX` is parked above the gap
+ * so the first touch inside the 4H causality window is unambiguous.
+ */
+const createFvgPattern = (options: FvgFixtureOptions = {}) => {
+  const direction: Direction = options.direction ?? 'BULLISH';
+  const currentLow = options.currentLow ?? '97.5';
+  const currentHigh = options.currentHigh ?? '99.5';
+  const currentClose = options.currentClose ?? '99';
+
+  const candles15m: any[] = [];
+  for (let i = 0; i < CANDLE_COUNT; i++) {
+    // Parked above the gap: high 106 / low 102 can never touch 98 → 100.
+    candles15m.push(candle(i, { high: '106', low: '102', close: '104' }));
+  }
+
+  // The fill bar: the first candle inside the window that trades into the gap.
+  candles15m[FILL_INDEX] = candle(FILL_INDEX, {
+    high: '101',
+    low: '98.5',
+    close: '100',
+  });
+
+  // The current candle sits at the gap's equilibrium on purpose: the entry is a
+  // retest of the POI, not a chase.
+  candles15m[CANDLE_COUNT - 1] = candle(CANDLE_COUNT - 1, {
+    high: currentHigh,
+    low: currentLow,
+    close: currentClose,
+  });
+
+  const htfFvg = {
+    type: 'FVG' as const,
+    direction,
+    top: new Decimal(options.fvgTop ?? '100'),
+    bottom: new Decimal(options.fvgBottom ?? '98'),
+    timestamp: indexTimestamp(FVG_INDEX) + OFF_GRID_OFFSET,
+    mitigated: false,
+    timeframe: '240',
+  };
+
+  const chochIndex = options.chochIndex ?? CHOCH_INDEX;
+  const structures: any[] = [];
+  if (options.withChoch !== false) {
+    structures.push({
+      type: 'CHOCH' as const,
+      direction,
+      price: new Decimal('99'),
+      timestamp: indexTimestamp(chochIndex),
+      timeframe: options.chochTimeframe ?? '15',
+      isValidated: true,
+      impulseFactor: new Decimal(options.chochImpulse ?? '2.0'),
+    });
+  }
+
+  const liquidityPools =
+    options.withLiquidityPool === false
+      ? []
+      : [
+          {
+            // `PatternRecognizer` always emits `isTaken: false`; the gate must not
+            // depend on it (it used to, and was therefore permanently dead).
+            type: 'SSL' as const,
+            priceLevel: new Decimal('101'),
+            timestamp: indexTimestamp(5),
+            isTaken: false,
+            points: [],
+          },
+        ];
+
+  return {
+    currentKillzone: 'LONDON' as const,
+    currentSession: 'LONDON' as const,
+    candles15m,
+    candles4h: [
+      { timestamp: T0, open: '104', high: '106', low: '102', close: '104', volume: '1' },
+    ],
+    zones: [htfFvg],
+    structures,
+    liquidityPools,
+    atr15m: new Decimal('0.5'),
+    patternRecognizer: {
+      config: { wickRatioThreshold: new Decimal('0.4') },
+      calculatePremiumDiscount: () => ({
+        equilibrium: new Decimal(options.pdEquilibrium ?? '110'),
+        rangeHigh: new Decimal('120'),
+        rangeLow: new Decimal('100'),
+        isPremium: false,
+        isDiscount: true,
+      }),
+    } as any,
+  };
+};
+
 describe('Scenario2: FVG Fill', () => {
   let scenario: Scenario2_FVGFill;
 
   beforeEach(() => {
+    Scenario2_FVGFill.resetStats();
     scenario = new Scenario2_FVGFill(mockConfig);
   });
 
-  /**
-   * Creates IDEAL synthetic pattern data for FVG Fill:
-   * - HTF (4H) BULLISH FVG formed 15 candles ago
-   * - 10-15 candles BEFORE FVG: liquidity sweep + CHoCH/BOS (confluence)
-   * - Current candle: price at FVG 0.5 (equilibrium)
-   * - Fresh 15m BULLISH CHoCH with displacement >= 1.5 ATR
-   * - 4H trend is BULLISH (BOS present, no BEARISH)
-   */
-  const createIdealFvgFillPatternData = () => {
-    const FIXED_NOW = 1788675600000; // 2026-09-06 03:00 UTC (LONDON killzone)
-    const FVG_TIME = FIXED_NOW - 15 * 900000; // 15 candles ago (225 min ago)
-
-    // HTF FVG (4H): top=100, bottom=98, eq=99 (in Discount zone)
-    const htfFvg = {
-      type: 'FVG' as const,
-      direction: 'BULLISH' as const,
-      top: new Decimal(100),
-      bottom: new Decimal(98),
-      timestamp: FVG_TIME,
-      mitigated: false,
-      timeframe: '240',
-    };
-
-    // Create 30 candles: 15 before FVG, 15 after FVG
-    // Candles 0-14: before FVG formation
-    // Candle 5 (index 5): LIQUIDITY SWEEP (wick below level, close back inside)
-    // Candle 7 (index 7): CHoCH/BOS confirming direction
-    // Candle 15 (index 15): FVG formation (timestamp = FVG_TIME)
-    // Candles 16-29: after FVG
-    // Current candle (index 29): price at FVG equilibrium (99)
-    const candles15m: any[] = [];
-    for (let i = 0; i < 30; i++) {
-      const ts = FIXED_NOW - (29 - i) * 900000;
-      candles15m.push({
-        timestamp: ts,
-        open: '100',
-        high: '101',
-        low: '99',
-        close: '100',
-        volume: '1000',
-      });
-    }
-
-    // Candle 5 (index 5): LIQUIDITY SWEEP at ~100 min before FVG
-    // Wick below 98, close back above 98
-    candles15m[5] = {
-      ...candles15m[5],
-      timestamp: FIXED_NOW - 24 * 900000,
-      high: '101',
-      low: '97.5', // wicked below 98
-      close: '98.5', // closed back above 98
-      open: '100',
-    };
-
-    // Candle 7 (index 7): BOS confirming bullish direction
-    candles15m[7] = {
-      ...candles15m[7],
-      timestamp: FIXED_NOW - 22 * 900000,
-      high: '101',
-      low: '99',
-      close: '100.5', // bullish close
-      open: '100',
-    };
-
-    // FVG formation candle (index 15) - this creates the FVG
-    // FVG: gap between candle 14 high and candle 16 low
-    // Candle 14: high=101, Candle 16: low=99 -> FVG 99-101
-    // But we already have htfFvg with top=100, bottom=98, so let's align
-    candles15m[14] = {
-      ...candles15m[14],
-      timestamp: FVG_TIME + 900000, // 1 candle after FVG
-      high: '101',
-      low: '99',
-      close: '100',
-    };
-    candles15m[15] = { // FVG formation candle (4H candle)
-      ...candles15m[15],
-      timestamp: FVG_TIME,
-      high: '100',
-      low: '98',
-      close: '99',
-      open: '99',
-    };
-    candles15m[16] = {
-      ...candles15m[16],
-      timestamp: FVG_TIME - 900000, // 1 candle before FVG
-      high: '101',
-      low: '99',
-      close: '100',
-    };
-
-    // Current candle (index 29): price at FVG equilibrium (99)
-    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 99
-    candles15m[29] = {
-      timestamp: FIXED_NOW,
-      high: (eq.plus(0.5)).toFixed(2),
-      low: (eq.minus(0.5)).toFixed(2),
-      close: eq.toFixed(2), // exactly at equilibrium
-      open: '99',
-      volume: '1000',
-    };
-
-    // 15m CHoCH after FVG touch (current candle area)
-    const choch = {
-      type: 'CHOCH' as const,
-      direction: 'BULLISH' as const,
-      price: new Decimal(99),
-      timestamp: FIXED_NOW - 500, // very recent
-      isValidated: true,
-      impulseFactor: new Decimal(2.0), // > 1.5
-    };
-
-    // 4H structures: BULLISH BOS (trend confirmation)
-    const bos4h = {
-      type: 'BOS' as const,
-      direction: 'BULLISH' as const,
-      price: new Decimal(100),
-      timestamp: FIXED_NOW - 2 * 60 * 60 * 1000, // 2 hours ago
-      timeframe: '240',
-      isValidated: true,
-      impulseFactor: new Decimal(2.0),
-    };
-
-    // Liquidity pools: one sweep pool (taken)
-    const sweepPool = {
-      type: 'SSL' as const,
-      priceLevel: new Decimal(98),
-      timestamp: FIXED_NOW - 24 * 900000, // same as sweep candle
-      isTaken: true,
-      points: [],
-    };
-
-    return {
-      currentKillzone: 'LONDON' as const,
-      currentSession: 'LONDON' as const,
-      candles15m,
-      zones: [htfFvg],
-      structures: [choch, bos4h],
-      liquidityPools: [sweepPool],
-      atr15m: new Decimal('0.5'),
-      patternRecognizer: {
-        config: {
-          wickRatioThreshold: new Decimal('0.4'),
-        },
-        calculatePremiumDiscount: (candles: any[]) => {
-          const highs = candles.map((c: any) => new Decimal(c.high));
-          const lows = candles.map((c: any) => new Decimal(c.low));
-          const rangeHigh = Decimal.max(...highs);
-          const rangeLow = Decimal.min(...lows);
-          const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
-          return { equilibrium, rangeHigh, rangeLow, isPremium: false, isDiscount: false };
-        }
-      } as any,
-    };
-  };
-
-  /**
-   * Creates FVG Fill pattern WITHOUT liquidity context (should reject)
-   */
-  const createFvgFillNoLiquidityContext = () => {
-    const FIXED_NOW = 1788675600000;
-    const FVG_TIME = FIXED_NOW - 15 * 900000;
-
-    const htfFvg = {
-      type: 'FVG' as const,
-      direction: 'BULLISH' as const,
-      top: new Decimal(100),
-      bottom: new Decimal(98),
-      timestamp: FVG_TIME,
-      mitigated: false,
-      timeframe: '240',
-    };
-
-    const candles15m: any[] = [];
-    for (let i = 0; i < 30; i++) {
-      const ts = FIXED_NOW - (29 - i) * 900000;
-      candles15m.push({
-        timestamp: ts,
-        open: '100',
-        high: '101',
-        low: '99',
-        close: '100',
-        volume: '1000',
-      });
-    }
-
-    // NO sweep, NO CHoCH/BOS before FVG - just random candles
-
-    // Current candle at FVG equilibrium
-    const eq = htfFvg.top.plus(htfFvg.bottom).dividedBy(2); // 99
-    candles15m[29] = {
-      timestamp: FIXED_NOW,
-      high: (eq.plus(0.5)).toFixed(2),
-      low: (eq.minus(0.5)).toFixed(2),
-      close: eq.toFixed(2),
-      open: '99',
-      volume: '1000',
-    };
-
-    const choch = {
-      type: 'CHOCH' as const,
-      direction: 'BULLISH' as const,
-      price: new Decimal(99),
-      timestamp: FIXED_NOW - 500,
-      isValidated: true,
-      impulseFactor: new Decimal(2.0),
-    };
-
-    const bos4h = {
-      type: 'BOS' as const,
-      direction: 'BULLISH' as const,
-      price: new Decimal(100),
-      timestamp: FIXED_NOW - 2 * 60 * 60 * 1000,
-      timeframe: '240',
-      isValidated: true,
-      impulseFactor: new Decimal(2.0),
-    };
-
-    return {
-      currentKillzone: 'LONDON' as const,
-      currentSession: 'LONDON' as const,
-      candles15m,
-      zones: [htfFvg],
-      structures: [choch, bos4h],
-      liquidityPools: [], // NO liquidity context
-      atr15m: new Decimal('0.5'),
-      patternRecognizer: {
-        config: {
-          wickRatioThreshold: new Decimal('0.4'),
-        },
-        calculatePremiumDiscount: (candles: any[]) => {
-          const highs = candles.map((c: any) => new Decimal(c.high));
-          const lows = candles.map((c: any) => new Decimal(c.low));
-          const rangeHigh = Decimal.max(...highs);
-          const rangeLow = Decimal.min(...lows);
-          const equilibrium = rangeHigh.plus(rangeLow).dividedBy(2);
-          return { equilibrium, rangeHigh, rangeLow, isPremium: false, isDiscount: false };
-        }
-      } as any,
-    };
-  };
-
-  beforeEach(() => {
-    scenario = new Scenario2_FVGFill(mockConfig);
-  });
-
-  describe('SYNTHETIC TEST - Ideal FVG Fill Pattern', () => {
-    it('should trigger on perfect FVG Fill: HTF FVG + liquidity context + CHoCH', () => {
-      const result = scenario.evaluate(createIdealFvgFillPatternData());
-
-      if (!result) {
-        console.log('REJECTION REASON:', scenario.getReason());
-        console.log('LEVELS:', scenario.getLevels());
-      }
+  describe('bidirectional execution', () => {
+    it('triggers a LONG on a BULLISH HTF FVG filled in Discount', () => {
+      const result = scenario.evaluate(createFvgPattern({ pdEquilibrium: '110' }));
 
       expect(result).toBe(true);
-      expect(scenario.getReason()).toContain('FVG Fill');
+      expect(scenario.getReason()).toContain('BULLISH HTF FVG 0.5 touch');
       expect(scenario.getReason()).toContain('Premium/Discount');
-      expect(scenario.getLevels().entry).toBeDefined();
-    });
-  });
 
-  describe('negative cases - killzone', () => {
-    it('should reject when killzone is NONE', () => {
-      const data = createIdealFvgFillPatternData();
-      (data as any).currentKillzone = 'NONE';
-      const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('Not in active killzone');
-    });
-  });
+      // entry = gap equilibrium (99); the stop sits beyond the retest wick
+      // (97.5) with the 0.5 × ATR offset (0.25) subtracted, so the position is
+      // not protected by a level its own trigger bar already violated.
+      const levels = scenario.getLevels();
+      expect(levels.entry.toFixed(2)).toBe('99.00');
+      expect(levels.stopLoss.toFixed(2)).toBe('97.25');
+      expect(levels.takeProfit.toFixed(2)).toBe('104.25');
 
-  describe('negative cases - HTF FVG', () => {
-    it('should reject when no HTF FVG found', () => {
-      const data = createIdealFvgFillPatternData();
-      data.zones = [];
-      const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('No HTF FVG found');
+      const zone = scenario.getZoneDetails();
+      expect(zone?.type).toBe('FVG');
+      expect(zone?.direction).toBe('BULLISH');
+      expect(zone?.timeframe).toBe('240');
+
+      const structure = scenario.getStructureDetails();
+      expect(structure?.type).toBe('CHoCH');
+      expect(structure?.timestamp).toBe(indexTimestamp(CHOCH_INDEX));
     });
 
-    it('should reject a BEARISH HTF FVG (Long-only execution)', () => {
-      const data = createIdealFvgFillPatternData();
-      data.zones = [{ ...data.zones[0], direction: 'BEARISH' } as any];
-      const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('No HTF FVG found');
-    });
-  });
-
-  describe('negative cases - 0.5 equilibrium', () => {
-    it('should reject when price has not touched 0.5 of HTF FVG', () => {
-      const data = createIdealFvgFillPatternData();
-      data.candles15m[29].close = '70'; // far from eq
-      data.candles15m[29].high = '71';
-      data.candles15m[29].low = '69';
-      // Ensure FVG stays in Discount zone despite modified candle
-      // With modified candle (low=69), rangeLow=69, rangeHigh=102, equilibrium=85.5
-      // FVG at 82/80 (mid=81) is < 85.5 -> Discount zone
-      data.zones[0].top = new Decimal(82);
-      data.zones[0].bottom = new Decimal(78);
-      const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toContain('0.5 (Equilibrium) of HTF FVG');
-    });
-  });
-
-  describe('negative cases - liquidity context', () => {
-    it('should reject when no liquidity context (sweep/CHoCH/BOS) before FVG', () => {
-      const result = scenario.evaluate(createFvgFillNoLiquidityContext());
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toContain('liquidity context');
-    });
-
-    it('should accept a liquidity pool with isTaken=false (dead flag removed)', () => {
-      const data = createIdealFvgFillPatternData();
-      // `PatternRecognizer` always emits `isTaken: false`; the old check made this
-      // confluence gate unreachable. Pool presence in the window is the context.
-      (data.liquidityPools[0] as any).isTaken = false;
-      const result = scenario.evaluate(data);
-      expect(result).toBe(true);
-      expect(scenario.getReason()).toContain('FVG Fill');
-    });
-  });
-
-  describe('negative cases - CHoCH', () => {
-    it('should reject when no 15m CHoCH after FVG touch', () => {
-      const data = createIdealFvgFillPatternData();
-      // Ensure FVG is in Discount zone
-      data.zones[0].top = new Decimal(100);
-      data.zones[0].bottom = new Decimal(98);
-      const eq = data.zones[0].top.plus(data.zones[0].bottom).dividedBy(2);
-      data.candles15m[29].close = eq.toFixed(2);
-      data.candles15m[29].high = (eq.plus(0.5)).toFixed(2);
-      data.candles15m[29].low = (eq.minus(0.5)).toFixed(2);
-      data.structures = data.structures.filter(s => s.type !== 'CHOCH');
-      const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('No 15m CHoCH after FVG touch');
-    });
-
-    it('should reject when CHoCH displacement < 1.5 ATR', () => {
-      const data = createIdealFvgFillPatternData();
-      // Ensure FVG is in Discount zone
-      data.zones[0].top = new Decimal(100);
-      data.zones[0].bottom = new Decimal(98);
-      const eq = data.zones[0].top.plus(data.zones[0].bottom).dividedBy(2);
-      data.candles15m[29].close = eq.toFixed(2);
-      data.candles15m[29].high = (eq.plus(0.5)).toFixed(2);
-      data.candles15m[29].low = (eq.minus(0.5)).toFixed(2);
-      data.structures = data.structures.map(s =>
-        s.type === 'CHOCH' ? { ...s, impulseFactor: new Decimal(1.0) } : s
+    it('triggers a SHORT on a BEARISH HTF FVG filled in Premium', () => {
+      const result = scenario.evaluate(
+        createFvgPattern({
+          direction: 'BEARISH',
+          // Bearish mirror: the gap must sit ABOVE the dealing-range equilibrium.
+          pdEquilibrium: '90',
+          currentHigh: '100.5',
+          currentLow: '98.5',
+          currentClose: '99',
+        }),
       );
-      const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toBe('15m CHoCH displacement < 1.5 ATR');
-    });
-  });
 
-  describe('negative cases - trend filter', () => {
-    it('should reject when 4H trend is not bullish', () => {
-      const data = createIdealFvgFillPatternData();
-      // Add bearish 4H structure - need to use type assertion to avoid TS error
+      expect(result).toBe(true);
+      expect(scenario.getReason()).toContain('BEARISH HTF FVG 0.5 touch');
+
+      const levels = scenario.getLevels();
+      expect(levels.entry.toFixed(2)).toBe('99.00');
+      expect(levels.stopLoss.toFixed(2)).toBe('100.75');
+      expect(levels.takeProfit.toFixed(2)).toBe('93.75');
+
+      expect(scenario.getZoneDetails()?.direction).toBe('BEARISH');
+      // The stop and the target are mirrored, not merely shifted.
+      expect(levels.stopLoss.gt(levels.entry)).toBe(true);
+      expect(levels.takeProfit.lt(levels.entry)).toBe(true);
+    });
+
+    it('ignores the legacy `hasBullish4h` veto: a bearish 4H break does not block a long', () => {
+      const data = createFvgPattern();
       data.structures.push({
-        type: 'CHOCH' as const,
+        type: 'BOS' as const,
         direction: 'BEARISH' as const,
-        price: new Decimal(100),
-        timestamp: Date.now() - 3600000,
+        price: new Decimal('102'),
+        timestamp: indexTimestamp(50),
         timeframe: '240',
         isValidated: true,
-        impulseFactor: new Decimal(2.0),
+        impulseFactor: new Decimal('2.0'),
       } as any);
-      // Also ensure FVG is in Discount zone so Premium/Discount filter passes first
-      // candles range: high=102, low=98 -> equilibrium=100
-      // FVG needs to be < 100 for Discount zone
-      data.zones[0].top = new Decimal(100);
-      data.zones[0].bottom = new Decimal(98);
-      // Update current candle to touch new FVG equilibrium (99)
-      const eq = data.zones[0].top.plus(data.zones[0].bottom).dividedBy(2);
-      data.candles15m[29].close = eq.toFixed(2);
-      data.candles15m[29].high = (eq.plus(0.5)).toFixed(2);
-      data.candles15m[29].low = (eq.minus(0.5)).toFixed(2);
-      const result = scenario.evaluate(data);
-      expect(result).toBe(false);
-      expect(scenario.getReason()).toContain('4H trend not bullish');
+
+      expect(scenario.evaluate(data)).toBe(true);
+      expect(scenario.getZoneDetails()?.direction).toBe('BULLISH');
+    });
+  });
+
+  describe('killzone', () => {
+    it('rejects when the killzone is NONE', () => {
+      const data = createFvgPattern();
+      (data as any).currentKillzone = 'NONE';
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('Not in active killzone');
+      expect(Scenario2_FVGFill.getRejectionStats().killzone).toBe(1);
+    });
+
+    it('bypasses the killzone when ENFORCE_KILLZONES=false', () => {
+      const bypass = new Scenario2_FVGFill({ ...mockConfig, enforceKillzones: false });
+      const data = createFvgPattern();
+      (data as any).currentKillzone = 'NONE';
+
+      expect(bypass.evaluate(data)).toBe(true);
+    });
+  });
+
+  describe('HTF FVG selection', () => {
+    it('rejects when no HTF FVG is present', () => {
+      const data = createFvgPattern();
+      data.zones = [];
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No HTF FVG found');
+    });
+
+    it('rejects a 15m FVG (the POI must be HTF)', () => {
+      const data = createFvgPattern();
+      data.zones[0].timeframe = '15';
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No HTF FVG found');
+      expect(Scenario2_FVGFill.getRejectionStats().noHtfFvg).toBe(1);
+    });
+
+    it('rejects when no 15m candles are available', () => {
+      const data = createFvgPattern();
+      data.candles15m = [];
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No 15m candle available');
+    });
+  });
+
+  describe('fill gate', () => {
+    it('rejects when the current candle has left the gap equilibrium', () => {
+      const data = createFvgPattern({
+        currentHigh: '103',
+        currentLow: '101',
+        currentClose: '102',
+      });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toContain('0.5 (Equilibrium) of HTF BULLISH FVG');
+      expect(Scenario2_FVGFill.getRejectionStats().noFvgTouch).toBe(1);
+    });
+
+    it('anchors the CHoCH after the FIRST touch inside the 4H window, not on the gap stamp', () => {
+      // A CHoCH printed before the gap was ever traded into belongs to the
+      // previous leg. It must not be able to confirm this one.
+      const data = createFvgPattern({ chochIndex: FILL_INDEX - 1 });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No 15m BULLISH CHoCH after FVG touch');
+      expect(Scenario2_FVGFill.getRejectionStats().noChoch).toBe(1);
+    });
+
+    it('accepts a CHoCH printed on the fill candle itself', () => {
+      const data = createFvgPattern({ chochIndex: FILL_INDEX });
+
+      expect(scenario.evaluate(data)).toBe(true);
+      expect(scenario.getStructureDetails()?.timestamp).toBe(indexTimestamp(FILL_INDEX));
+    });
+  });
+
+  describe('premium / discount', () => {
+    it('rejects a BULLISH gap sitting in Premium', () => {
+      const data = createFvgPattern({ pdEquilibrium: '95' });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toContain('BULLISH HTF FVG not in Discount zone');
+      expect(Scenario2_FVGFill.getRejectionStats().premiumDiscount).toBe(1);
+    });
+
+    it('rejects a BEARISH gap sitting in Discount', () => {
+      const data = createFvgPattern({
+        direction: 'BEARISH',
+        pdEquilibrium: '110',
+        currentHigh: '100.5',
+        currentClose: '99',
+      });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toContain('BEARISH HTF FVG not in Premium zone');
+    });
+
+    it('skips the check when the recognizer is unavailable', () => {
+      const data = createFvgPattern();
+      delete (data as any).patternRecognizer;
+
+      expect(scenario.evaluate(data)).toBe(true);
+    });
+  });
+
+  describe('liquidity context', () => {
+    it('rejects when nothing swept / broke before the gap formed', () => {
+      const data = createFvgPattern({ withLiquidityPool: false });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toContain('liquidity context');
+      expect(Scenario2_FVGFill.getRejectionStats().noLiquidityContext).toBe(1);
+    });
+
+    it('accepts a pool emitted with `isTaken: false` (dead flag removed)', () => {
+      const data = createFvgPattern();
+      (data.liquidityPools[0] as any).isTaken = false;
+
+      expect(scenario.evaluate(data)).toBe(true);
+    });
+
+    it('matches an off-grid 4H stamp against the 15m series (anchor fix)', () => {
+      // The pool sits 5 candles before the gap stamp. The legacy exact-timestamp
+      // lookup could never find the 4H stamp in the 15m series, so this setup
+      // used to be rejected on every evaluation.
+      const data = createFvgPattern();
+      data.liquidityPools = [
+        {
+          type: 'BSL' as const,
+          priceLevel: new Decimal('106'),
+          timestamp: indexTimestamp(5),
+          isTaken: false,
+          points: [],
+        } as any,
+      ];
+
+      expect(scenario.evaluate(data)).toBe(true);
+    });
+  });
+
+  describe('CHoCH', () => {
+    it('rejects when no CHoCH exists', () => {
+      const data = createFvgPattern({ withChoch: false });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No 15m BULLISH CHoCH after FVG touch');
+    });
+
+    it('rejects a 4H CHoCH (confirmation must be on the entry timeframe)', () => {
+      const data = createFvgPattern({ chochTimeframe: '240' });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No 15m BULLISH CHoCH after FVG touch');
+    });
+
+    it('rejects a CHoCH in the opposite direction', () => {
+      const data = createFvgPattern();
+      data.structures[0].direction = 'BEARISH';
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No 15m BULLISH CHoCH after FVG touch');
+    });
+
+    it('rejects a CHoCH with displacement < 1.5 ATR', () => {
+      const data = createFvgPattern({ chochImpulse: '1.0' });
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('15m CHoCH displacement < 1.5 ATR');
+      expect(Scenario2_FVGFill.getRejectionStats().displacement).toBe(1);
+    });
+  });
+
+  describe('deepest-stage funnel', () => {
+    it('reports the furthest stage reached, not the newest gap\'s first failure', () => {
+      // Two gaps: the fresher one never reaches its equilibrium (gate 1) while
+      // the older, actually-tested one gets all the way to the CHoCH gate. A
+      // first-wins funnel would report `noFvgTouch` and hide that the chain is
+      // broken on confirmation.
+      const data = createFvgPattern({ withChoch: false });
+      data.zones.push({
+        type: 'FVG' as const,
+        direction: 'BULLISH' as const,
+        top: new Decimal('130'),
+        bottom: new Decimal('128'),
+        timestamp: indexTimestamp(FVG_INDEX + 1) + OFF_GRID_OFFSET,
+        mitigated: false,
+        timeframe: '240',
+      } as any);
+
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toBe('No 15m BULLISH CHoCH after FVG touch');
+      expect(Scenario2_FVGFill.getRejectionStats().noChoch).toBe(1);
+      expect(Scenario2_FVGFill.getRejectionStats().noFvgTouch).toBe(0);
+    });
+
+    it('falls through to an older gap when the fresher one cannot complete', () => {
+      const data = createFvgPattern();
+      // Fresher gap, far away from price → gate 1 fails, the older gap wins.
+      data.zones.push({
+        type: 'FVG' as const,
+        direction: 'BULLISH' as const,
+        top: new Decimal('130'),
+        bottom: new Decimal('128'),
+        timestamp: indexTimestamp(FVG_INDEX + 1) + OFF_GRID_OFFSET,
+        mitigated: false,
+        timeframe: '240',
+      } as any);
+
+      expect(scenario.evaluate(data)).toBe(true);
+      expect(scenario.getZoneDetails()?.top.toFixed(2)).toBe('100.00');
+    });
+  });
+
+  describe('stat isolation', () => {
+    it('increments totalEvals on every evaluation and resets on demand', () => {
+      scenario.evaluate(createFvgPattern());
+      scenario.evaluate(createFvgPattern({ withChoch: false }));
+      expect(Scenario2_FVGFill.getRejectionStats().totalEvals).toBe(2);
+
+      Scenario2_FVGFill.resetStats();
+      expect(Scenario2_FVGFill.getRejectionStats().totalEvals).toBe(0);
     });
   });
 });

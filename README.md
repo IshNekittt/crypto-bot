@@ -949,10 +949,12 @@ docker compose up -d
 | **COOLDOWN_CANDLES**               |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m.                  |
 | **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5)                                                                                             |
 | **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                                            |
-| **SMC_SWEEP_MIN_WICK_RATIO**       |          |          `0.25`           | S12 sweep absorption: minimum rejection wick as a share of the candle range. Must be strictly between 0 and 1.                         |
+| **SMC_SWEEP_MIN_WICK_RATIO**       |          |          `0.25`           | Sweep absorption: minimum rejection wick as a share of the candle range. Must be strictly between 0 and 1. Read by **Scenario 12** and **Scenario 9** (Turtle Soup). |
 | **S12_SESSION_SWEEPS**             |          |          `false`          | Opt-in S12 sweep source: the newest ASIAN session high/low becomes a sweepable level (macro PDH/PDL/PWH/PWL are always armed).        |
 | **S12_EQH_EQL_SWEEPS**             |          |          `false`          | Opt-in S12 sweep source: 15m EQH/EQL pools become sweepable levels.                                                                     |
 | **MIN_TP_DISTANCE_PCT**            |          |         `0.0035`          | S12 fee-aware target floor: reject setups whose resolved TP sits closer than this fraction of `idealEntry` (0.0035 = 0.35%). Must be `> 0` and `< 0.1`. |
+| **MIN_NET_RR**                     |          |           `1.0`           | **S12 only.** Fee-inclusive reward:risk floor: `(target − roundTripFee) / (stop + roundTripFee) ≥ MIN_NET_RR`. Rejects with the `insufficientNetR` bucket. The verified Sniper profile uses `1.5`. |
+| **MIN_VOLATILITY_FEE_RATIO**       |          |           `1.0`           | **S12 only.** ATR-to-fee admission multiple: requires `1m ATR% ≥ ratio × round-trip taker fee (~0.110%)`. Rejects with the `insufficientVolatility` bucket. The verified Sniper profile uses `1.5` (ATR ≥ ~0.165%). |
 | **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                                  |
 | **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                                         |
 | **SNIPER_LIMIT_EXPIRATION_CANDLES**|          |           `15`            | Limit order lifetime in **1m** candles for Sniper Mode (default 15 = 15 min). Independent of the Classic knob.                          |
@@ -1003,220 +1005,134 @@ SCENARIOS_SOLUSDT=5,6,7,10
 - The `ScenarioRouter` for each symbol is instantiated with its specific active scenarios
 - Allows fine-tuning strategies per asset's market character
 
+### Per-Symbol Calibration Overrides
+
+Scenario selection is only half of the per-symbol story. The same `<PARAM>_<SYMBOL>` suffix also calibrates **geometry, fees and execution** for one pair without touching the global defaults.
+
+Resolution happens exactly once per symbol through `resolveSymbolConfig()`, and the resolved config is handed to every scenario, to `tpResolver`, and to the reconciliation sweep — **live and backtest alike**. A symbol with no overrides receives the global object unchanged (same identity, zero allocation).
+
+| Overridable parameter | Effect | Where it applies |
+| --- | --- | --- |
+| `SMC_SL_ATR_OFFSET_<SYMBOL>` | ATR multiple used to offset the stop | All zone-based scenarios |
+| `DYNAMIC_TP_MIN_RR_<SYMBOL>` | Structural target floor (must be ≤ global `DYNAMIC_TP_MAX_RR`) | S1, S5, S12 (and S3/S6/S9) |
+| `MIN_TP_DISTANCE_PCT_<SYMBOL>` | Fee-aware target floor | S12 only |
+| `MIN_NET_RR_<SYMBOL>` | Fee-inclusive net R:R floor | S12 only |
+| `MIN_VOLATILITY_FEE_RATIO_<SYMBOL>` | ATR-to-fee admission multiple | S12 only |
+| `SMC_SWEEP_MIN_WICK_RATIO_<SYMBOL>` | Sweep absorption floor | S12, S9 |
+| `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>` | Limit lifetime in 1m candles | Sniper Mode (live reconciliation + backtest) |
+
+**Not overridable per symbol**: `DYNAMIC_TP_MAX_RR` is global only — `loadConfig()` therefore validates every per-symbol floor against the global ceiling at parse time, so a symbol can never be configured with floor > cap.
+
+**Silent-ignore hazard**: overrides are matched against the `SYMBOLS` list. An override for a pair that is not configured (a stale key from an earlier run, or a typo in the suffix) is **silently dropped** — it cannot resurrect calibration for an untraded symbol, but it also cannot warn you. If a calibration appears to have no effect, confirm the symbol is in `SYMBOLS`.
+
+```bash
+# Verified V5 Sniper calibration (.env.emilia)
+SMC_SL_ATR_OFFSET_APTUSDT=0.60
+SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
+```
+
 ---
 
 ## ⚙️ Ready-to-Use Configuration Presets
 
-### 🛡️ V4 Classic SMC — 15m/4H Execution
+### 🛡️ V4 Classic Tank — 15m/4H Execution (Scenarios 1 + 5)
 
-**Philosophy**: High win-rate, fewer trades, institutional SMC on 15m closes. Best for stable trending markets.
+**Philosophy**: high win-rate, fewer trades, institutional SMC confirmed on 15m closes. The Tank runs the two highest-conviction classic patterns — **S1 HTF Continuation** and **S5 HTF Liquidity Sweep** — and nothing else, so every rejection bucket in the backtest report belongs to one of them. Both resolve take-profit structurally through `tpResolver.ts` (`skipMinorObstacles: false`: the nearest candidate is a hard wall — reject, never clamp).
 
-**File: `.env.subaru`** (for `db-subaru` + `bot-subaru` via docker-compose)
+**File: `.env.subaru`** — the shipped profile is **secret-free**. Inject `BYBIT_API_KEY`, `BYBIT_API_SECRET`, `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` and `BACKUP_PASSWORD` at deploy time or `loadConfig()` refuses to boot.
 
 ```bash
-# --- Bybit API ---
-BYBIT_API_KEY=your_bybit_api_key_here
-BYBIT_API_SECRET=your_bybit_api_secret_here
-
-# Database (read by postgres:15-alpine directly)
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=SubaruSecurePass123
-POSTGRES_DB=smc_subaru
-DATABASE_URL=postgresql://postgres:SubaruSecurePass123@db-subaru:5432/smc_subaru
-
-# --- Telegram ---
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-TELEGRAM_CHAT_ID=your_numeric_chat_id_here
-
-# --- Trading Mode ---
-DEMO_TRADING=true
-TESTNET=false
-
-# Core
+SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
 ENABLE_SNIPER_MODE=false
-BACKTEST_DAYS=60
-SMART_ENTRY_THRESHOLD_PCT=0.15
-LIMIT_EXPIRATION_CANDLES=6
-PREFLIGHT_BUFFER_PCT=0.05
-SMC_SL_ATR_OFFSET=0.5
-SMC_DISPLACEMENT_MULTIPLIER=1.5
-SNIPER_DISPLACEMENT_MULTIPLIER=1.5
-ALLOWED_DAYS_OF_WEEK=1,2,3,4,5
-ENFORCE_KILLZONES=true
+ACTIVE_SCENARIOS=1,5
 
-# Strategy Capacity Limit
-MAX_WORKING_CAPITAL=20000
-
-# Symbols & Scenarios (per-symbol overrides)
-SYMBOLS=LINKUSDT,BTCUSDT,SOLUSDT,AVAXUSDT,NEARUSDT
-ACTIVE_SCENARIOS=1
-SCENARIOS_LINKUSDT=1,5
-SCENARIOS_BTCUSDT=1,5
-SCENARIOS_SOLUSDT=1,5
-SCENARIOS_AVAXUSDT=1
-SCENARIOS_NEARUSDT=1
-
-# Funding Monitor
-ENABLE_FUNDING_MONITOR=true
-FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,AVAXUSDT,SUIUSDT,NEARUSDT
-FUNDING_ALERT_THRESHOLD_PCT=0.0
-FUNDING_RESTORE_THRESHOLD_PCT=0.015
-
-# Trading Settings
-RISK_PERCENT=2
-REDUCED_RISK_PERCENT=1
-LEVERAGE=10
-AUTO_TRADING=false
-TRADE_APPROVAL_TIMEOUT_MINUTES=5
-ENABLE_LIVE_TEST_ORDERS=false
-
-# Timeframes (V4 Classic: 15m / 4H)
 LTF_TIMEFRAME=15
 HTF_TIMEFRAME=240
 HISTORY_CANDLES=200
 MACRO_CANDLES=1000
-
-# Risk Management
 COOLDOWN_CANDLES=16
-
-# Logging & Data
-LOG_LEVEL=info
-DATA_DIR=data
-
-# Notifications (false = mute routine trade messages, errors still delivered)
-ENABLE_TRADE_NOTIFICATIONS=true
-
-# Offline Mode
-USE_LOCAL_CACHE_ONLY=false
-
-# Health Check
-ENABLE_HEALTHCHECK_SERVER=false
-
-# Backup
-BACKUP_PASSWORD=your_backup_encryption_password_here
-
-# --- Local CSV Backtest (optional, V4 Classic only — not supported in Sniper Mode) ---
-# Uncomment to run an offline CSV backtest for a specific asset:
-# BACKTEST_CSV_PATH=./data/csv/EURUSD_15m.csv
-```
-
-| Aspect              | Setting                           | Rationale                                  |
-| ------------------- | --------------------------------- | ------------------------------------------ |
-| **Timeframes**      | 15m / 4H                          | Classic SMC timeframe                      |
-| **Scenarios**       | 1 (global), 1,5 per major symbols | HTF Continuation + HTF Sweep only          |
-| **Entry**           | 15m close                         | Classic SMC execution                      |
-| **Funding Monitor** | Enabled                           | Tracks funding for delta-neutral awareness |
-| **Order Type**      | Market / Limit at the live tick    | Hybrid Smart Entry (0.15% threshold)       |
-
----
-
-### 🎯 V5 Sniper Touch (1m Execution) — Single-Pass Precision
-
-**Philosophy**: 1m entries anchored to a swept level — macro (PDH/PDL/PWH/PWL) by default, optionally session extremes and 15m EQH/EQL. Each CHoCH is paired with the sweep that actually preceded it, and the take-profit is resolved structurally (fixed `3R` when dynamic resolution is off) so micro-stops do not blindly target distant macro liquidity. Best for ranging/choppy markets.
-
-**File: `.env.emilia`** (for `db-emilia` + `bot-emilia` via docker-compose)
-
-```bash
-# --- Bybit API ---
-BYBIT_API_KEY=your_bybit_api_key_here
-BYBIT_API_SECRET=your_bybit_api_secret_here
-
-# Database (read by postgres:15-alpine directly)
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=EmiliaSecurePass123
-POSTGRES_DB=smc_emilia
-DATABASE_URL=postgresql://postgres:EmiliaSecurePass123@db-emilia:5432/smc_emilia
-
-# --- Telegram ---
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-TELEGRAM_CHAT_ID=your_numeric_chat_id_here
-
-# --- Trading Mode ---
-DEMO_TRADING=true
-TESTNET=false
-
-# Core
-ENABLE_SNIPER_MODE=true
-BACKTEST_DAYS=60
-SMART_ENTRY_THRESHOLD_PCT=0.15
 LIMIT_EXPIRATION_CANDLES=6
-PREFLIGHT_BUFFER_PCT=0.05
-SMC_SL_ATR_OFFSET=0.5
-SMC_DISPLACEMENT_MULTIPLIER=1.5
-SNIPER_DISPLACEMENT_MULTIPLIER=1.5
 
-# Scenario 12 — verified 1C profile (60-day backtest: NEAR/AVAX/LINK)
-S12_SESSION_SWEEPS=true
-S12_EQH_EQL_SWEEPS=true
+# Dynamic TP
 ENABLE_DYNAMIC_TP=true
 DYNAMIC_TP_MIN_RR=1.5
 DYNAMIC_TP_MAX_RR=6.0
-SNIPER_LIMIT_EXPIRATION_CANDLES=15
-MIN_TP_DISTANCE_PCT=0.0035
 
+# General SMC
+SMC_SL_ATR_OFFSET=0.5
+SMC_DISPLACEMENT_MULTIPLIER=1.5
+SMART_ENTRY_THRESHOLD_PCT=0.15
+PREFLIGHT_BUFFER_PCT=0.05
+
+# Entry filters
 ALLOWED_DAYS_OF_WEEK=1,2,3,4,5
 ENFORCE_KILLZONES=true
 
-# Strategy Capacity Limit
-MAX_WORKING_CAPITAL=3000
-
-# Symbols & Scenarios (Sniper uses ONLY scenario 12)
-SYMBOLS=SOLUSDT,AVAXUSDT
-ACTIVE_SCENARIOS=12
-SCENARIOS_SOLUSDT=12
-SCENARIOS_AVAXUSDT=12
-
-# Funding Monitor DISABLED for V5 (thresholds kept for parity with .env.subaru)
-ENABLE_FUNDING_MONITOR=false
-FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,AVAXUSDT,SUIUSDT,NEARUSDT
-FUNDING_ALERT_THRESHOLD_PCT=0.0
-FUNDING_RESTORE_THRESHOLD_PCT=0.015
-
-# Trading Settings
+# Risk & capacity
 RISK_PERCENT=2
 REDUCED_RISK_PERCENT=1
 LEVERAGE=10
-AUTO_TRADING=false
-TRADE_APPROVAL_TIMEOUT_MINUTES=5
-ENABLE_LIVE_TEST_ORDERS=false
-
-# Timeframes (V5 Sniper: 1m entry / 15m + 4H macro context)
-LTF_TIMEFRAME=15
-HTF_TIMEFRAME=240
-HISTORY_CANDLES=300
-MACRO_CANDLES=1000
-
-# Risk Management
-COOLDOWN_CANDLES=16
-
-# Logging & Data
-LOG_LEVEL=info
-DATA_DIR=data
-
-# Notifications (false = mute routine trade messages, errors still delivered)
-ENABLE_TRADE_NOTIFICATIONS=true
-
-# Offline Mode
-USE_LOCAL_CACHE_ONLY=false
-
-# Health Check
-ENABLE_HEALTHCHECK_SERVER=false
-
-# Backup
-BACKUP_PASSWORD=your_backup_encryption_password_here
-
-# --- Local CSV Backtest (optional, V4 Classic only — not supported in Sniper Mode) ---
-# Uncomment to run an offline CSV backtest for a specific asset:
-# BACKTEST_CSV_PATH=./data/csv/SOLUSDT_15m.csv
+MAX_WORKING_CAPITAL=20000
 ```
 
-| Aspect         | Setting                                      | Rationale                          |
-| -------------- | -------------------------------------------- | ---------------------------------- |
-| **Timeframes** | 1m (entry) / 15m + 4H (macro context)        | Single-pass 1m evaluation          |
-| **Scenario**   | 12 (Sniper Touch)                            | Single 1m producer per instance     |
-| **Entry**      | 1m CHoCH after a macro sweep, near its OB midpoint | Per-CHoCH causality + spatial proximity |
-| **Symbols**    | SOLUSDT, AVAXUSDT                            | Focused 2-coin portfolio           |
-| **Filters**    | Killzone + Sweep Causality + CHoCH + OB Gap  | Displacement ≥ 1.5 ATR required    |
+> **Deliberately absent from the Tank profile**
+>
+> - `SCENARIOS_<SYMBOL>` — `ACTIVE_SCENARIOS=1,5` already covers all three symbols. A per-symbol override *narrows* that symbol to exactly the listed scenarios; it never adds to the global list.
+> - `MIN_NET_RR`, `MIN_VOLATILITY_FEE_RATIO`, `MIN_TP_DISTANCE_PCT`, `S12_*`, `SNIPER_*` — every one of these gates is evaluated **inside Scenario 12** (plus S9 for the wick ratio). In a Classic deployment they would be dead configuration that reads as protection.
+
+| Aspect              | Setting                    | Rationale                                           |
+| ------------------- | -------------------------- | --------------------------------------------------- |
+| **Timeframes**      | 15m entry / 4H context     | Classic SMC confirmation timeframe                  |
+| **Scenarios**       | 1, 5                       | HTF Continuation + HTF Liquidity Sweep              |
+| **Entry**           | 15m close                  | Hybrid Smart Entry (0.15% Market/Limit threshold)   |
+| **Take-profit**     | Structural (`tpResolver`)  | Nearest obstacle is a hard wall — rejection over clamping |
+| **Funding Monitor** | Enabled                    | Delta-neutral funding awareness                     |
+
+---
+
+### 🎯 V5 Sniper Touch — 1m Execution (Scenario 12)
+
+**Philosophy**: 1m entries anchored to a swept level — macro (PDH/PDL/PWH/PWL) by default, optionally session extremes and 15m EQH/EQL. Each CHoCH is paired with the sweep that actually preceded it, and take-profit is resolved structurally (fixed `3R` when dynamic resolution is off) so micro-stops never blindly target distant macro liquidity. The P0 shields reject fee-dominated geometry before an order is ever staged.
+
+**File: `.env.emilia`** — the shipped profile is **secret-free**, same injection rule as the Tank.
+
+```bash
+SYMBOLS=NEARUSDT,APTUSDT
+ENABLE_SNIPER_MODE=true
+ACTIVE_SCENARIOS=12
+
+# Dynamic TP
+ENABLE_DYNAMIC_TP=true
+DYNAMIC_TP_MIN_RR=1.5
+DYNAMIC_TP_MAX_RR=6.0
+
+# S12 Sweep Sources
+S12_SESSION_SWEEPS=true
+S12_EQH_EQL_SWEEPS=true
+
+# Global P0 Shields & Execution
+MIN_NET_RR=1.5
+MIN_VOLATILITY_FEE_RATIO=1.5
+SMC_SWEEP_MIN_WICK_RATIO=0.25
+SMC_SL_ATR_OFFSET=0.5
+MIN_TP_DISTANCE_PCT=0.0035
+SNIPER_LIMIT_EXPIRATION_CANDLES=15
+
+# Per-Symbol Overrides (APTUSDT)
+SMC_SL_ATR_OFFSET_APTUSDT=0.60
+SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
+```
+
+| Aspect            | Setting                                        | Rationale                                              |
+| ----------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| **Timeframes**    | 1m entry / 15m + 4H macro                      | Single-pass 1m evaluation (no intermediate state)      |
+| **Scenario**      | 12                                             | Only 1m producer registered in the router              |
+| **Entry**         | 1m CHoCH after a sweep, near its OB midpoint   | Per-CHoCH causality + midpoint proximity (Inv. 51)     |
+| **Symbols**       | NEARUSDT, APTUSDT                              | Focused 2-coin roster                                  |
+| **Shields**       | Net R:R ≥ 1.5, 1m ATR ≥ 1.5× round-trip fee, TP ≥ 0.35% | Fee-dominated geometry is rejected, never clamped |
+| **Limit lifetime**| 15 min (NEAR) / 25 min (APT)                   | Via `resolveLimitExpirationCandles()` — verify in the run log |
+
+> **Why the shields are S12-only**: `minNetRr`, `minVolatilityFeeRatio` and `minTpDistancePct` are read exclusively by `Scenario12_SniperTouch.ts` and wired per symbol through `resolveSymbolConfig()`. Scenarios 1–11 never consult them — which is precisely why the Tank profile omits them instead of listing them as inert protection.
 
 ---
 

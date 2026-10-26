@@ -43,6 +43,8 @@ const mockConfig: BotConfig = {
   dynamicTpMinRr: new Decimal('1.5'),
   dynamicTpMaxRr: new Decimal(6),
   dynamicTpRequireTarget: false,
+  minNetRr: new Decimal(1),
+  minVolatilityFeeRatio: new Decimal(1),
   minTpDistancePct: new Decimal('0.0035'),
   backtestDays: 60,
   useLocalCacheOnly: false,
@@ -492,13 +494,13 @@ describe('Scenario12: Dynamic Take-Profit', () => {
   it('snaps to the nearest liquidity pool when dynamic TP is enabled', () => {
     const s = new Scenario12_SniperTouch(configWith({ enableDynamicTp: true }));
     const patternData = buildPatternData(buildCandles());
-    patternData.liquidityPools = [poolAt('101.5')];
+    patternData.liquidityPools = [poolAt('102')];
 
     expect(s.evaluate(patternData)).toBe(true);
 
     const levels = s.getLevels();
-    // 101.5 is 0.625 / 0.375 = 1.667R away — above the 1.5R floor.
-    expect(levels.takeProfit.toString()).toBe('101.5');
+    // 102 is 1.125 / 0.375 = 3R gross, and clears the 1.5 net-R floor.
+    expect(levels.takeProfit.toString()).toBe('102');
   });
 
   it('rejects when the nearest pool leaves less than minRr of room', () => {
@@ -542,19 +544,19 @@ describe('Scenario12: Dynamic Take-Profit', () => {
 
   it('honours a custom fixedTpRr when dynamic TP is disabled', () => {
     const s = new Scenario12_SniperTouch(
-      configWith({ enableDynamicTp: false, fixedTpRr: new Decimal(2) }),
+      configWith({ enableDynamicTp: false, fixedTpRr: new Decimal('2.5') }),
     );
-    s.evaluate(buildPatternData(buildCandles()));
+    expect(s.evaluate(buildPatternData(buildCandles()))).toBe(true);
 
-    // entry + 2 * 0.375 = 101.625
-    expect(s.getLevels().takeProfit.toString()).toBe('101.625');
+    // entry + 2.5 * 0.375 = 101.8125
+    expect(s.getLevels().takeProfit.toString()).toBe('101.8125');
   });
 
   it('keeps the long-side invariant (SL < entry < TP) in every mode', () => {
     for (const enableDynamicTp of [false, true]) {
       const s = new Scenario12_SniperTouch(configWith({ enableDynamicTp }));
       const patternData = buildPatternData(buildCandles());
-      patternData.liquidityPools = [poolAt('101.5')];
+      patternData.liquidityPools = [poolAt('102')];
 
       expect(s.evaluate(patternData)).toBe(true);
 
@@ -568,6 +570,58 @@ describe('Scenario12: Dynamic Take-Profit', () => {
 // ---------------------------------------------------------------------------
 // Phase 4 — Orthodox SMC filters (V1, V3, V5, V7, V8, V9, V10)
 // ---------------------------------------------------------------------------
+
+describe('Scenario12: arithmetic shields', () => {
+  it('rejects with insufficientVolatility below 1.5x round-trip fee', () => {
+    const candles = buildCandles();
+    // ATR(1m) 0.4 at 100.6 is 0.398%. Scale every 1m range while preserving
+    // the setup geometry by halving all OHLC prices relative to 100.
+    for (const c of candles) {
+      c.open = new Decimal(c.open).minus(100).mul(0.4).plus(100).toString();
+      c.high = new Decimal(c.high).minus(100).mul(0.4).plus(100).toString();
+      c.low = new Decimal(c.low).minus(100).mul(0.4).plus(100).toString();
+      c.close = new Decimal(c.close).minus(100).mul(0.4).plus(100).toString();
+    }
+
+    const s = new Scenario12_SniperTouch({
+      ...mockConfig,
+      minVolatilityFeeRatio: new Decimal('1.5'),
+    });
+    expect(s.evaluate(buildPatternData(candles))).toBe(false);
+    expect(s.getReason()).toMatch(/1m ATR .* < viability floor 0\.165%/);
+  });
+
+  it('rejects with insufficientNetR when fee-inclusive R:R is below 1.5', () => {
+    const s = new Scenario12_SniperTouch({
+      ...mockConfig,
+      enableDynamicTp: false,
+      fixedTpRr: new Decimal('1.4'),
+      minNetRr: new Decimal('1.5'),
+      minVolatilityFeeRatio: new Decimal(1),
+      minTpDistancePct: new Decimal('0'),
+    });
+
+    expect(s.evaluate(buildPatternData(buildCandles()))).toBe(false);
+    expect(s.getReason()).toMatch(/Net R:R 0\.852 < 1\.5/);
+  });
+
+  it('exposes the dedicated insufficientVolatility counter', () => {
+    Scenario12_SniperTouch.resetStats();
+    const lowVol = buildCandles();
+    for (const c of lowVol) {
+      c.open = new Decimal(c.open).minus(100).mul(0.4).plus(100).toString();
+      c.high = new Decimal(c.high).minus(100).mul(0.4).plus(100).toString();
+      c.low = new Decimal(c.low).minus(100).mul(0.4).plus(100).toString();
+      c.close = new Decimal(c.close).minus(100).mul(0.4).plus(100).toString();
+    }
+    new Scenario12_SniperTouch({
+      ...mockConfig,
+      minVolatilityFeeRatio: new Decimal('1.5'),
+    }).evaluate(buildPatternData(lowVol));
+    const stats = Scenario12_SniperTouch.getRejectionStats();
+    expect(stats.insufficientVolatility).toBeGreaterThan(0);
+  });
+});
 
 describe('Scenario12: Orthodox hardening', () => {
   function htfBreak(direction: 'BULLISH' | 'BEARISH') {

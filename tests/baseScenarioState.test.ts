@@ -42,6 +42,8 @@ const mockConfig: BotConfig = {
   dynamicTpMinRr: new Decimal('1.5'),
   dynamicTpMaxRr: new Decimal(6),
   dynamicTpRequireTarget: false,
+  minNetRr: new Decimal(1),
+  minVolatilityFeeRatio: new Decimal(1),
   minTpDistancePct: new Decimal('0.0035'),
   backtestDays: 60,
   useLocalCacheOnly: false,

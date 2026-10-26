@@ -42,6 +42,8 @@ const mockConfig: BotConfig = {
   dynamicTpMinRr: new Decimal('1.5'),
   dynamicTpMaxRr: new Decimal(6),
   dynamicTpRequireTarget: false,
+  minNetRr: new Decimal(1),
+  minVolatilityFeeRatio: new Decimal(1),
   minTpDistancePct: new Decimal('0.0035'),
   backtestDays: 60,
   useLocalCacheOnly: false,
@@ -251,6 +253,20 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
       expect(result).toBe(true);
       expect(bypass.getReason()).toContain('HTF Liquidity Sweep');
     });
+
+    it('accepts the impulse FVG whose completion bar is the CHoCH candle', () => {
+      // detectFVGs() stamps a gap at c1, so index CHOCH_INDEX - 2 completes on
+      // c3 = the CHoCH candle. That gap IS the CHoCH impulse and must survive.
+      const result = scenario.evaluate(
+        buildPatternData({ direction: 'BEARISH', fvgIndex: CHOCH_INDEX - 2 }),
+      );
+
+      expect(result).toBe(true);
+      expect(scenario.getZoneDetails()?.type).toBe('FVG');
+      expect(scenario.getZoneDetails()?.timestamp).toBe(
+        BASE_TS + (CHOCH_INDEX - 2) * LTF_MS,
+      );
+    });
   });
 
   describe('negative cases - killzone', () => {
@@ -370,6 +386,18 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
 
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('No 15m FVG');
+    });
+
+    it('rejects an FVG that completed BEFORE the CHoCH', () => {
+      // c1 at CHOCH_INDEX - 3 completes on CHOCH_INDEX - 1 — a full bar early,
+      // so the gap belongs to the pre-CHoCH move and cannot justify the entry.
+      const result = scenario.evaluate(
+        buildPatternData({ direction: 'BEARISH', fvgIndex: CHOCH_INDEX - 3 }),
+      );
+
+      expect(result).toBe(false);
+      expect(scenario.getReason()).toContain('No 15m FVG');
+      expect(Scenario5_HTFLiquiditySweep.getRejectionStats().noFvg).toBe(1);
     });
   });
 
