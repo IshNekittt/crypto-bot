@@ -5,18 +5,22 @@ import { DateTime } from 'luxon';
 import { ZoneDetails } from '../types';
 import { BotConfig, resolveSymbolConfig } from '../config/env';
 import { PatternData } from '../smc/patternRecognizer';
-import { Scenario1_HTFContinuation } from './scenarios/Scenario1_HTFContinuation';
-import { Scenario2_FVGFill } from './scenarios/Scenario2_FVGFill';
-import { Scenario3_IDM } from './scenarios/Scenario3_IDM';
-import { Scenario4_MitigationChain } from './scenarios/Scenario4_MitigationChain';
-import { Scenario5_HTFLiquiditySweep } from './scenarios/Scenario5_HTFLiquiditySweep';
-import { Scenario6_SMS } from './scenarios/Scenario6_SMS';
-import { Scenario7_AMD } from './scenarios/Scenario7_AMD';
-import { Scenario8_RangeDeviationReclaim } from './scenarios/Scenario8_RangeDeviationReclaim';
-import { Scenario9_TurtleSoup } from './scenarios/Scenario9_TurtleSoup';
-import { Scenario10_BreakerBlock } from './scenarios/Scenario10_BreakerBlock';
-import { Scenario11_MitigationBlock } from './scenarios/Scenario11_MitigationBlock';
 import { Scenario12_SniperTouch } from './scenarios/Scenario12_SniperTouch';
+import { Scenario14_QuantAlpha } from './scenarios/Scenario14_QuantAlpha';
+
+/**
+ * Scenario IDs the router can actually construct.
+ *
+ * Scenarios 1–11 were archived to `src/engine/scenarios/archive/legacy_smc/`
+ * after the 180-day unfiltered discovery sweep (3 symbols, killzones off, 565,898
+ * scenario-candle evaluations → 21 trades): seven of them never filled a single
+ * order, and the only one with a usable sample (S4, 13 trades) carried 82% of the
+ * portfolio loss. Scenario 13 was archived earlier for the same class of reason.
+ *
+ * Exported as the single source of truth so config validation and tests assert
+ * against the live registry instead of hardcoding IDs that no longer exist.
+ */
+export const REGISTERED_SCENARIO_IDS: readonly number[] = Object.freeze([12, 14]);
 
 export interface ScenarioRouterDeps {
   readonly symbol: string;
@@ -51,29 +55,45 @@ export class ScenarioRouter {
     this.config = resolveSymbolConfig(deps.config, deps.symbol);
 
     const allScenarios: IScenario[] = [
-      // Priority 1: Complex, high-precision scenarios (checked first)
-      new Scenario5_HTFLiquiditySweep(this.config),    // 5: HTF Liquidity Sweep
-      new Scenario7_AMD(this.config),                   // 7: AMD
-      new Scenario9_TurtleSoup(this.config),            // 9: Turtle Soup
-      new Scenario10_BreakerBlock(this.config),         // 10: Breaker Block
-      new Scenario11_MitigationBlock(this.config),      // 11: Mitigation Block
-      new Scenario12_SniperTouch(this.config),          // 12: Sniper Touch (1m Macro)
-      // Priority 2: Trend continuation scenarios
-      new Scenario1_HTFContinuation(this.config),       // 1: HTF Continuation
-      new Scenario3_IDM(this.config),                   // 3: IDM
-      new Scenario6_SMS(this.config),                   // 6: Failure Swing (SMS)
-      new Scenario8_RangeDeviationReclaim(this.config), // 8: Range Deviation & Reclaim
-      // Priority 3: Simple, greedy scenarios (checked last)
-      new Scenario2_FVGFill(this.config),               // 2: FVG Fill
-      new Scenario4_MitigationChain(this.config),       // 4: Mitigation Chain
+      new Scenario12_SniperTouch(this.config), // 12: Sniper Touch (1m Macro)
+      new Scenario14_QuantAlpha(this.config), // 14: Trend Following / Donchian (15m Classic)
     ];
 
-    if (deps.activeScenarios && deps.activeScenarios.length > 0) {
-      this.scenarios = allScenarios.filter(s => deps.activeScenarios.includes(s.id));
-      logger.info(`[${this.symbol}] Active scenarios: ${this.scenarios.map(s => `${s.id}:${s.name}`).join(', ')}`);
-    } else {
+    // `activeScenarios` NARROWS the registry — it can never add a scenario the
+    // router does not own. Ids with no registered implementation (the archived
+    // 1–11 and 13) are reported rather than silently swallowed, because an empty
+    // intersection would otherwise leave a live process scanning forever without
+    // a single scenario to evaluate.
+    const requested = deps.activeScenarios ?? [];
+
+    if (requested.length === 0) {
       this.scenarios = allScenarios;
-      logger.info(`[${this.symbol}] All ${allScenarios.length} scenarios active (no active scenarios configured)`);
+      logger.info(
+        `[${this.symbol}] All ${allScenarios.length} registered scenario(s) active: ${this.scenarios
+          .map((s) => `${s.id}:${s.name}`)
+          .join(', ')}`,
+      );
+    } else {
+      this.scenarios = allScenarios.filter((s) => requested.includes(s.id));
+
+      const unregistered = requested.filter((id) => !REGISTERED_SCENARIO_IDS.includes(id));
+      if (unregistered.length > 0) {
+        logger.warn(
+          `[${this.symbol}] ACTIVE_SCENARIOS requests unregistered scenario(s) ${unregistered.join(',')} — ignored. ` +
+            `Registered: ${REGISTERED_SCENARIO_IDS.join(',')} (1–11 and 13 are archived).`,
+        );
+      }
+
+      if (this.scenarios.length === 0) {
+        logger.error(
+          `[${this.symbol}] ACTIVE_SCENARIOS resolves to ZERO registered scenarios — this process will evaluate nothing. ` +
+            `Set ACTIVE_SCENARIOS to a subset of ${REGISTERED_SCENARIO_IDS.join(',')} or unset it.`,
+        );
+      } else {
+        logger.info(
+          `[${this.symbol}] Active scenarios: ${this.scenarios.map((s) => `${s.id}:${s.name}`).join(', ')}`,
+        );
+      }
     }
   }
 

@@ -1,7 +1,7 @@
-import { BaseScenario } from '../baseScenario';
+import { BaseScenario } from '../../../baseScenario';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../config/env';
-import { resolveTakeProfit } from '../tpResolver';
+import { BotConfig } from '../../../../config/env';
+import { resolveTakeProfit } from '../../../tpResolver';
 
 /** Sweep window: the last 16 LTF candles (4H on a 15m entry timeframe). */
 const SWEEP_LOOKBACK_CANDLES = 16;

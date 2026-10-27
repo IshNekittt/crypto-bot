@@ -1,6 +1,6 @@
-import { Scenario6_SMS } from '../../src/engine/scenarios/Scenario6_SMS';
+import { Scenario6_SMS } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario6_SMS';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

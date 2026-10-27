@@ -1,6 +1,6 @@
-import { Scenario2_FVGFill } from '../../src/engine/scenarios/Scenario2_FVGFill';
+import { Scenario2_FVGFill } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario2_FVGFill';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

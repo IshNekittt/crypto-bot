@@ -1,6 +1,6 @@
-import { Scenario10_BreakerBlock } from '../../src/engine/scenarios/Scenario10_BreakerBlock';
+import { Scenario10_BreakerBlock } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario10_BreakerBlock';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

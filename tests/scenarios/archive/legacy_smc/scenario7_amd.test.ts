@@ -1,6 +1,6 @@
-import { Scenario7_AMD } from '../../src/engine/scenarios/Scenario7_AMD';
+import { Scenario7_AMD } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario7_AMD';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

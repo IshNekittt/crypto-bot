@@ -1,7 +1,7 @@
-import { BaseScenario, TradeLevels } from '../baseScenario';
+import { BaseScenario, TradeLevels } from '../../../baseScenario';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../config/env';
-import { resolveTakeProfit } from '../tpResolver';
+import { BotConfig } from '../../../../config/env';
+import { resolveTakeProfit } from '../../../tpResolver';
 
 /** 15m entry timeframe — the deviation, the CHoCH and the POI all live here. */
 const ENTRY_TIMEFRAME = '15';

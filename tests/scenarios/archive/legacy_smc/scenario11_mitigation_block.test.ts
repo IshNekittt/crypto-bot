@@ -1,6 +1,6 @@
-import { Scenario11_MitigationBlock } from '../../src/engine/scenarios/Scenario11_MitigationBlock';
+import { Scenario11_MitigationBlock } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario11_MitigationBlock';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

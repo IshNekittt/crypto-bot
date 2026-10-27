@@ -1,6 +1,6 @@
-import { Scenario8_RangeDeviationReclaim } from '../../src/engine/scenarios/Scenario8_RangeDeviationReclaim';
+import { Scenario8_RangeDeviationReclaim } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario8_RangeDeviationReclaim';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

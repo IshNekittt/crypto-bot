@@ -1,7 +1,7 @@
-import { BaseScenario, TradeLevels } from '../baseScenario';
+import { BaseScenario, TradeLevels } from '../../../baseScenario';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../config/env';
-import { resolveTakeProfit } from '../tpResolver';
+import { BotConfig } from '../../../../config/env';
+import { resolveTakeProfit } from '../../../tpResolver';
 
 /**
  * EQH/EQL proximity to the range boundary: `max(0.1%, 0.5 x ATR)` (AGENTS.md §7.1).

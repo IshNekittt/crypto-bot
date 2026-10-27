@@ -1,6 +1,6 @@
-import { Scenario3_IDM } from '../../src/engine/scenarios/Scenario3_IDM';
+import { Scenario3_IDM } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario3_IDM';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

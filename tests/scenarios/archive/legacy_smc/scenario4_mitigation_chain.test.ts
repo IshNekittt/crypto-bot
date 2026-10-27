@@ -1,6 +1,6 @@
-import { Scenario4_MitigationChain } from '../../src/engine/scenarios/Scenario4_MitigationChain';
+import { Scenario4_MitigationChain } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario4_MitigationChain';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

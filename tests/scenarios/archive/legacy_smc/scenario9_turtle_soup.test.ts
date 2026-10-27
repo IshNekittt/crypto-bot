@@ -1,6 +1,6 @@
-import { Scenario9_TurtleSoup } from '../../src/engine/scenarios/Scenario9_TurtleSoup';
+import { Scenario9_TurtleSoup } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario9_TurtleSoup';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

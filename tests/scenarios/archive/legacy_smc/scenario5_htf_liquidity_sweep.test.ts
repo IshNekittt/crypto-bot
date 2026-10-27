@@ -1,6 +1,6 @@
-import { Scenario5_HTFLiquiditySweep } from '../../src/engine/scenarios/Scenario5_HTFLiquiditySweep';
+import { Scenario5_HTFLiquiditySweep } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario5_HTFLiquiditySweep';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

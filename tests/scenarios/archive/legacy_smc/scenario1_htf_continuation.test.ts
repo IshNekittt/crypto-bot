@@ -1,6 +1,6 @@
-import { Scenario1_HTFContinuation } from '../../src/engine/scenarios/Scenario1_HTFContinuation';
+import { Scenario1_HTFContinuation } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario1_HTFContinuation';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../src/config/env';
+import { BotConfig } from '../../../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',

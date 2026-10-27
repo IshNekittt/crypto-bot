@@ -1,4 +1,4 @@
-import { ScenarioRouter } from '../src/engine/scenarioRouter';
+import { ScenarioRouter, REGISTERED_SCENARIO_IDS } from '../src/engine/scenarioRouter';
 import { IScenario } from '../src/types';
 import { BotConfig } from '../src/config/env';
 import { Decimal } from 'decimal.js';
@@ -23,7 +23,7 @@ const mockConfig: BotConfig = {
   autoTrading: false,
   tradeApprovalTimeoutMinutes: 5,
   enableLiveTestOrders: false,
-  activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+  activeScenarios: [12],
   enableFundingMonitor: false,
   fundingMonitorSymbols: [],
   fundingAlertThresholdPct: '0.0',
@@ -84,13 +84,12 @@ describe('ScenarioRouter', () => {
   let router: ScenarioRouter;
 
   beforeEach(() => {
-    // Set ACTIVE_SCENARIOS to include all 11 scenarios for testing
-    process.env.ACTIVE_SCENARIOS = '1,2,3,4,5,6,7,8,9,10,11';
+    process.env.ACTIVE_SCENARIOS = '12,14';
     router = new ScenarioRouter({
       symbol: 'SOLUSDT',
       patternRecognizer: mockPatternRecognizer,
       notifier: mockNotifier,
-      activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+      activeScenarios: [12, 14],
       config: mockConfig,
     });
     jest.clearAllMocks();
@@ -101,26 +100,21 @@ describe('ScenarioRouter', () => {
   });
 
   describe('scenario registration', () => {
-    it('should have all 11 scenarios registered in order (priority order: complex first)', () => {
+    it('registers Scenarios 12 and 14 — the archived 1–11 are not constructible', () => {
       const scenarios = (router as any).scenarios;
-      expect(scenarios.length).toBe(11);
-      expect(scenarios.map((s: IScenario) => s.id)).toEqual([5, 7, 9, 10, 11, 1, 3, 6, 8, 2, 4]);
+      expect(scenarios.length).toBe(2);
+      expect(scenarios.map((s: IScenario) => s.id)).toEqual([12, 14]);
       expect(scenarios.map((s: IScenario) => s.name)).toEqual([
-        'HTF Liquidity Sweep',
-        'AMD (Accumulation-Manipulation-Distribution)',
-        'Turtle Soup',
-        'Breaker Block Entry',
-        'Mitigation Block',
-        'HTF Continuation',
-        'IDM',
-        'Failure Swing (SMS)',
-        'Range Deviation & Reclaim',
-        'FVG Fill',
-        'Mitigation Chain',
+        'Sniper Touch (1m Macro)',
+        'Trend Following Alpha (Donchian / Volume Breakout)',
       ]);
     });
 
-    it('does not register the archived Scenario 13', () => {
+    it('exposes the registry as the single source of truth', () => {
+      expect(REGISTERED_SCENARIO_IDS).toEqual([12, 14]);
+    });
+
+    it('does not register the archived Scenarios 1–11 or 13', () => {
       const archivedRouter = new ScenarioRouter({
         symbol: 'SOLUSDT',
         patternRecognizer: mockPatternRecognizer,
@@ -131,6 +125,32 @@ describe('ScenarioRouter', () => {
 
       // Scenario 13 was archived: the router simply has nothing to evaluate.
       expect((archivedRouter as any).scenarios).toHaveLength(0);
+    });
+
+    it('ignores archived ids without dropping the registered scenario', () => {
+      // A stale .env listing the classic tank profile must not silently disarm a
+      // live process: the ids that still exist are kept, the rest are reported.
+      const mixedRouter = new ScenarioRouter({
+        symbol: 'SOLUSDT',
+        patternRecognizer: mockPatternRecognizer,
+        notifier: mockNotifier,
+        activeScenarios: [1, 4, 5, 9, 12],
+        config: { ...mockConfig, activeScenarios: [1, 4, 5, 9, 12] },
+      });
+
+      expect((mixedRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([12]);
+    });
+
+    it('defaults to the full registered registry when no ids are configured', () => {
+      const defaultRouter = new ScenarioRouter({
+        symbol: 'SOLUSDT',
+        patternRecognizer: mockPatternRecognizer,
+        notifier: mockNotifier,
+        activeScenarios: [],
+        config: mockConfig,
+      });
+
+      expect((defaultRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([12, 14]);
     });
   });
 
@@ -157,7 +177,7 @@ describe('ScenarioRouter', () => {
           }),
         },
         notifier: mockNotifier,
-        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        activeScenarios: [12],
         config: mockConfig,
       });
 
@@ -192,7 +212,7 @@ describe('ScenarioRouter', () => {
           }),
         },
         notifier: mockNotifier,
-        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        activeScenarios: [12],
         config: mockConfig,
       });
 
@@ -216,7 +236,7 @@ describe('ScenarioRouter', () => {
         symbol: 'SOLUSDT',
         patternRecognizer: { buildPatternData: jest.fn().mockResolvedValue({}) },
         notifier: mockNotifier,
-        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        activeScenarios: [12],
         config: mockConfig,
       });
 
@@ -236,7 +256,7 @@ describe('ScenarioRouter', () => {
           buildPatternData: jest.fn().mockRejectedValue(new Error('API Error')),
         },
         notifier: mockNotifier,
-        activeScenarios: [1,2,3,4,5,6,7,8,9,10,11],
+        activeScenarios: [12],
         config: mockConfig,
       });
 
@@ -270,7 +290,7 @@ describe('ScenarioRouter', () => {
         symbol: 'SOLUSDT',
         patternRecognizer: { buildPatternData: jest.fn().mockResolvedValue({}) },
         notifier: mockNotifier,
-        activeScenarios: [1],
+        activeScenarios: [12],
         config: dayConfig,
       });
       const mockScenarios = [

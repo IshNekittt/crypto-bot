@@ -123,12 +123,17 @@ export abstract class BaseScenario implements IScenario {
     direction: 'BULLISH' | 'BEARISH',
     atr: Decimal,
     rr: Decimal = new Decimal(3),
-    offsetMultiplier: Decimal = new Decimal(0.5)
+    offsetMultiplier: Decimal = new Decimal(0.5),
+    overrideOffsetMultiplier = false,
   ): TradeLevels {
-    // Use config value if available, otherwise fallback to parameter (for backward compat in tests)
-    const effectiveOffsetMultiplier = this.config?.smcSlAtrOffset 
-      ? new Decimal(this.config.smcSlAtrOffset)
-      : offsetMultiplier;
+    // Use config value unless a scenario explicitly requires a fixed, strategy-owned
+    // stop geometry (Scenario 14's 2ATR breakout stop). Keeping this opt-in is
+    // backward-compatible: all existing callers retain SMC_SL_ATR_OFFSET.
+    const effectiveOffsetMultiplier = overrideOffsetMultiplier
+      ? offsetMultiplier
+      : (this.config?.smcSlAtrOffset
+        ? new Decimal(this.config.smcSlAtrOffset)
+        : offsetMultiplier);
     
     // Safety: minimum offset = 0.1% of entry (prevents zero offset when ATR is near zero)
     const minOffset = entry.mul(new Decimal('0.001'));
