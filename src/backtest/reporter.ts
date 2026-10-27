@@ -4,6 +4,7 @@ import * as path from 'path';
 import { TradeResult } from './executionSimulator';
 import { Scenario12_SniperTouch } from '../engine/scenarios/Scenario12_SniperTouch';
 import { Scenario14_QuantAlpha } from '../engine/scenarios/Scenario14_QuantAlpha';
+import { Scenario15_VolatilitySqueeze } from '../engine/scenarios/Scenario15_VolatilitySqueeze';
 
 export interface ScenarioStats {
   name: string;
@@ -33,6 +34,7 @@ function sharePct(count: number, base: number): string {
 export function resetScenarioRejectionStats(): void {
   Scenario12_SniperTouch.resetStats();
   Scenario14_QuantAlpha.resetStats();
+  Scenario15_VolatilitySqueeze.resetStats();
 }
 
 export function generateReport(
@@ -240,6 +242,9 @@ export function generateReport(
   const scenario14Stats = Scenario14_QuantAlpha.getRejectionStats();
   lines.push('   Scenario 14 (Trend Following / Donchian):');
   lines.push(`     Total: ${scenario14Stats.totalEvals} | Triggered: ${scenario14Stats.triggered} | InsufficientCandles: ${scenario14Stats.insufficientCandles} | InsideChannel: ${scenario14Stats.insideChannel} | LowVolumeBreakout: ${scenario14Stats.lowVolumeBreakout} | InsufficientRr: ${scenario14Stats.insufficientRr} | TpInvalid: ${scenario14Stats.tpInvalid}`);
+  const scenario15Stats = Scenario15_VolatilitySqueeze.getRejectionStats();
+  lines.push('   Scenario 15 (Volatility Squeeze):');
+  lines.push(`     Total: ${scenario15Stats.totalEvals} | Triggered: ${scenario15Stats.triggered} | WrongMode: ${scenario15Stats.wrongMode} | InsufficientCandles: ${scenario15Stats.insufficientCandles} | NoSqueezeFiring: ${scenario15Stats.noSqueezeFiring} | NeutralMomentum: ${scenario15Stats.neutralMomentum} | InvalidAtr: ${scenario15Stats.invalidAtr} | TpInvalid: ${scenario15Stats.tpInvalid}`);
   lines.push('');
 
   return lines.join('\n');

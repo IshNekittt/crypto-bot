@@ -84,12 +84,12 @@ describe('ScenarioRouter', () => {
   let router: ScenarioRouter;
 
   beforeEach(() => {
-    process.env.ACTIVE_SCENARIOS = '12,14';
+    process.env.ACTIVE_SCENARIOS = '12,14,15';
     router = new ScenarioRouter({
       symbol: 'SOLUSDT',
       patternRecognizer: mockPatternRecognizer,
       notifier: mockNotifier,
-      activeScenarios: [12, 14],
+      activeScenarios: [12, 14, 15],
       config: mockConfig,
     });
     jest.clearAllMocks();
@@ -100,18 +100,19 @@ describe('ScenarioRouter', () => {
   });
 
   describe('scenario registration', () => {
-    it('registers Scenarios 12 and 14 — the archived 1–11 are not constructible', () => {
+    it('registers Scenarios 12, 14 and 15 — archived 1–11 and 13 are not constructible', () => {
       const scenarios = (router as any).scenarios;
-      expect(scenarios.length).toBe(2);
-      expect(scenarios.map((s: IScenario) => s.id)).toEqual([12, 14]);
+      expect(scenarios.length).toBe(3);
+      expect(scenarios.map((s: IScenario) => s.id)).toEqual([12, 14, 15]);
       expect(scenarios.map((s: IScenario) => s.name)).toEqual([
         'Sniper Touch (1m Macro)',
         'Trend Following Alpha (Donchian / Volume Breakout)',
+        'Volatility Compression Squeeze (BB/KC)',
       ]);
     });
 
     it('exposes the registry as the single source of truth', () => {
-      expect(REGISTERED_SCENARIO_IDS).toEqual([12, 14]);
+      expect(REGISTERED_SCENARIO_IDS).toEqual([12, 14, 15]);
     });
 
     it('does not register the archived Scenarios 1–11 or 13', () => {
@@ -150,7 +151,7 @@ describe('ScenarioRouter', () => {
         config: mockConfig,
       });
 
-      expect((defaultRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([12, 14]);
+      expect((defaultRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([12, 14, 15]);
     });
   });
 

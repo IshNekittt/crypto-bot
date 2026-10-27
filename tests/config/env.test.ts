@@ -171,7 +171,7 @@ describe('loadConfig — scenario registration bounds (S13 archived)', () => {
 
   it('rejects Scenario 13 now that it is archived', () => {
     expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '13' }))).toThrow(
-      /ACTIVE_SCENARIOS must contain valid scenario IDs \(1-12 or 14\)/,
+      /ACTIVE_SCENARIOS must contain valid scenario IDs \(1-12, 14, or 15; 13 is archived\)/,
     );
   });
 
@@ -179,9 +179,15 @@ describe('loadConfig — scenario registration bounds (S13 archived)', () => {
     expect(loadConfig(env({ ACTIVE_SCENARIOS: '14' })).activeScenarios).toEqual([14]);
   });
 
-  it('rejects scenario IDs above 14', () => {
-    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '15' }))).toThrow(
-      /ACTIVE_SCENARIOS must contain valid scenario IDs \(1-12 or 14\)/,
+  it('accepts Scenario 15 in a per-symbol override', () => {
+    const config = loadConfig(env({ SCENARIOS_BTCUSDT: '15' }));
+    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([15]);
+  });
+
+  it('accepts Scenario 15 and rejects higher IDs', () => {
+    expect(loadConfig(env({ ACTIVE_SCENARIOS: '15' })).activeScenarios).toEqual([15]);
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '16' }))).toThrow(
+      /ACTIVE_SCENARIOS must contain valid scenario IDs \(1-12, 14, or 15; 13 is archived\)/,
     );
   });
 
@@ -190,9 +196,9 @@ describe('loadConfig — scenario registration bounds (S13 archived)', () => {
     expect(config.symbolScenarios.get('BTCUSDT')).toEqual([12]);
   });
 
-  it('accepts Scenario 14 in a per-symbol override', () => {
-    const config = loadConfig(env({ SCENARIOS_BTCUSDT: '12,14' }));
-    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([12, 14]);
+  it('accepts Scenario 14 and 15 in per-symbol overrides', () => {
+    const config = loadConfig(env({ SCENARIOS_BTCUSDT: '12,14,15' }));
+    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([12, 14, 15]);
   });
 });
 

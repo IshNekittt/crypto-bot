@@ -7,6 +7,7 @@ import { BotConfig, resolveSymbolConfig } from '../config/env';
 import { PatternData } from '../smc/patternRecognizer';
 import { Scenario12_SniperTouch } from './scenarios/Scenario12_SniperTouch';
 import { Scenario14_QuantAlpha } from './scenarios/Scenario14_QuantAlpha';
+import { Scenario15_VolatilitySqueeze } from './scenarios/Scenario15_VolatilitySqueeze';
 
 /**
  * Scenario IDs the router can actually construct.
@@ -20,7 +21,7 @@ import { Scenario14_QuantAlpha } from './scenarios/Scenario14_QuantAlpha';
  * Exported as the single source of truth so config validation and tests assert
  * against the live registry instead of hardcoding IDs that no longer exist.
  */
-export const REGISTERED_SCENARIO_IDS: readonly number[] = Object.freeze([12, 14]);
+export const REGISTERED_SCENARIO_IDS: readonly number[] = Object.freeze([12, 14, 15]);
 
 export interface ScenarioRouterDeps {
   readonly symbol: string;
@@ -57,6 +58,7 @@ export class ScenarioRouter {
     const allScenarios: IScenario[] = [
       new Scenario12_SniperTouch(this.config), // 12: Sniper Touch (1m Macro)
       new Scenario14_QuantAlpha(this.config), // 14: Trend Following / Donchian (15m Classic)
+      new Scenario15_VolatilitySqueeze(this.config), // 15: BB/KC Volatility Squeeze (15m Classic)
     ];
 
     // `activeScenarios` NARROWS the registry — it can never add a scenario the

@@ -43,7 +43,7 @@ The codebase now supports **two distinct operational modes** running from the sa
 |--------|-------------------------------------------|-----------------------------------------|
 | **Timeframes** | 15m LTF / 4H HTF | 1m entry / 15m + 4H macro context |
 | **Entry Logic** | Close of 15m signal candle | 1m CHoCH after a macro sweep, near its OB midpoint |
-| **Scenarios** | 1-11 (all classic SMC) | **12** (Sniper Touch) |
+| **Scenarios** | **15** (Volatility Squeeze; 15m Classic) | **12** (Sniper Touch) |
 | **State Machine** | SCANNING → ENTRY_STAGED → IN_TRADE | SCANNING → ENTRY_STAGED → IN_TRADE (Scenario 12 on 1m closes) |
 | **WS Subscription** | 15m, 240m | 1m, 15m, 240m |
 | **Killzone** | London/NY only | London/NY only (enforced in Scenario 12) |
@@ -51,7 +51,7 @@ The codebase now supports **two distinct operational modes** running from the sa
 
 **Critical Invariant**: V4 and V5 **MUST NOT** run on the same process/instance. The `IN_TRADE` state machine is per-symbol and mutually exclusive. Running both modes simultaneously would cause state conflicts, double position risk, and `IN_TRADE` blocking.
 
-> **Scenario 13 is ARCHIVED** (v2026-10-23): the Top-Down Order Flow implementation moved to `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` and is no longer registered in the router. `ACTIVE_SCENARIOS` / `SCENARIOS_<SYMBOL>` accept **1–12** only; a `13` in a per-symbol override is dropped during parsing, and in `ACTIVE_SCENARIOS` it fails validation. Why: the multi-timeframe cascade produced fee-dominated results at 1m granularity, so effort moved to Scenario 12 frequency (per-CHoCH sweep pairing + opt-in sweep sources). The archived module still compiles and its test suite still runs (`tests/scenarios/archive/`), so the design remains available for future revival.
+> **Scenario 13 is ARCHIVED** (v2026-10-23): the Top-Down Order Flow implementation moved to `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` and is no longer registered in the router. Scenario 13 remains invalid in global and per-symbol scenario lists; Scenario 15 is registered as a separate 15m Classic strategy. The archived module still compiles and its test suite still runs (`tests/scenarios/archive/`), so the design remains available for future revival.
 
 ### 1.3 Deployment Strategy (Sub-accounts)
 
@@ -2023,7 +2023,7 @@ ENFORCE_KILLZONES=false              # bypass London/NY killzone gates
 
 ---
 
-## 8. THE SCENARIOS (1–12 ACTIVE, 13 ARCHIVED) — `src/engine/scenarios/`
+## 8. THE SCENARIOS (12, 14, 15 REGISTERED; 1–11 AND 13 ARCHIVED) — `src/engine/scenarios/`
 
 | ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -2039,11 +2039,25 @@ ENFORCE_KILLZONES=false              # bypass London/NY killzone gates
 | **10** | Breaker Block       | 15m block whose far extreme was swept → broken by a 15m BOS with displacement + FVG → retest of the mirrored zone (0.5 entry) | **BOS-only** break (a CHoCH is a reversal, not a breaker break); block strictly before the break and ≤ 24h old; body close clears the WHOLE block; retest = current candle, wick in + body holding, within 4h; FVG window measured on the completion bar; `resolveTakeProfit` (`skipMinorObstacles: false`) |
 | **11** | Mitigation Block    | **Only after SMS** → 15m CHoCH (inside 8h) → mitigation of the failed leg's 15m OB inside 12h | **Strict 15m** for SMS/CHoCH/MB; chain `ob < sms ≤ choch < retest` inside a 72h looking window; displacement ≥ 1.5 ATR on the CHoCH; retest closes inside the block in the trade direction; P/D on the SMS→CHoCH impulse; `resolveTakeProfit` (`skipMinorObstacles: false`) |
 | **12** | Sniper Touch        | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + P0 shields (`MIN_VOLATILITY_FEE_RATIO` ATR-to-fee admission, `MIN_NET_RR` fee-inclusive R:R) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
-| **13** | ~~Top-Down Order Flow~~ | **ARCHIVED** — `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts`, not registered | Kept for reference; `ACTIVE_SCENARIOS` accepts 1–12 |
+| **13** | ~~Top-Down Order Flow~~ | **ARCHIVED** — `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts`, not registered | Kept for reference; ID 13 is invalid in scenario config |
+| **14** | Trend Following Alpha | 15m Donchian breakout with volume confirmation | Classic mode; structural TP and ATR stop |
+| **15** | Volatility Compression Squeeze | BB(20,2) fully inside KC(SMA20 ± 1.5×ATR20); first expansion after ≥5 compressed candles | 15m Classic only; regression-slope direction; KC-midline ±1.5×ATR stop; `tpResolver`; trigger candle burned by timestamp |
 
 ### 8.1 Scenario Overview
 
-The table above lists all 12 active scenarios implemented in `src/engine/scenarios/`. Scenarios 1–11 are classic SMC patterns (15m/4H) and Scenario 12 is V5 Sniper Mode (single-pass 1m evaluation against swept levels). Scenario 13 (Top-Down Order Flow) is archived in `src/engine/scenarios/archive/` and is not registered; its §8.6 documentation is retained as a design reference. Each active scenario has dedicated rejection statistics for observability.
+The router currently constructs Scenarios 12, 14 and 15. Scenarios 1–11 and 13 are archived and are not constructible by the live router. Scenario 12 is V5 Sniper (1m); Scenarios 14 and 15 are Classic 15m entries. Scenario 13 remains documented in §8.6 as a design reference. Active implementations expose rejection statistics for observability.
+
+### 8.7 Scenario 15 — Volatility Compression Squeeze
+
+**Files**: `src/engine/quant/volatilitySqueeze.ts`, `src/engine/scenarios/Scenario15_VolatilitySqueeze.ts`.
+
+- Classic mode only: `ENABLE_SNIPER_MODE=false` and `LTF_TIMEFRAME=15`; the current closed candle is evaluated once per 15m router pass.
+- Bollinger Bands use SMA(20) ± 2 population standard deviations. Keltner Channels use SMA(20) ± 1.5 × SMA(True Range, 20), including gaps to the prior close.
+- `isSqueezed` means both BB boundaries are inside the KC boundaries. `isFiring` is the first non-squeezed point after at least five consecutive squeezed evaluations.
+- Direction is the sign of the least-squares regression slope over the current 20 closes; zero slope fails closed. All calculations are causal and use `Decimal` for price-derived values.
+- Stop geometry is anchored to the Keltner midline and offset 1.5 × True Range ATR via `BaseScenario.calculateLevels()`. TP is resolved by `tpResolver` (dynamic structural target when enabled; otherwise the configured fixed-R fallback).
+- The trigger candle timestamp is emitted as `structureDetails` (no synthetic zone) so the live engine and backtester burn the exact consumed breakout and prevent duplicate entries.
+- Dedicated rejection counters are reset and printed per symbol by `src/backtest/reporter.ts`.
 
 ### S1 & S5 FVG Completion-Bar Timing
 
@@ -2326,8 +2340,8 @@ BACKTEST_CSV_PATH=                 # optional local CSV source
 ENABLE_HEALTHCHECK_SERVER=false    # required true on Render
 
 # Scenarios
-ACTIVE_SCENARIOS=1,2,3,4,5,6,7,8,9,10,11,12   # unset = all 12 active (13 is ARCHIVED)
-SCENARIOS_BTCUSDT=1,5,6            # optional per-symbol override (1–12; 13 is dropped)
+ACTIVE_SCENARIOS=15                # Volatility Squeeze baseline; 12, 14, 15 are registered
+SCENARIOS_BTCUSDT=15               # optional per-symbol override (1–12, 14, 15; 13 is archived)
 ENABLE_LIVE_TEST_ORDERS=false
 
 # Dynamic take-profit (structural targets instead of blind k * R)

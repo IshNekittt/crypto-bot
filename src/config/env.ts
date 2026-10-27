@@ -206,10 +206,10 @@ function parseActiveScenarios(raw: string | null): number[] {
   const ids = raw
     .split(",")
     .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isInteger(n) && (n >= 1 && n <= 12 || n === 14));
+    .filter((n) => Number.isInteger(n) && (n >= 1 && n <= 12 || n === 14 || n === 15));
   if (ids.length === 0) {
     throw new Error(
-      "ACTIVE_SCENARIOS must contain valid scenario IDs (1-12 or 14), e.g. ACTIVE_SCENARIOS=12,14",
+      "ACTIVE_SCENARIOS must contain valid scenario IDs (1-12, 14, or 15; 13 is archived), e.g. ACTIVE_SCENARIOS=15",
     );
   }
   return [...new Set(ids)].sort((a, b) => a - b);
@@ -409,7 +409,7 @@ function parseSymbolScenarios(
       const ids = raw
         .split(",")
         .map((s) => parseInt(s.trim(), 10))
-        .filter((n) => Number.isInteger(n) && (n >= 1 && n <= 12 || n === 14));
+        .filter((n) => Number.isInteger(n) && (n >= 1 && n <= 12 || n === 14 || n === 15));
       if (ids.length > 0) {
         map.set(
           symbol,
