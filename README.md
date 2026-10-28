@@ -7,23 +7,23 @@
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-558%20passing-brightgreen?logo=jest)](https://jestjs.io/)
-[![Version](https://img.shields.io/badge/Version-v2026--10--21-blue)](https://github.com/)
+[![Tests](https://img.shields.io/badge/Tests-853%20passing-brightgreen?logo=jest)](https://jestjs.io/)
+[![Version](https://img.shields.io/badge/Version-v2026--10--28-blue)](https://github.com/)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
 
-> **Normative specification**: [`AGENTS.md`](AGENTS.md) is the single source of truth (57 critical invariants + consolidated anti-patterns). This README is the operator-facing overview — where the two disagree, `AGENTS.md` wins.
+> **Normative specification**: [`AGENTS.md`](AGENTS.md) is the single source of truth (60 critical invariants + consolidated anti-patterns). This README is the operator-facing overview — where the two disagree, `AGENTS.md` wins.
 
 ### Architecture Baseline — V5.1 Execution Physics
 
-| Pillar | Guarantee |
-| --- | --- |
-| **Hybrid Smart Entry** | Market vs Limit is decided at the **live tick**, never pre-committed at signal time (discount-first, then 0.15% threshold). |
-| **Panic Close & Orphan Guard** | A post-fill `db.openTrade()` failure can never orphan a live position — the exchange is flattened and verified before any state reset. |
-| **Strict Mathematical Side** | `Buy`/`Sell` is derived purely from Entry vs SL geometry, never from a `BULLISH`/`BEARISH` label. |
-| **Tick-Agnostic Adaptive Fractioning** | Milestones (SL→entry, partials, trailing) are evaluated on **every tick**, not only on candle close. |
-| **Live ↔ Backtest Parity (1:1)** | Identical entry routing, taker/maker fees, SL-first same-candle resolution, limit expiration and fee settlement in both engines. |
+| Pillar                                 | Guarantee                                                                                                                              |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **Hybrid Smart Entry**                 | Market vs Limit is decided at the **live tick**, never pre-committed at signal time (discount-first, then 0.15% threshold).            |
+| **Panic Close & Orphan Guard**         | A post-fill `db.openTrade()` failure can never orphan a live position — the exchange is flattened and verified before any state reset. |
+| **Strict Mathematical Side**           | `Buy`/`Sell` is derived purely from Entry vs SL geometry, never from a `BULLISH`/`BEARISH` label.                                      |
+| **Tick-Agnostic Adaptive Fractioning** | Milestones (SL→entry, partials, trailing) are evaluated on **every tick**, not only on candle close.                                   |
+| **Live ↔ Backtest Parity (1:1)**       | Identical entry routing, taker/maker fees, SL-first same-candle resolution, limit expiration and fee settlement in both engines.       |
 
 </div>
 
@@ -31,17 +31,17 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ## 🎯 Features at a Glance
 
-| Category                    | Capability                                                                                                                                                             |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **12 SMC Scenarios**        | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block, **Sniper Touch (1m)**. Scenario 13 (Top-Down Order Flow) is **archived** in `src/engine/scenarios/archive/` — IDs accepted are **1–12** |
-| **🎯 V5 Sniper Mode**       | **Single-pass 1m execution**: Scenario 12 on each 1m close runs per-CHoCH sweep pairing → CHoCH → OB-midpoint proximity → Smart Pullback entry (Market/Limit). Sweep sources: macro PDH/PDL/PWH/PWL always armed, `S12_SESSION_SWEEPS` / `S12_EQH_EQL_SWEEPS` opt-in. Entry gates: persistent 4H SMA50 trend (POI exception) + fee-aware TP distance floor (`MIN_TP_DISTANCE_PCT`) |
-| **🧮 Structural Take-Profit** | **`tpResolver.ts`**: replaces the blind `k × R` target with a structural one drawn from macro pools, swings, range boundaries and zones — bounded by `DYNAMIC_TP_MIN_RR` / `DYNAMIC_TP_MAX_RR`. Used by Scenarios 1, 5 and 12; the S13 brain modules (`htfRoadmap.ts`, `volumeExhaustion.ts`) remain in the tree with the archived scenario |
-| **⚡ Hybrid Smart Entry**    | **Market vs Limit at the live tick**: a discount (price better than `idealEntry`) always forces **Market**; otherwise `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%) decides Market vs Limit (GTC) |
-| **🛡 Pre-flight Guards**    | **SL breach + TP reached + 0.2% directional slippage**, validated against global tick memory immediately before submission — pre-flight SL/TP checks are unconditional, the slippage guard is Market-only |
-| **🚨 Panic Close & Orphan Guard** | **Post-fill DB failure recovery**: `panicCloseOrphan()` cancels a resting Limit order, flattens any filled exposure with a reduce-only Market order and verifies flatness. `SCANNING` is only reachable once the exchange is verified flat — otherwise the engine stays `IN_TRADE` under Reconciliation supervision |
-| **👻 Ghost Signal Guard**   | **Structure mitigation**: the trigger CHoCH is burned **on trade open** in both entry paths (auto + manual); the router filters by timestamp only — no rapid-fire re-entries on the same structure |
-| **⚙️ Tick-Agnostic Adaptive Fractioning** | **Position management on every tick**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — with a hard profit-direction guard before any progress math |
-| **🧮 Strict Mathematical Side** | **Side determined by geometry**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — eliminates text-based direction errors and invalid SL levels                            |
+| Category                                  | Capability                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **12 SMC Scenarios**                      | HTF Continuation, FVG Fill, IDM, Mitigation Chain, HTF Liquidity Sweep, SMS, AMD, Range Deviation, Turtle Soup, Breaker Block, Mitigation Block, **Sniper Touch (1m)**. Scenario 13 (Top-Down Order Flow) is **archived** in `src/engine/scenarios/archive/` — IDs accepted are **1–12**                                                                                           |
+| **🎯 V5 Sniper Mode**                     | **Single-pass 1m execution**: Scenario 12 on each 1m close runs per-CHoCH sweep pairing → CHoCH → OB-midpoint proximity → Smart Pullback entry (Market/Limit). Sweep sources: macro PDH/PDL/PWH/PWL always armed, `S12_SESSION_SWEEPS` / `S12_EQH_EQL_SWEEPS` opt-in. Entry gates: persistent 4H SMA50 trend (POI exception) + fee-aware TP distance floor (`MIN_TP_DISTANCE_PCT`) |
+| **🧮 Structural Take-Profit**             | **`tpResolver.ts`**: replaces the blind `k × R` target with a structural one drawn from macro pools, swings, range boundaries and zones — bounded by `DYNAMIC_TP_MIN_RR` / `DYNAMIC_TP_MAX_RR`. Used by Scenarios 1, 5 and 12; the S13 brain modules (`htfRoadmap.ts`, `volumeExhaustion.ts`) remain in the tree with the archived scenario                                        |
+| **⚡ Hybrid Smart Entry**                 | **Market vs Limit at the live tick**: a discount (price better than `idealEntry`) always forces **Market**; otherwise `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%) decides Market vs Limit (GTC)                                                                                                                                                                                    |
+| **🛡 Pre-flight Guards**                  | **SL breach + TP reached + 0.2% directional slippage**, validated against global tick memory immediately before submission — pre-flight SL/TP checks are unconditional, the slippage guard is Market-only                                                                                                                                                                          |
+| **🚨 Panic Close & Orphan Guard**         | **Post-fill DB failure recovery**: `panicCloseOrphan()` cancels a resting Limit order, flattens any filled exposure with a reduce-only Market order and verifies flatness. `SCANNING` is only reachable once the exchange is verified flat — otherwise the engine stays `IN_TRADE` under Reconciliation supervision                                                                |
+| **👻 Ghost Signal Guard**                 | **Structure mitigation**: the trigger CHoCH is burned **on trade open** in both entry paths (auto + manual); the router filters by timestamp only — no rapid-fire re-entries on the same structure                                                                                                                                                                                 |
+| **⚙️ Tick-Agnostic Adaptive Fractioning** | **Position management on every tick**: Classic mode (SL→entry at 66%) vs Sniper mode (close 25% at 33%, trail SL at 66%) — with a hard profit-direction guard before any progress math                                                                                                                                                                                             |
+| **🧮 Strict Mathematical Side**           | **Side determined by geometry**: `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` — eliminates text-based direction errors and invalid SL levels                                                                                                                                                                                                                                        |
 
 ---
 
@@ -67,6 +67,61 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 ---
 
+## 🧭 Long-Horizon Endurance Audit — v2026-10-28
+
+Two stress tests were run to answer the only question that matters before freezing development: **does the edge survive a regime it was not fitted on?**
+
+| Run | Symbol   | Engine                                 | Window   | Trades (T/W/L) | WR     | Net         | PF       | Max DD     | Fees    | MAR      |
+| --- | -------- | -------------------------------------- | -------- | -------------- | ------ | ----------- | -------- | ---------- | ------- | -------- |
+| 1   | BTCUSDT  | S14 Trend Following (Donchian, 15m/4H) | **365d** | 88 / 31 / 57   | 35.23% | **+19.94%** | 1.20     | **19.82%** | $196.76 | **1.01** |
+| 2a  | NEARUSDT | S12 Sniper (shields **1.5**)           | 180d     | 5 / 2 / 3      | 40.00% | +3.46%      | 1.67     | 5.19%      | $25.37  | 0.67     |
+| 2b  | NEARUSDT | S12 Sniper (shields **1.0**)           | 180d     | 12 / 7 / 5     | 58.33% | **+22.40%** | **3.24** | **4.74%**  | $88.68  | **4.73** |
+
+Both windows ran to completion with no data truncation (35,040 × 15m candles; 259,200 × 1m candles). Full write-up and rejection funnels: [`data/endurance_report.md`](data/endurance_report.md); artifacts in `data/endurance_run/`, `data/endurance_run_noshield/`, `data/endurance_run_override/`.
+
+> **Scope note — which "Tank"?** The 365-day audit validated **Scenario 14 (Donchian trend)**, forced with an inline `ACTIVE_SCENARIOS=14`. The local `.env` ships `ACTIVE_SCENARIOS=15` (Volatility Squeeze) and the frozen `.env.subaru` Tank preset runs **S1 + S5** — neither of those has been through a 365-day window. Do not transfer the +19.94% figure to any other preset: "Tank" is a nickname, not an engine identity.
+
+### Run 1 — the trend engine survives the year, in a shape nobody wants to look at
+
+| Period                     | Return      |
+| -------------------------- | ----------- |
+| H1 2025-10-29 → 2026-04-28 | **−10.98%** |
+| H2 2026-04-28 → 2026-10-24 | **+34.73%** |
+
+Only **4 of 13 months were positive**; Jun +24.40%, Aug +17.95% and Sep +8.31% produced **+58.92%**, while the other ten produced **−24.52%**. Peak $1,035.48 (2026-01-05) → trough $830.29 (2026-05-27) was **141.6 days at 19.82% depth**; full recovery took **160.4 days**, and **84.3% of all trade-dates** sat below the running peak. Fees consumed **49.7%** of gross PnL ($196.76 of $396.17) — the zero-fee counterfactual is +39.62%, not +19.94%.
+
+The previously-cited 180-day result (+38.64%, DD 9.57%, MAR 4.04) began _three days after the exact trough of that drawdown_. It was window-selected by construction, not evidence of a higher sustainable rate. The defensible annual expectation is **≈+20% with a ~20% drawdown and a ~5-month recovery**.
+
+### Run 2 — the Sniper's +27% is a burst, not a run-rate
+
+Same symbol, same 1m data, same window, same everything except the two P0 admission thresholds. The ladder is measured, not assumed — each row is a full 259,200-candle run:
+
+| NEAR config (180d)                         | Net         | Trades | WR     | PF       | Max DD    |
+| ------------------------------------------ | ----------- | ------ | ------ | -------- | --------- |
+| Global `1.5` / `1.5` (production default)  | **+3.46%**  | 5      | 40.00% | 1.67     | 5.19%     |
+| Volatility `1.0` / net-R `1.5`             | +14.87%     | 10     | 50.00% | 2.54     | 4.74%     |
+| Volatility `1.0` / net-R `1.0` (committed) | **+22.40%** | 12     | 58.33% | **3.24** | **4.74%** |
+
+`InsufficientVolatility` fell from **41.7%** of post-sweep candidates to **18.7%**, while `InsufficientNetR` stayed at **0.3–0.5%** in every configuration — the volatility gate is the binding constraint, and the net-R gate accounts for the residual $74 between rows 2 and 3. Both had to be relaxed: the volatility knob alone leaves **7.5 percentage points** on the table.
+
+Raising both shields from 1.0 to 1.5 removed **7 trades** and **$189.32 of net profit** ($223.96 → $34.64); the removed set contained **five winners against two losers**. On NEAR the volatility gate was **anti-selective** — the pair's quiet 1m minutes were profitable, so a shield fitted on a different regime simply starved the strategy.
+
+The opportunity set is episodic, not steady: **0 trades in May, 0 in June**, then 1 / 1 / 3 / **7** across July–October. Equity went $1,000 → **$952.55** by 2026-08-25 (the max DD) and then to $1,223.96 by 2026-10-26 — **seven of twelve trades, and essentially the entire profit, landed after 2026-10-01**. Longest dry spell: **49.6 days**.
+
+A 60-day control run reproduces the documented baseline (**+28.49%**, 10 trades, PF 6.19, DD 2.22%), confirming the harness is deterministic — which is exactly the point: the 60-day window _was_ the cluster, compressed. Ten of the twelve 180-day trades fall inside it.
+
+### What this changed in the repository
+
+| Action                                                                                                      | Rationale                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` + `MIN_NET_RR_NEARUSDT=1.0` (`.env`, `.env.emilia`, `.env.example`) | Unlocks the audited NEAR configuration while the global `1.5` shields stay armed for every other symbol (APTUSDT included). Both gates had to move: volatility alone measures +14.87%, not +22.40%. Per-symbol resolution goes through `resolveSymbolConfig()`, so no other pair is affected. |
+| `src/backtest/run.ts` — `for (const c of fetched1m) candles1m.push(c)`                                      | `push(...fetched1m)` spread 259,200 arguments and threw `Maximum call stack size exceeded` **after** the 1m history had already been fetched. Any Sniper window beyond ~100k 1m candles crashed.                                                                                              |
+| This section + `data/endurance_report.md`                                                                   | The numbers above are the only quantitative reference the repository endorses for these two engines. Superseded figures are left in place but marked as window-selected.                                                                                                                      |
+
+> **Standing caveat**: both engines remain **regime-dependent**. S14 needs a trending year and costs half its gross edge in fees; S12 needs volatility to pay a 0.110% round trip and can go two months without a single valid setup. Neither result should be extrapolated into a monthly return target.
+
+---
+
 ## ⚡ Hybrid Smart Entry Architecture (Market vs Limit) — v2026-09-29
 
 **Problem**: Entering Market orders at the close of the 15m signal candle is mathematically unprofitable in SMC. Price has already "run away", SL becomes huge, R:R breaks, and Bybit rejects TP/SL with error [10001] (TP/SL limits).
@@ -85,7 +140,9 @@ const priceDiffPct = idealEntry.minus(currentPrice).div(idealEntry).abs();
 // Discount Trap fix: a better-than-ideal price MUST be taken at Market. A Limit at
 // idealEntry would be marketable on arrival and fill at a different price, breaking SL geometry.
 const isLong = idealEntry.gt(new Decimal(result.levels.stopLoss));
-const isDiscount = isLong ? currentPrice.lte(idealEntry) : currentPrice.gte(idealEntry);
+const isDiscount = isLong
+  ? currentPrice.lte(idealEntry)
+  : currentPrice.gte(idealEntry);
 const useMarketOrder = isDiscount || priceDiffPct.lte(smartThreshold);
 
 const orderType = useMarketOrder ? "Market" : "Limit";
@@ -94,11 +151,11 @@ const limitPrice = useMarketOrder
   : formatPrice(idealEntry, new Decimal(instrument.tickSize)); // never toFixed()
 ```
 
-| Condition                                                              | Order Type       | Price        |
-| ---------------------------------------------------------------------- | ---------------- | ------------ |
-| **Discount** — live price better than `idealEntry` (Long ≤ / Short ≥)  | **Market** (IOC) | —            |
-| No discount AND `\|idealEntry - livePrice\| / idealEntry ≤ 0.15%`       | **Market** (IOC) | —            |
-| No discount AND `\|idealEntry - livePrice\| / idealEntry > 0.15%`       | **Limit** (GTC)  | `idealEntry` |
+| Condition                                                             | Order Type       | Price        |
+| --------------------------------------------------------------------- | ---------------- | ------------ |
+| **Discount** — live price better than `idealEntry` (Long ≤ / Short ≥) | **Market** (IOC) | —            |
+| No discount AND `\|idealEntry - livePrice\| / idealEntry ≤ 0.15%`     | **Market** (IOC) | —            |
+| No discount AND `\|idealEntry - livePrice\| / idealEntry > 0.15%`     | **Limit** (GTC)  | `idealEntry` |
 
 **Config**: `SMART_ENTRY_THRESHOLD_PCT=0.15` (in `.env`, interpreted as 0.15% → 0.0015 in code).
 
@@ -120,13 +177,14 @@ Both entry paths (`executeStagedEntry()` auto, `handleTradeApproval()` manual) r
 **Problem**: In manual approval mode (`AUTO_TRADING=false`), price can move significantly between signal generation and user clicking "Approve". If price crosses the calculated SL during this wait, the order would be rejected by Bybit with error [10001] (StopLoss set for Buy position should lower than base_price). The same risk exists in auto-trading mode (`AUTO_TRADING=true`) where `executeStagedEntry()` fires immediately after signal detection.
 
 **Solution**: **Pre-flight SL & TP validation** at two points:
+
 1. **At approval time** (manual mode): Before sending order to ExecutionEngine (in `StrategyEngine.handleTradeApproval`)
 2. **At auto-execution time** (auto mode): Inside `executeStagedEntry()` before calling `executionEngine.execute()`
 
 Both paths fetch `getLivePrice()` (with fallback to last closed candle) and validate against the calculated SL/TP:
 
 1. **Pre-flight SL breach check** — abort if live price already breached SL
-2. **Pre-flight TP reached check** — abort if live price already reached TP  
+2. **Pre-flight TP reached check** — abort if live price already reached TP
 3. **Slippage Guard (0.2% toward TP)** — abort if price moved >0.2% toward TP (R:R degraded)
 4. **Dynamic Market vs Limit Re-evaluation** — re-evaluate at live tick using `smartEntryThresholdPct` (0.15%)
 
@@ -171,10 +229,10 @@ if (currentPrice) {
 3. The **0.2% Slippage Guard (deviation toward TP) is applied ONLY to Market orders**.
 4. **Limit orders bypass the slippage guard** — they wait for a pullback by design; a slippage check would incorrectly abort valid pullback setups.
 
-| Order Type | SL Breach Check | TP Reached Check | 0.2% Slippage Guard |
-|------------|-----------------|------------------|---------------------|
-| **Market** | ✅ Unconditional | ✅ Unconditional | ✅ Applied (>0.2% aborts) |
-| **Limit** | ✅ Unconditional | ✅ Unconditional | ❌ Bypassed (waits for pullback) |
+| Order Type | SL Breach Check  | TP Reached Check | 0.2% Slippage Guard              |
+| ---------- | ---------------- | ---------------- | -------------------------------- |
+| **Market** | ✅ Unconditional | ✅ Unconditional | ✅ Applied (>0.2% aborts)        |
+| **Limit**  | ✅ Unconditional | ✅ Unconditional | ❌ Bypassed (waits for pullback) |
 
 **Invariant**: Market vs Limit decision is **purely at live tick** — no pre-commitment at signal time. Slippage Guard is **context-aware**: Market orders only.
 
@@ -388,29 +446,29 @@ async execute(plan: PositionPlan): Promise<ExecutionResult> {
 
 ## 📚 Technical Deep-Dives (see AGENTS.md for full details)
 
-| Topic                                                                     | Section in AGENTS.md |
-| ------------------------------------------------------------------------- | -------------------- |
-| **Adaptive Fractioning** (tick-agnostic, profit-guarded management)       | §6, Invariant 41     |
-| **Hybrid Smart Entry** (Market vs Limit at the live tick)                 | §7.20                |
-| **Directional Slippage Guard** (vector, Market-only, 0.2%)                | §4.4.3               |
-| **Strict SL Calculation** (single source of truth, inverted zone defense) | §7.6                 |
-| **V5 Sniper Mode** (single-pass Scenario 12 on 1m closes)                | §7.4, §7.13.2        |
-| **Ghost Signal Elimination** (mitigated structures/zone tracking)         | §7.12, §7.13, §7.19  |
-| **News Embargo Filter** (±30 min around high-impact USD news)             | §7.8                 |
-| **Funding Monitor** (delta-neutral arbitrage alerts)                      | §7.9                 |
-| **Dynamic Macro Context** (lookahead bias elimination in backtest)        | §7.10                |
-| **Timezone Sanity Check** (Docker + luxon + tzdata)                       | §7.11                |
-| **Same-Candle SL/TP Resolution** (conservative lookahead fix)             | §7.15                |
-| **Cooldown Logic** (only after LOSS, dynamic timeframe)                   | §7.17                |
-| **Scenario 11** (Mitigation Block implementation)                         | §8.4                 |
-| **Scenario 13** (Top-Down Order Flow Matrix + 3 Brain modules — **ARCHIVED**) | §8.6                 |
-| **Volume Baseline Causality** (SMA excludes the impulse candle)          | Invariant 56         |
-| **Bidirectional Construction** (both directions evaluated)                | Invariant 57         |
-| **Post-Fill Bookkeeping & Panic Close** (orphan guard, verified flatness)  | §5.11, §5.12, Invariants 23/34/47/49 |
-| **Partial-Fill Limit Safety** (`PartiallyFilled` never closed as CANCELLED) | §3.4, Invariant 53   |
-| **Backtest Entry Gate** (`zoneDetails` OR `structureDetails`)             | Invariant 48         |
-| **Database CRUD Audit**                                                   | §9.1                 |
-| **Critical Anti-Patterns** (consolidated, grouped)                        | §16                  |
+| Topic                                                                         | Section in AGENTS.md                 |
+| ----------------------------------------------------------------------------- | ------------------------------------ |
+| **Adaptive Fractioning** (tick-agnostic, profit-guarded management)           | §6, Invariant 41                     |
+| **Hybrid Smart Entry** (Market vs Limit at the live tick)                     | §7.20                                |
+| **Directional Slippage Guard** (vector, Market-only, 0.2%)                    | §4.4.3                               |
+| **Strict SL Calculation** (single source of truth, inverted zone defense)     | §7.6                                 |
+| **V5 Sniper Mode** (single-pass Scenario 12 on 1m closes)                     | §7.4, §7.13.2                        |
+| **Ghost Signal Elimination** (mitigated structures/zone tracking)             | §7.12, §7.13, §7.19                  |
+| **News Embargo Filter** (±30 min around high-impact USD news)                 | §7.8                                 |
+| **Funding Monitor** (delta-neutral arbitrage alerts)                          | §7.9                                 |
+| **Dynamic Macro Context** (lookahead bias elimination in backtest)            | §7.10                                |
+| **Timezone Sanity Check** (Docker + luxon + tzdata)                           | §7.11                                |
+| **Same-Candle SL/TP Resolution** (conservative lookahead fix)                 | §7.15                                |
+| **Cooldown Logic** (only after LOSS, dynamic timeframe)                       | §7.17                                |
+| **Scenario 11** (Mitigation Block implementation)                             | §8.4                                 |
+| **Scenario 13** (Top-Down Order Flow Matrix + 3 Brain modules — **ARCHIVED**) | §8.6                                 |
+| **Volume Baseline Causality** (SMA excludes the impulse candle)               | Invariant 56                         |
+| **Bidirectional Construction** (both directions evaluated)                    | Invariant 57                         |
+| **Post-Fill Bookkeeping & Panic Close** (orphan guard, verified flatness)     | §5.11, §5.12, Invariants 23/34/47/49 |
+| **Partial-Fill Limit Safety** (`PartiallyFilled` never closed as CANCELLED)   | §3.4, Invariant 53                   |
+| **Backtest Entry Gate** (`zoneDetails` OR `structureDetails`)                 | Invariant 48                         |
+| **Database CRUD Audit**                                                       | §9.1                                 |
+| **Critical Anti-Patterns** (consolidated, grouped)                            | §16                                  |
 
 ---
 
@@ -494,17 +552,17 @@ _Full implementation details: [AGENTS.md §7.8](AGENTS.md#78-news-filter-news-em
 
 **Solution**: **FundingMonitorService** — independent passive service polling Bybit tickers every 30 min for funding rates.
 
-| Component                     | Detail                                                                                                      |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| **Source**                    | Bybit V5 `getTickers({ category: 'linear' })`                                                               |
-| **Poll Interval**             | 30 minutes                                                                                                  |
-| **Tracked Symbols**           | `FUNDING_MONITOR_SYMBOLS` (default: `BTCUSDT,ETHUSDT,SOLUSDT`)                                              |
-| **Alert Threshold**           | `FUNDING_ALERT_THRESHOLD_PCT=0.0` — rate ≤ 0% triggers alert                                                     |
-| **Restore Threshold**         | `FUNDING_RESTORE_THRESHOLD_PCT=0.015` — rate ≥ +0.015% triggers restore                                         |
-| **State Tracking**            | Per-symbol `isAlerted` boolean to prevent spam                                                              |
-| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nCoin: {symbol}\nRate: {rate}%\nRecommend closing arbitrage!`                    |
+| Component                     | Detail                                                                                             |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| **Source**                    | Bybit V5 `getTickers({ category: 'linear' })`                                                      |
+| **Poll Interval**             | 30 minutes                                                                                         |
+| **Tracked Symbols**           | `FUNDING_MONITOR_SYMBOLS` (default: `BTCUSDT,ETHUSDT,SOLUSDT`)                                     |
+| **Alert Threshold**           | `FUNDING_ALERT_THRESHOLD_PCT=0.0` — rate ≤ 0% triggers alert                                       |
+| **Restore Threshold**         | `FUNDING_RESTORE_THRESHOLD_PCT=0.015` — rate ≥ +0.015% triggers restore                            |
+| **State Tracking**            | Per-symbol `isAlerted` boolean to prevent spam                                                     |
+| **Telegram Alert (Negative)** | `⚠️ [FUNDING ALERT]\nCoin: {symbol}\nRate: {rate}%\nRecommend closing arbitrage!`                  |
 | **Telegram Alert (Restore)**  | `🟢 [FUNDING RESTORED]\nCoin: {symbol}\nRate: +{rate}% (APY: ~{apy}%)\nArbitrage can be reopened!` |
-| **Public API**                | `getCurrentRates(): Map<string, Decimal>` for `/status` command                                             |
+| **Public API**                | `getCurrentRates(): Map<string, Decimal>` for `/status` command                                    |
 
 **Integration**: Conditionally created if `ENABLE_FUNDING_MONITOR=true`, started via `fundingMonitor.start()`, graceful shutdown via `fundingMonitor.stop()`. `/status` shows funding rates.
 
@@ -592,24 +650,24 @@ _Full implementation details: [AGENTS.md §7.11](AGENTS.md#711-timezone-sanity-c
 **Brain modules**: `src/engine/brain/htfRoadmap.ts`, `src/engine/brain/volumeExhaustion.ts`, `src/engine/tpResolver.ts`
 **Runtime requirement (historical)**: `ENABLE_SNIPER_MODE=true` — the live engine only forwards 1m candles to the router under that flag, and S13 failed closed without them.
 
-**Core premise**: no entry unless **three independent timeframes agree in a strict causal order**. S13 was the apex orchestrator — the 4H defined *where* price is going, the 15m decided *whether* the pullback is exhausted, and the 1m only provided the trigger and the precision stop.
+**Core premise**: no entry unless **three independent timeframes agree in a strict causal order**. S13 was the apex orchestrator — the 4H defined _where_ price is going, the 15m decided _whether_ the pullback is exhausted, and the 1m only provided the trigger and the precision stop.
 
-| Gate | Timeframe | Question answered | Rejection keys |
-| --- | --- | --- | --- |
-| **1. Roadmap** | 4H | Is there a directional bias and a structural liquidity draw? | `noHtfRoadmap`, `htfNeutral` |
-| **2. POI selection** | 15m | Which zone sits between price and the 4H target, inside the proximity band (`3 × atr15m`)? | `noPoi` |
-| **3. Volume exhaustion** | 15m | Did counter-pressure decay into the touch, and did the touch print a reaction surge? | `volumeInvalid`, `noPullbackOrigin`, `insufficientPullbackCandles`, `pullbackVolumeHeavy`, `poiViolated`, `noPoiTouch`, `noReaction`, `insufficientAsymmetry` |
-| **4. Micro trigger** | 1m | Fresh CHoCH/BOS after the touch minute (strict causality) + precision stop | `noReaction` |
-| **5. TP resolution** | Structure | Is there a real target beyond entry that clears the `DYNAMIC_TP_MIN_RR` floor? | `tpInvalid` |
-| **6. Mitigation tagging** | — | Emit `zoneDetails` + `structureDetails` so the trigger is burned on entry | `triggered` |
+| Gate                      | Timeframe | Question answered                                                                          | Rejection keys                                                                                                                                                |
+| ------------------------- | --------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Roadmap**            | 4H        | Is there a directional bias and a structural liquidity draw?                               | `noHtfRoadmap`, `htfNeutral`                                                                                                                                  |
+| **2. POI selection**      | 15m       | Which zone sits between price and the 4H target, inside the proximity band (`3 × atr15m`)? | `noPoi`                                                                                                                                                       |
+| **3. Volume exhaustion**  | 15m       | Did counter-pressure decay into the touch, and did the touch print a reaction surge?       | `volumeInvalid`, `noPullbackOrigin`, `insufficientPullbackCandles`, `pullbackVolumeHeavy`, `poiViolated`, `noPoiTouch`, `noReaction`, `insufficientAsymmetry` |
+| **4. Micro trigger**      | 1m        | Fresh CHoCH/BOS after the touch minute (strict causality) + precision stop                 | `noReaction`                                                                                                                                                  |
+| **5. TP resolution**      | Structure | Is there a real target beyond entry that clears the `DYNAMIC_TP_MIN_RR` floor?             | `tpInvalid`                                                                                                                                                   |
+| **6. Mitigation tagging** | —         | Emit `zoneDetails` + `structureDetails` so the trigger is burned on entry                  | `triggered`                                                                                                                                                   |
 
 ### The three Brain modules
 
-| Module | Responsibility |
-| --- | --- |
-| **`htfRoadmap.ts`** — Module 1 | Builds the 4H dealing range, the dominant institutional bias and the primary liquidity draw. Pure read-only lens: `Decimal`-only math, no I/O, no input mutation, and **fails closed** (`isValid = false`) on degenerate data instead of fabricating a range. `NEUTRAL` bias means "no trade allowed". |
-| **`volumeExhaustion.ts`** — Module 2 | Answers two questions on 15m candles: *(1)* did selling/buying pressure actually dry up during the pullback, and *(2)* did the POI touch print an institutional volume surge? The baseline SMA ends **before** the pullback origin, so the impulse candle is excluded from the average (Invariant 56). Returns a partitioned `failureCode` so the funnel stays truthful instead of collapsing into one "not exhausted" bucket. |
-| **`tpResolver.ts`** — Module 3 | Replaces the blind `k × R` target with a **structural** one. Collects candidates (macro pools, HTF/15m swings, range boundaries, session extremes, zones, the roadmap target) and picks the first that clears `DYNAMIC_TP_MIN_RR`, capped by `DYNAMIC_TP_MAX_RR`. Each candidate carries a `major` classification; with `skipMinorObstacles: true` (the archived S13 setting) a *minor* swing inside the floor is skipped, while a **major** barrier (macro pool / HTF level) is treated as a genuine wall and blocks the candidate. Scenarios 1, 5 and 12 pass `false` — the nearest candidate is a hard wall. |
+| Module                               | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`htfRoadmap.ts`** — Module 1       | Builds the 4H dealing range, the dominant institutional bias and the primary liquidity draw. Pure read-only lens: `Decimal`-only math, no I/O, no input mutation, and **fails closed** (`isValid = false`) on degenerate data instead of fabricating a range. `NEUTRAL` bias means "no trade allowed".                                                                                                                                                                                                                                                                                                          |
+| **`volumeExhaustion.ts`** — Module 2 | Answers two questions on 15m candles: _(1)_ did selling/buying pressure actually dry up during the pullback, and _(2)_ did the POI touch print an institutional volume surge? The baseline SMA ends **before** the pullback origin, so the impulse candle is excluded from the average (Invariant 56). Returns a partitioned `failureCode` so the funnel stays truthful instead of collapsing into one "not exhausted" bucket.                                                                                                                                                                                  |
+| **`tpResolver.ts`** — Module 3       | Replaces the blind `k × R` target with a **structural** one. Collects candidates (macro pools, HTF/15m swings, range boundaries, session extremes, zones, the roadmap target) and picks the first that clears `DYNAMIC_TP_MIN_RR`, capped by `DYNAMIC_TP_MAX_RR`. Each candidate carries a `major` classification; with `skipMinorObstacles: true` (the archived S13 setting) a _minor_ swing inside the floor is skipped, while a **major** barrier (macro pool / HTF level) is treated as a genuine wall and blocks the candidate. Scenarios 1, 5 and 12 pass `false` — the nearest candidate is a hard wall. |
 
 ### Stop anchoring — full reaction window
 
@@ -627,12 +685,12 @@ The touch minute is part of the structure that must be violated before the react
 
 `ENABLE_SNIPER_MODE=true`, `ACTIVE_SCENARIOS=13` (historical — `13` is no longer accepted), `DYNAMIC_TP_MIN_RR=1.5`, `DYNAMIC_TP_MAX_RR=6.0`, `SNIPER_LIMIT_EXPIRATION_CANDLES=6`, `MAX_WORKING_CAPITAL=3000`:
 
-| Symbol | Net | Trades | Win rate | PF | Max DD | Fees |
-| --- | --- | --- | --- | --- | --- | --- |
-| BTCUSDT | −$17.37 | 5 | 40.0% | 0.76 | 2.61% | $26.37 |
-| SOLUSDT | +$0.13 | 3 | 33.3% | 1.01 | 2.60% | $10.52 |
-| NEARUSDT | +$88.25 | 8 | 50.0% | 2.21 | 4.45% | $21.18 |
-| **Combined** | **+$71.01** | **16** | **43.75%** | — | **< 4.5%** | **$58.07** |
+| Symbol       | Net         | Trades | Win rate   | PF   | Max DD     | Fees       |
+| ------------ | ----------- | ------ | ---------- | ---- | ---------- | ---------- |
+| BTCUSDT      | −$17.37     | 5      | 40.0%      | 0.76 | 2.61%      | $26.37     |
+| SOLUSDT      | +$0.13      | 3      | 33.3%      | 1.01 | 2.60%      | $10.52     |
+| NEARUSDT     | +$88.25     | 8      | 50.0%      | 2.21 | 4.45%      | $21.18     |
+| **Combined** | **+$71.01** | **16** | **43.75%** | —    | **< 4.5%** | **$58.07** |
 
 NEAR is identical to the earlier baseline (+8.83%, PF 2.21, 4.45% DD). BTC matches the documented pre-D5 −$17.37 and SOL is breakeven at +$0.13. Fee drag is 75% lower than the removed blind 15m run ($231.79).
 
@@ -640,19 +698,18 @@ NEAR is identical to the earlier baseline (+8.83%, PF 2.21, 4.45% DD). BTC match
 
 ## 🧠 Mitigated Structures (Ghost Signal Elimination) — v2026-09-24
 
-
 **Problem**: Scenario 6 (SMS) was generating duplicate entries on the same CHoCH structure. After a trade closed, the CHoCH structure that triggered the entry was NOT marked as "used". When a new killzone arrived, the bot re-detected the same old CHoCH and entered again — same price, 5 hours apart.
 
 **Solution**: **mitigatedStructures** tracking — structures (SMS, CHoCH, BOS) that have been traded and should never be re-used.
 
-| Component              | Implementation                                                                                             |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **BacktestState**      | Added `mitigatedStructures: MitigatedStructure[]`                                                          |
-| **MitigatedStructure** | `{ type: 'SMS' \| 'CHoCH' \| 'BOS', timestamp: number, price: string, direction: 'BULLISH' \| 'BEARISH' }` |
+| Component                | Implementation                                                                                                                                                                                                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **BacktestState**        | Added `mitigatedStructures: MitigatedStructure[]`                                                                                                                                                                                                                        |
+| **MitigatedStructure**   | `{ type: 'SMS' \| 'CHoCH' \| 'BOS', timestamp: number, price: string, direction: 'BULLISH' \| 'BEARISH' }`                                                                                                                                                               |
 | **On trade open (live)** | Both `executeStagedEntry()` & `handleTradeApproval()` push the trigger `structureDetails` to `mitigatedStructures` **immediately after the exchange confirms the order — before `transition(IN_TRADE)`**, the 500 ms `avgPrice` fetch and `db.openTrade()` (v2026-10-21) |
-| **On trade close**     | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures`                                     |
-| **ScenarioRouter**     | Filters `patternData.structures` via `filterMitigatedStructures()` — **timestamp-only match** (v2026-10-16) |
-| **Scenarios 6 & 11**   | Call `setStructureDetails()` with trigger CHoCH                                                            |
+| **On trade close**       | Trigger structure (CHoCH/SMS) timestamp added to `mitigatedStructures`                                                                                                                                                                                                   |
+| **ScenarioRouter**       | Filters `patternData.structures` via `filterMitigatedStructures()` — **timestamp-only match** (v2026-10-16)                                                                                                                                                              |
+| **Scenarios 6 & 11**     | Call `setStructureDetails()` with trigger CHoCH                                                                                                                                                                                                                          |
 
 **Result**: Scenario 6 on ETHUSDT — the duplicate 06:30/11:30 entries at same price are eliminated. The CHoCH is marked as "used" at entry (live) and after first trade.
 
@@ -785,18 +842,18 @@ All timestamps in **UTC** for cross-referencing with live logs.
 
 Alongside the text report, the backtester writes an interactive equity curve to `data/`:
 
-| File | Content |
-| --- | --- |
-| `data/Backtest_Report_<SYMBOL>.txt` | Full text report (printed to console too) |
+| File                                | Content                                                                                  |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `data/Backtest_Report_<SYMBOL>.txt` | Full text report (printed to console too)                                                |
 | `data/Backtest_Chart_<SYMBOL>.html` | Self-contained Chart.js equity curve + Lightweight Charts candlestick panel (CDN-loaded) |
 
 The chart is generated automatically on every run — no extra flag needed. It renders four series:
 
-| Series | Axis | Meaning |
-| --- | --- | --- |
-| **Balance (USDT)** | Left | Account equity after each closed trade, sorted by exit time |
-| **Running Peak** | Left | High-water mark — the maximum balance reached so far |
-| **Closed Drawdown (%)** | Right | Dip below the running peak as locked in by each closed trade |
+| Series                        | Axis  | Meaning                                                                             |
+| ----------------------------- | ----- | ----------------------------------------------------------------------------------- |
+| **Balance (USDT)**            | Left  | Account equity after each closed trade, sorted by exit time                         |
+| **Running Peak**              | Left  | High-water mark — the maximum balance reached so far                                |
+| **Closed Drawdown (%)**       | Right | Dip below the running peak as locked in by each closed trade                        |
 | **Max Floating Drawdown (%)** | Right | Flat dashed reference line at the deepest intra-trade dip reported by the simulator |
 
 Equity segments are **green** while the account is making new highs and **red** while it is below its
@@ -819,12 +876,12 @@ backtest run.
 Directly below the equity curve, the same HTML file renders an interactive **TradingView Lightweight
 Charts** terminal built from the exact `candlesLtf` array the simulation ran on:
 
-| Element | Meaning |
-| --- | --- |
-| **Green / red candles** | LTF OHLC (15m by default; the panel title is derived from the actual candle spacing) |
-| **▲ arrow (below bar)** | `Buy` entry — green |
-| **▼ arrow (above bar)** | `Sell` entry — red |
-| **● circle** | Exit marker: green above the bar for a win, red below the bar for a loss, labelled `TP` / `SL` / `BOTH` |
+| Element                 | Meaning                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| **Green / red candles** | LTF OHLC (15m by default; the panel title is derived from the actual candle spacing)                    |
+| **▲ arrow (below bar)** | `Buy` entry — green                                                                                     |
+| **▼ arrow (above bar)** | `Sell` entry — red                                                                                      |
+| **● circle**            | Exit marker: green above the bar for a win, red below the bar for a loss, labelled `TP` / `SL` / `BOTH` |
 
 Marker timestamps are snapped to the nearest preceding candle (Lightweight Charts requires every
 marker time to exist in the series) and sorted ascending. The renderer detects the CDN version at
@@ -918,63 +975,63 @@ docker compose up -d
 
 ## ⚙️ Environment Variables
 
-| Variable                           | Required |          Default          | Description                                                                                                                            |
-| ---------------------------------- | :------: | :-----------------------: | -------------------------------------------------------------------------------------------------------------------------------------- |
-| **BYBIT_API_KEY**                  |    ✅    |             —             | Bybit API Key                                                                                                                          |
-| **BYBIT_API_SECRET**               |    ✅    |             —             | Bybit API Secret                                                                                                                       |
-| **SYMBOLS**                        |    ✅    |             —             | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`                                                                                             |
-| **DATABASE_URL**                   |    ✅    |             —             | Supabase Direct Connection string                                                                                                      |
-| **TELEGRAM_BOT_TOKEN**             |    ✅    |             —             | BotFather token                                                                                                                        |
-| **TELEGRAM_CHAT_ID**               |    ✅    |             —             | Your numeric chat ID (security)                                                                                                        |
-| **DEMO_TRADING**                   |          |          `false`          | `true` = Bybit Demo environment (virtual balance, real market data). Forces `TESTNET=false`.                      |
-| **TESTNET**                        |          |          `true`           | `true` = Bybit testnet. `false` = mainnet (real money) unless `DEMO_TRADING=true`. Ignored when `DEMO_TRADING=true`. |
-| **RISK_PERCENT**                   |    ✅    |             —             | Base risk per trade (%). Required, must be > 0.                                                                                          |
-| **REDUCED_RISK_PERCENT**           |          |            `1`            | Risk after 3 consecutive losses (%). Must be ≤ `RISK_PERCENT`.                                                                          |
-| **LEVERAGE**                       |          |           `10`            | Isolated margin leverage                                                                                                               |
-| **AUTO_TRADING**                   |          |          `false`          | `true` = auto-execute, `false` = manual approval                                                                                       |
-| **TRADE_APPROVAL_TIMEOUT_MINUTES** |          |            `5`            | Approval window for manual trades                                                                                                      |
-| **HISTORY_CANDLES**                |          |           `200`           | 15m/4H history (max 1000)                                                                                                              |
-| **MACRO_CANDLES**                  |          |          `1000`           | 1W/1D macro context (max 1000)                                                                                                         |
-| **LTF_TIMEFRAME**                  |          |           `15`            | Lower timeframe (15m)                                                                                                                  |
-| **HTF_TIMEFRAME**                  |          |           `240`           | Higher timeframe (4H)                                                                                                                  |
-| **ENABLE_LIVE_TEST_ORDERS**        |          |          `false`          | Enable `/test_live_order` (real Demo orders)                                                                                           |
-| **ACTIVE_SCENARIOS**               |          |          `1-12`          | Comma-separated scenario IDs, e.g. `1,2,3,5,7`. Unset = all 12 active. Scenario 13 is archived — `13` fails validation.                 |
-| **LOG_LEVEL**                      |          |          `info`           | `debug`, `info`, `warn`, `error`                                                                                                       |
-| **BACKUP_PASSWORD**                |          |             —             | AES-256-CBC encryption password for backups                                                                                            |
-| **ENABLE_FUNDING_MONITOR**         |          |          `false`          | Enable funding rate monitoring                                                                                                         |
-| **FUNDING_MONITOR_SYMBOLS**        |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates                                                                                                   |
-| **FUNDING_ALERT_THRESHOLD_PCT**        |          |           `0.0`           | Alert when funding rate ≤ this value (%)                                                                                                   |
-| **FUNDING_RESTORE_THRESHOLD_PCT**      |          |         `0.015`          | Restore alert when funding rate ≥ this value (%)                                                                                           |
-| **SCENARIOS\_<SYMBOL>**            |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol.                           |
-| **COOLDOWN_CANDLES**               |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m.                  |
-| **SMC_SL_ATR_OFFSET**              |          |           `0.5`           | ATR multiplier for SL offset (default 0.5)                                                                                             |
-| **SMC_DISPLACEMENT_MULTIPLIER**    |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                                            |
-| **SMC_SWEEP_MIN_WICK_RATIO**       |          |          `0.25`           | Sweep absorption: minimum rejection wick as a share of the candle range. Must be strictly between 0 and 1. Read by **Scenario 12** and **Scenario 9** (Turtle Soup). |
-| **S12_SESSION_SWEEPS**             |          |          `false`          | Opt-in S12 sweep source: the newest ASIAN session high/low becomes a sweepable level (macro PDH/PDL/PWH/PWL are always armed).        |
-| **S12_EQH_EQL_SWEEPS**             |          |          `false`          | Opt-in S12 sweep source: 15m EQH/EQL pools become sweepable levels.                                                                     |
-| **MIN_TP_DISTANCE_PCT**            |          |         `0.0035`          | S12 fee-aware target floor: reject setups whose resolved TP sits closer than this fraction of `idealEntry` (0.0035 = 0.35%). Must be `> 0` and `< 0.1`. |
-| **MIN_NET_RR**                     |          |           `1.0`           | **S12 only.** Fee-inclusive reward:risk floor: `(target − roundTripFee) / (stop + roundTripFee) ≥ MIN_NET_RR`. Rejects with the `insufficientNetR` bucket. The verified Sniper profile uses `1.5`. |
-| **MIN_VOLATILITY_FEE_RATIO**       |          |           `1.0`           | **S12 only.** ATR-to-fee admission multiple: requires `1m ATR% ≥ ratio × round-trip taker fee (~0.110%)`. Rejects with the `insufficientVolatility` bucket. The verified Sniper profile uses `1.5` (ATR ≥ ~0.165%). |
-| **SMART_ENTRY_THRESHOLD_PCT**      |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                                  |
-| **LIMIT_EXPIRATION_CANDLES**       |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                                         |
-| **SNIPER_LIMIT_EXPIRATION_CANDLES**|          |           `15`            | Limit order lifetime in **1m** candles for Sniper Mode (default 15 = 15 min). Independent of the Classic knob.                          |
-| **ENABLE_DYNAMIC_TP**              |          |          `false`          | Structural take-profit resolution for Scenarios 1, 5 and 12 via `tpResolver.ts`. `false` = fixed `FIXED_TP_RR × R` target.              |
-| **DYNAMIC_TP_MIN_RR**              |          |           `1.5`           | Structural target floor in R multiples                                                                                                  |
-| **DYNAMIC_TP_MAX_RR**              |          |           `6.0`           | Hard cap on structural targets in R multiples                                                                                           |
-| **FIXED_TP_RR**                    |          |           `3.0`           | Fallback take-profit in R multiples when `ENABLE_DYNAMIC_TP=false` (or when no structural target resolves)                              |
-| **DYNAMIC_TP_REQUIRE_TARGET**      |          |          `false`          | `true` = reject the setup when no structural target clears `DYNAMIC_TP_MIN_RR`; `false` = fall back to `FIXED_TP_RR × R`                |
-| **PREFLIGHT_BUFFER_PCT**           |          |          `0.05`           | Pre-flight spread buffer in % (default 0.05 = 0.05%)                                                                                   |
-| **ENABLE_SNIPER_MODE**             |          |          `false`          | Enable the 1m execution path — Scenario 12 (Sniper Touch) evaluated on every 1m close (single-pass, no intermediate state)              |
-| **BACKTEST_DAYS**                  |          |           `60`            | History window for the backtest — shared by 1m, LTF and HTF loaders                                                                    |
-| **BACKTEST_CSV_PATH**              |          |             —             | Path to local CSV file for offline backtesting                                                                                         |
-| **SNIPER_DISPLACEMENT_MULTIPLIER** |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                                    |
-| **DATA_DIR**                       |          |          `data`           | Local data directory for CSV backtest files                                                                                            |
-| **MAX_WORKING_CAPITAL**            |          |   unset (unlimited)      | Strategy capacity limit in USDT. When set, it must be a **positive** number — a literal `0` fails config validation. If balance > cap, position sizing, margin buffer and the Drawdown Guard all use the capped working balance. |
-| **USE_LOCAL_CACHE_ONLY**           |          |          `false`          | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys. |
-| **ENABLE_HEALTHCHECK_SERVER**      |          |          `false`          | Enable Express health check server for cloud platforms (e.g., Render.com). Default `false` for security (Secure Mode). **Required `true` on Render.com.** |
-| **ALLOWED_DAYS_OF_WEEK**           |          |        `1,2,3,4,5`        | ISO weekdays in **UTC** (1=Monday ... 7=Sunday) allowed for **NEW entries**. Default blocks weekend entries. Set `1,2,3,4,5,6,7` to enable weekend entries. Entry filter only — never blocks active trade management. |
-| **ENFORCE_KILLZONES**              |          |          `true`           | `true` = entries require London/NY killzone. `false` = bypass ALL killzone gates globally (backtesting without session constraints). Entry filter only — active trade management is never affected. |
-| **ENABLE_TRADE_NOTIFICATIONS**     |          |          `true`           | `false` = mute routine trade messages (Setup Found / Order Opened / Position Closed / Cancelled Limit). Critical `logger.error` alerts are still delivered via the global Telegram hook. |
+| Variable                            | Required |          Default          | Description                                                                                                                                                                                                                      |
+| ----------------------------------- | :------: | :-----------------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **BYBIT_API_KEY**                   |    ✅    |             —             | Bybit API Key                                                                                                                                                                                                                    |
+| **BYBIT_API_SECRET**                |    ✅    |             —             | Bybit API Secret                                                                                                                                                                                                                 |
+| **SYMBOLS**                         |    ✅    |             —             | Comma-separated: `BTCUSDT,ETHUSDT,SOLUSDT`                                                                                                                                                                                       |
+| **DATABASE_URL**                    |    ✅    |             —             | Supabase Direct Connection string                                                                                                                                                                                                |
+| **TELEGRAM_BOT_TOKEN**              |    ✅    |             —             | BotFather token                                                                                                                                                                                                                  |
+| **TELEGRAM_CHAT_ID**                |    ✅    |             —             | Your numeric chat ID (security)                                                                                                                                                                                                  |
+| **DEMO_TRADING**                    |          |          `false`          | `true` = Bybit Demo environment (virtual balance, real market data). Forces `TESTNET=false`.                                                                                                                                     |
+| **TESTNET**                         |          |          `true`           | `true` = Bybit testnet. `false` = mainnet (real money) unless `DEMO_TRADING=true`. Ignored when `DEMO_TRADING=true`.                                                                                                             |
+| **RISK_PERCENT**                    |    ✅    |             —             | Base risk per trade (%). Required, must be > 0.                                                                                                                                                                                  |
+| **REDUCED_RISK_PERCENT**            |          |            `1`            | Risk after 3 consecutive losses (%). Must be ≤ `RISK_PERCENT`.                                                                                                                                                                   |
+| **LEVERAGE**                        |          |           `10`            | Isolated margin leverage                                                                                                                                                                                                         |
+| **AUTO_TRADING**                    |          |          `false`          | `true` = auto-execute, `false` = manual approval                                                                                                                                                                                 |
+| **TRADE_APPROVAL_TIMEOUT_MINUTES**  |          |            `5`            | Approval window for manual trades                                                                                                                                                                                                |
+| **HISTORY_CANDLES**                 |          |           `200`           | 15m/4H history (max 1000)                                                                                                                                                                                                        |
+| **MACRO_CANDLES**                   |          |          `1000`           | 1W/1D macro context (max 1000)                                                                                                                                                                                                   |
+| **LTF_TIMEFRAME**                   |          |           `15`            | Lower timeframe (15m)                                                                                                                                                                                                            |
+| **HTF_TIMEFRAME**                   |          |           `240`           | Higher timeframe (4H)                                                                                                                                                                                                            |
+| **ENABLE_LIVE_TEST_ORDERS**         |          |          `false`          | Enable `/test_live_order` (real Demo orders)                                                                                                                                                                                     |
+| **ACTIVE_SCENARIOS**                |          |          `1-12`           | Comma-separated scenario IDs, e.g. `1,2,3,5,7`. Unset = all 12 active. Scenario 13 is archived — `13` fails validation.                                                                                                          |
+| **LOG_LEVEL**                       |          |          `info`           | `debug`, `info`, `warn`, `error`                                                                                                                                                                                                 |
+| **BACKUP_PASSWORD**                 |          |             —             | AES-256-CBC encryption password for backups                                                                                                                                                                                      |
+| **ENABLE_FUNDING_MONITOR**          |          |          `false`          | Enable funding rate monitoring                                                                                                                                                                                                   |
+| **FUNDING_MONITOR_SYMBOLS**         |          | `BTCUSDT,ETHUSDT,SOLUSDT` | Symbols to monitor for funding rates                                                                                                                                                                                             |
+| **FUNDING_ALERT_THRESHOLD_PCT**     |          |           `0.0`           | Alert when funding rate ≤ this value (%)                                                                                                                                                                                         |
+| **FUNDING_RESTORE_THRESHOLD_PCT**   |          |          `0.015`          | Restore alert when funding rate ≥ this value (%)                                                                                                                                                                                 |
+| **SCENARIOS\_<SYMBOL>**             |          |             —             | Per-symbol active scenarios (e.g., `SCENARIOS_BTCUSDT=1,5,6`). Overrides `ACTIVE_SCENARIOS` for that symbol.                                                                                                                     |
+| **COOLDOWN_CANDLES**                |          |           `16`            | Cooldown after SL hit (in LTF candles). Duration = COOLDOWN_CANDLES × LTF_TIMEFRAME minutes. Default 16 = 4h for 15m.                                                                                                            |
+| **SMC_SL_ATR_OFFSET**               |          |           `0.5`           | ATR multiplier for SL offset (default 0.5)                                                                                                                                                                                       |
+| **SMC_DISPLACEMENT_MULTIPLIER**     |          |           `1.5`           | Displacement threshold in ATR (default 1.5)                                                                                                                                                                                      |
+| **SMC_SWEEP_MIN_WICK_RATIO**        |          |          `0.25`           | Sweep absorption: minimum rejection wick as a share of the candle range. Must be strictly between 0 and 1. Read by **Scenario 12** and **Scenario 9** (Turtle Soup).                                                             |
+| **S12_SESSION_SWEEPS**              |          |          `false`          | Opt-in S12 sweep source: the newest ASIAN session high/low becomes a sweepable level (macro PDH/PDL/PWH/PWL are always armed).                                                                                                   |
+| **S12_EQH_EQL_SWEEPS**              |          |          `false`          | Opt-in S12 sweep source: 15m EQH/EQL pools become sweepable levels.                                                                                                                                                              |
+| **MIN_TP_DISTANCE_PCT**             |          |         `0.0035`          | S12 fee-aware target floor: reject setups whose resolved TP sits closer than this fraction of `idealEntry` (0.0035 = 0.35%). Must be `> 0` and `< 0.1`.                                                                          |
+| **MIN_NET_RR**                      |          |           `1.0`           | **S12 only.** Fee-inclusive reward:risk floor: `(target − roundTripFee) / (stop + roundTripFee) ≥ MIN_NET_RR`. Rejects with the `insufficientNetR` bucket. The verified Sniper profile uses `1.5`.                               |
+| **MIN_VOLATILITY_FEE_RATIO**        |          |           `1.0`           | **S12 only.** ATR-to-fee admission multiple: requires `1m ATR% ≥ ratio × round-trip taker fee (~0.110%)`. Rejects with the `insufficientVolatility` bucket. The verified Sniper profile uses `1.5` (ATR ≥ ~0.165%).              |
+| **SMART_ENTRY_THRESHOLD_PCT**       |          |          `0.15`           | Market vs Limit threshold in % (default 0.15 = 0.15%)                                                                                                                                                                            |
+| **LIMIT_EXPIRATION_CANDLES**        |          |            `6`            | Limit order lifetime in LTF candles (default 6 = 1.5h for 15m)                                                                                                                                                                   |
+| **SNIPER_LIMIT_EXPIRATION_CANDLES** |          |           `15`            | Limit order lifetime in **1m** candles for Sniper Mode (default 15 = 15 min). Independent of the Classic knob.                                                                                                                   |
+| **ENABLE_DYNAMIC_TP**               |          |          `false`          | Structural take-profit resolution for Scenarios 1, 5 and 12 via `tpResolver.ts`. `false` = fixed `FIXED_TP_RR × R` target.                                                                                                       |
+| **DYNAMIC_TP_MIN_RR**               |          |           `1.5`           | Structural target floor in R multiples                                                                                                                                                                                           |
+| **DYNAMIC_TP_MAX_RR**               |          |           `6.0`           | Hard cap on structural targets in R multiples                                                                                                                                                                                    |
+| **FIXED_TP_RR**                     |          |           `3.0`           | Fallback take-profit in R multiples when `ENABLE_DYNAMIC_TP=false` (or when no structural target resolves)                                                                                                                       |
+| **DYNAMIC_TP_REQUIRE_TARGET**       |          |          `false`          | `true` = reject the setup when no structural target clears `DYNAMIC_TP_MIN_RR`; `false` = fall back to `FIXED_TP_RR × R`                                                                                                         |
+| **PREFLIGHT_BUFFER_PCT**            |          |          `0.05`           | Pre-flight spread buffer in % (default 0.05 = 0.05%)                                                                                                                                                                             |
+| **ENABLE_SNIPER_MODE**              |          |          `false`          | Enable the 1m execution path — Scenario 12 (Sniper Touch) evaluated on every 1m close (single-pass, no intermediate state)                                                                                                       |
+| **BACKTEST_DAYS**                   |          |           `60`            | History window for the backtest — shared by 1m, LTF and HTF loaders                                                                                                                                                              |
+| **BACKTEST_CSV_PATH**               |          |             —             | Path to local CSV file for offline backtesting                                                                                                                                                                                   |
+| **SNIPER_DISPLACEMENT_MULTIPLIER**  |          |           `1.5`           | Displacement threshold in ATR for 1m CHoCH detection (Sniper Mode). `1.5` = 1.5×ATR                                                                                                                                              |
+| **DATA_DIR**                        |          |          `data`           | Local data directory for CSV backtest files                                                                                                                                                                                      |
+| **MAX_WORKING_CAPITAL**             |          |     unset (unlimited)     | Strategy capacity limit in USDT. When set, it must be a **positive** number — a literal `0` fails config validation. If balance > cap, position sizing, margin buffer and the Drawdown Guard all use the capped working balance. |
+| **USE_LOCAL_CACHE_ONLY**            |          |          `false`          | Offline backtest mode. `true` = load strictly from local `.json` cache files (no Bybit API calls). For CI/CD and dev without API keys.                                                                                           |
+| **ENABLE_HEALTHCHECK_SERVER**       |          |          `false`          | Enable Express health check server for cloud platforms (e.g., Render.com). Default `false` for security (Secure Mode). **Required `true` on Render.com.**                                                                        |
+| **ALLOWED_DAYS_OF_WEEK**            |          |        `1,2,3,4,5`        | ISO weekdays in **UTC** (1=Monday ... 7=Sunday) allowed for **NEW entries**. Default blocks weekend entries. Set `1,2,3,4,5,6,7` to enable weekend entries. Entry filter only — never blocks active trade management.            |
+| **ENFORCE_KILLZONES**               |          |          `true`           | `true` = entries require London/NY killzone. `false` = bypass ALL killzone gates globally (backtesting without session constraints). Entry filter only — active trade management is never affected.                              |
+| **ENABLE_TRADE_NOTIFICATIONS**      |          |          `true`           | `false` = mute routine trade messages (Setup Found / Order Opened / Position Closed / Cancelled Limit). Critical `logger.error` alerts are still delivered via the global Telegram hook.                                         |
 
 > **Removed variables**: `BREAKEVEN_RR_TRIGGER` and `TAKE_PROFIT_RR_RATIO` no longer exist. Break-even management is handled by **Adaptive Fractioning** (`src/risk/tradeManager.ts`); take-profit is always taken from `BaseScenario.calculateLevels()` geometry.
 
@@ -1011,15 +1068,15 @@ Scenario selection is only half of the per-symbol story. The same `<PARAM>_<SYMB
 
 Resolution happens exactly once per symbol through `resolveSymbolConfig()`, and the resolved config is handed to every scenario, to `tpResolver`, and to the reconciliation sweep — **live and backtest alike**. A symbol with no overrides receives the global object unchanged (same identity, zero allocation).
 
-| Overridable parameter | Effect | Where it applies |
-| --- | --- | --- |
-| `SMC_SL_ATR_OFFSET_<SYMBOL>` | ATR multiple used to offset the stop | All zone-based scenarios |
-| `DYNAMIC_TP_MIN_RR_<SYMBOL>` | Structural target floor (must be ≤ global `DYNAMIC_TP_MAX_RR`) | S1, S5, S12 (and S3/S6/S9) |
-| `MIN_TP_DISTANCE_PCT_<SYMBOL>` | Fee-aware target floor | S12 only |
-| `MIN_NET_RR_<SYMBOL>` | Fee-inclusive net R:R floor | S12 only |
-| `MIN_VOLATILITY_FEE_RATIO_<SYMBOL>` | ATR-to-fee admission multiple | S12 only |
-| `SMC_SWEEP_MIN_WICK_RATIO_<SYMBOL>` | Sweep absorption floor | S12, S9 |
-| `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>` | Limit lifetime in 1m candles | Sniper Mode (live reconciliation + backtest) |
+| Overridable parameter                      | Effect                                                         | Where it applies                             |
+| ------------------------------------------ | -------------------------------------------------------------- | -------------------------------------------- |
+| `SMC_SL_ATR_OFFSET_<SYMBOL>`               | ATR multiple used to offset the stop                           | All zone-based scenarios                     |
+| `DYNAMIC_TP_MIN_RR_<SYMBOL>`               | Structural target floor (must be ≤ global `DYNAMIC_TP_MAX_RR`) | S1, S5, S12 (and S3/S6/S9)                   |
+| `MIN_TP_DISTANCE_PCT_<SYMBOL>`             | Fee-aware target floor                                         | S12 only                                     |
+| `MIN_NET_RR_<SYMBOL>`                      | Fee-inclusive net R:R floor                                    | S12 only                                     |
+| `MIN_VOLATILITY_FEE_RATIO_<SYMBOL>`        | ATR-to-fee admission multiple                                  | S12 only                                     |
+| `SMC_SWEEP_MIN_WICK_RATIO_<SYMBOL>`        | Sweep absorption floor                                         | S12, S9                                      |
+| `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>` | Limit lifetime in 1m candles                                   | Sniper Mode (live reconciliation + backtest) |
 
 **Not overridable per symbol**: `DYNAMIC_TP_MAX_RR` is global only — `loadConfig()` therefore validates every per-symbol floor against the global ceiling at parse time, so a symbol can never be configured with floor > cap.
 
@@ -1027,6 +1084,7 @@ Resolution happens exactly once per symbol through `resolveSymbolConfig()`, and 
 
 ```bash
 # Verified V5 Sniper calibration (.env.emilia)
+MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0   # 180d audit: 1.5 → +3.46%, 1.0 → +22.40%
 SMC_SL_ATR_OFFSET_APTUSDT=0.60
 SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
 ```
@@ -1077,16 +1135,16 @@ MAX_WORKING_CAPITAL=20000
 
 > **Deliberately absent from the Tank profile**
 >
-> - `SCENARIOS_<SYMBOL>` — `ACTIVE_SCENARIOS=1,5` already covers all three symbols. A per-symbol override *narrows* that symbol to exactly the listed scenarios; it never adds to the global list.
+> - `SCENARIOS_<SYMBOL>` — `ACTIVE_SCENARIOS=1,5` already covers all three symbols. A per-symbol override _narrows_ that symbol to exactly the listed scenarios; it never adds to the global list.
 > - `MIN_NET_RR`, `MIN_VOLATILITY_FEE_RATIO`, `MIN_TP_DISTANCE_PCT`, `S12_*`, `SNIPER_*` — every one of these gates is evaluated **inside Scenario 12** (plus S9 for the wick ratio). In a Classic deployment they would be dead configuration that reads as protection.
 
-| Aspect              | Setting                    | Rationale                                           |
-| ------------------- | -------------------------- | --------------------------------------------------- |
-| **Timeframes**      | 15m entry / 4H context     | Classic SMC confirmation timeframe                  |
-| **Scenarios**       | 1, 5                       | HTF Continuation + HTF Liquidity Sweep              |
-| **Entry**           | 15m close                  | Hybrid Smart Entry (0.15% Market/Limit threshold)   |
-| **Take-profit**     | Structural (`tpResolver`)  | Nearest obstacle is a hard wall — rejection over clamping |
-| **Funding Monitor** | Enabled                    | Delta-neutral funding awareness                     |
+| Aspect              | Setting                   | Rationale                                                 |
+| ------------------- | ------------------------- | --------------------------------------------------------- |
+| **Timeframes**      | 15m entry / 4H context    | Classic SMC confirmation timeframe                        |
+| **Scenarios**       | 1, 5                      | HTF Continuation + HTF Liquidity Sweep                    |
+| **Entry**           | 15m close                 | Hybrid Smart Entry (0.15% Market/Limit threshold)         |
+| **Take-profit**     | Structural (`tpResolver`) | Nearest obstacle is a hard wall — rejection over clamping |
+| **Funding Monitor** | Enabled                   | Delta-neutral funding awareness                           |
 
 ---
 
@@ -1118,19 +1176,27 @@ SMC_SL_ATR_OFFSET=0.5
 MIN_TP_DISTANCE_PCT=0.0035
 SNIPER_LIMIT_EXPIRATION_CANDLES=15
 
-# Per-Symbol Overrides (APTUSDT)
+# Per-Symbol Overrides
+# NEARUSDT: the 180d audit shows both P0 gates must be relaxed for this pair —
+# global 1.5/1.5 → +3.46%, volatility-only 1.0 → +14.87%, both 1.0 → +22.40%
+# (PF 3.24, DD 4.74%). Global 1.5 still covers APTUSDT.
+MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0
+MIN_NET_RR_NEARUSDT=1.0
+
 SMC_SL_ATR_OFFSET_APTUSDT=0.60
 SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
 ```
 
-| Aspect            | Setting                                        | Rationale                                              |
-| ----------------- | ---------------------------------------------- | ------------------------------------------------------ |
-| **Timeframes**    | 1m entry / 15m + 4H macro                      | Single-pass 1m evaluation (no intermediate state)      |
-| **Scenario**      | 12                                             | Only 1m producer registered in the router              |
-| **Entry**         | 1m CHoCH after a sweep, near its OB midpoint   | Per-CHoCH causality + midpoint proximity (Inv. 51)     |
-| **Symbols**       | NEARUSDT, APTUSDT                              | Focused 2-coin roster                                  |
-| **Shields**       | Net R:R ≥ 1.5, 1m ATR ≥ 1.5× round-trip fee, TP ≥ 0.35% | Fee-dominated geometry is rejected, never clamped |
-| **Limit lifetime**| 15 min (NEAR) / 25 min (APT)                   | Via `resolveLimitExpirationCandles()` — verify in the run log |
+| Aspect             | Setting                                                                        | Rationale                                                     |
+| ------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| **Timeframes**     | 1m entry / 15m + 4H macro                                                      | Single-pass 1m evaluation (no intermediate state)             |
+| **Scenario**       | 12                                                                             | Only 1m producer registered in the router                     |
+| **Entry**          | 1m CHoCH after a sweep, near its OB midpoint                                   | Per-CHoCH causality + midpoint proximity (Inv. 51)            |
+| **Symbols**        | NEARUSDT, APTUSDT                                                              | Focused 2-coin roster                                         |
+| **Shields**        | Net R:R ≥ 1.5, 1m ATR ≥ 1.5× round-trip fee; NEAR runs both at 1.0, TP ≥ 0.35% | Fee-dominated geometry is rejected, never clamped             |
+| **Limit lifetime** | 15 min (NEAR) / 25 min (APT)                                                   | Via `resolveLimitExpirationCandles()` — verify in the run log |
+
+> **Why NEAR carries both P0 overrides at 1.0**: the 180-day endurance audit produced a measured ladder on the same 259,200 candles — global `1.5`/`1.5` → **+3.46%**, volatility `1.0` alone → **+14.87%**, both `1.0` → **+22.40%** (see the Endurance Audit section above). The volatility gate is the binding constraint (41.7% → 18.7% of candidates), the net-R gate accounts for the residual. Both are per-symbol, so APTUSDT and any future pair keep the stricter `1.5` admission. This is _calibration_ backed by a measured rejection funnel — not a global weakening of the gates.
 
 > **Why the shields are S12-only**: `minNetRr`, `minVolatilityFeeRatio` and `minTpDistancePct` are read exclusively by `Scenario12_SniperTouch.ts` and wired per symbol through `resolveSymbolConfig()`. Scenarios 1–11 never consult them — which is precisely why the Tank profile omits them instead of listing them as inert protection.
 
@@ -1283,12 +1349,12 @@ This will create a `trades_backup_2026-09-16_14-30-00.csv` file in the same dire
 
 Micro-rejections are handled **silently** — Slippage Guard aborts and Pre-flight DEAD setups are burned server-side only and never reach Telegram, keeping the chat clean. Every meaningful lifecycle event produces a clear, minimalist notification instead:
 
-| Notification                    | When                                                                                                                              |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| **Setup Found**                 | Manual mode only (`AUTO_TRADING=false`) — inline ✅/❌ Approve/Reject buttons                                                       |
-| **🚀 Order Opened**             | Every order successfully placed on the exchange (Market & Limit, both auto and manual modes)                                       |
-| **✅/❌ Position Closed**       | TP / SL / Reconciliation close — accurate exchange PnL (fees + funding included)                                                   |
-| **🗑️ Limit Order Cancelled**   | Limit order expired unfilled (`LIMIT_EXPIRATION_CANDLES`) or cancelled by Reconciliation — formally closes the loop on the earlier `🚀 Order Opened` alert (0 PnL, no PnL line) |
+| Notification                 | When                                                                                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Setup Found**              | Manual mode only (`AUTO_TRADING=false`) — inline ✅/❌ Approve/Reject buttons                                                                                                   |
+| **🚀 Order Opened**          | Every order successfully placed on the exchange (Market & Limit, both auto and manual modes)                                                                                    |
+| **✅/❌ Position Closed**    | TP / SL / Reconciliation close — accurate exchange PnL (fees + funding included)                                                                                                |
+| **🗑️ Limit Order Cancelled** | Limit order expired unfilled (`LIMIT_EXPIRATION_CANDLES`) or cancelled by Reconciliation — formally closes the loop on the earlier `🚀 Order Opened` alert (0 PnL, no PnL line) |
 
 ### `/status` Output Example
 
@@ -1458,7 +1524,7 @@ services:
 5. **PendingTradeManager** queues for approval (or auto-executes)
 6. **Pre-flight suite** — unconditional SL breach + TP reached checks; 0.2% **directional** slippage guard for Market orders only
 7. **ExecutionEngine** places order (Market IOC or Limit GTC with TP/SL, `positionIdx: 0`)
-8. **Trigger structure burned** in memory, then `transition(IN_TRADE)` — *before* bookkeeping
+8. **Trigger structure burned** in memory, then `transition(IN_TRADE)` — _before_ bookkeeping
 9. **DB** records the trade with the exchange's real `avgPrice`, plus `zoneDetails` (OB/FVG/BREAKER/MITIGATION) and `orderType`
 10. **WS Position/Execution** OR **ReconciliationLoop** detects the close (dual-channel)
 11. **2.5s delay** → `GET /v5/position/closed-pnl` → exact PnL (fees + funding), summed across partial closes
@@ -1586,7 +1652,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (558 across 36 suites)
+# All tests (853 across 43 suites)
 npm test
 
 # Watch mode
@@ -1625,7 +1691,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full backtest over BACKTEST_DAYS (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (558 tests, 36 suites)
+npm test             # Jest (853 tests, 43 suites)
 npm run test:watch   # Watch mode
 npm run decrypt      # Decrypt an encrypted /backup archive
 ```
@@ -1670,21 +1736,26 @@ src/
 
 ## 📄 License
 
-Copyright (c) 2026 [Nikita Ishchenko](https://github.com/IshNekittt). All rights reserved. See the [LICENSE](LICENSE.txt) file for details.
+Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more information.
+
+Copyright (c) 2026 [Nikita Ishchenko](https://github.com/IshNekittt)
 
 ---
 
-## ⚠️ Disclaimer
+## ⚠️ Disclaimer & Risk Warning
 
-**This software is for educational and research purposes only.**
-Trading cryptocurrencies carries substantial risk of loss.
-**Never trade with money you cannot afford to lose.**
-The authors are not responsible for any financial losses incurred through use of this bot.
+**This software is strictly for educational, research, and technical evaluation purposes.**
+
+- Cryptocurrency trading, especially using leverage and perpetual contracts, involves substantial risk of financial loss and is not suitable for every individual.
+- **Do not trade with funds you cannot afford to lose.**
+- Past performance, historical backtesting, and simulation metrics do not guarantee future results.
+- The author and contributors assume **zero liability** for any financial, technical, or consequential damages resulting from the direct or indirect use of this software, exchange API failures, latency spikes, or third-party service interruptions.
+- Users are solely responsible for compliance with their local regulations, exchange terms of service, and risk management policies.
 
 ---
 
 <div align="center">
 
-_Deterministic execution. Decimal-precise accounting. Documentation-first._
+_Enterprise-grade reliability. High-fidelity simulation. Zero-lookahead quantitative architecture._
 
 </div>

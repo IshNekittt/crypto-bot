@@ -759,7 +759,10 @@ async function main(): Promise<void> {
           toMs,
           config.useLocalCacheOnly
         );
-        candles1m.push(...fetched1m);
+        // Memory-safe copy: spreading a long Sniper history (>~100k 1m candles)
+        // into push() exceeds V8's argument stack and throws
+        // "Maximum call stack size exceeded" AFTER the data was fetched.
+        for (const candle of fetched1m) candles1m.push(candle);
       }
 
       if (
