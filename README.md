@@ -9,6 +9,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Tests](https://img.shields.io/badge/Tests-853%20passing-brightgreen?logo=jest)](https://jestjs.io/)
 [![Version](https://img.shields.io/badge/Version-v2026--10--28-blue)](https://github.com/)
+[![CI Pipeline](https://github.com/IshNekittt/crypto-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/IshNekittt/crypto-bot/actions)
 
 **Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
