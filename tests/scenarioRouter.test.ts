@@ -100,11 +100,20 @@ describe('ScenarioRouter', () => {
   });
 
   describe('scenario registration', () => {
-    it('registers Scenarios 12, 14 and 15 — archived 1–11 and 13 are not constructible', () => {
-      const scenarios = (router as any).scenarios;
-      expect(scenarios.length).toBe(3);
-      expect(scenarios.map((s: IScenario) => s.id)).toEqual([12, 14, 15]);
+    it('registers the five live scenarios in registry order', () => {
+      const defaultRouter = new ScenarioRouter({
+        symbol: 'SOLUSDT',
+        patternRecognizer: mockPatternRecognizer,
+        notifier: mockNotifier,
+        activeScenarios: [],
+        config: mockConfig,
+      });
+      const scenarios = (defaultRouter as any).scenarios;
+      expect(scenarios.length).toBe(5);
+      expect(scenarios.map((s: IScenario) => s.id)).toEqual([1, 5, 12, 14, 15]);
       expect(scenarios.map((s: IScenario) => s.name)).toEqual([
+        'HTF Continuation',
+        'HTF Liquidity Sweep',
         'Sniper Touch (1m Macro)',
         'Trend Following Alpha (Donchian / Volume Breakout)',
         'Volatility Compression Squeeze (BB/KC)',
@@ -112,10 +121,10 @@ describe('ScenarioRouter', () => {
     });
 
     it('exposes the registry as the single source of truth', () => {
-      expect(REGISTERED_SCENARIO_IDS).toEqual([12, 14, 15]);
+      expect(REGISTERED_SCENARIO_IDS).toEqual([1, 5, 12, 14, 15]);
     });
 
-    it('does not register the archived Scenarios 1–11 or 13', () => {
+    it('does not register the archived Scenarios 2–4, 6–11 or 13', () => {
       const archivedRouter = new ScenarioRouter({
         symbol: 'SOLUSDT',
         patternRecognizer: mockPatternRecognizer,
@@ -128,9 +137,11 @@ describe('ScenarioRouter', () => {
       expect((archivedRouter as any).scenarios).toHaveLength(0);
     });
 
-    it('ignores archived ids without dropping the registered scenario', () => {
-      // A stale .env listing the classic tank profile must not silently disarm a
-      // live process: the ids that still exist are kept, the rest are reported.
+    it('ignores archived ids without dropping the registered scenarios', () => {
+      // A stale .env listing a partially archived profile must not silently
+      // disarm a live process: the ids that still exist are kept, the rest are
+      // reported. `loadConfig()` rejects the same input outright; this branch is
+      // the router-level backstop for callers that skip config validation.
       const mixedRouter = new ScenarioRouter({
         symbol: 'SOLUSDT',
         patternRecognizer: mockPatternRecognizer,
@@ -139,7 +150,7 @@ describe('ScenarioRouter', () => {
         config: { ...mockConfig, activeScenarios: [1, 4, 5, 9, 12] },
       });
 
-      expect((mixedRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([12]);
+      expect((mixedRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([1, 5, 12]);
     });
 
     it('defaults to the full registered registry when no ids are configured', () => {
@@ -151,7 +162,7 @@ describe('ScenarioRouter', () => {
         config: mockConfig,
       });
 
-      expect((defaultRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([12, 14, 15]);
+      expect((defaultRouter as any).scenarios.map((s: IScenario) => s.id)).toEqual([1, 5, 12, 14, 15]);
     });
   });
 

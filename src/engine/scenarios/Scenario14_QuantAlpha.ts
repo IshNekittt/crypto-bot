@@ -6,6 +6,7 @@ import { resolveTakeProfit } from '../tpResolver';
 
 export interface Scenario14RejectionStats {
   totalEvals: number;
+  wrongMode: number;
   insufficientCandles: number;
   insideChannel: number;
   lowVolumeBreakout: number;
@@ -16,6 +17,7 @@ export interface Scenario14RejectionStats {
 
 const EMPTY_STATS: Scenario14RejectionStats = {
   totalEvals: 0,
+  wrongMode: 0,
   insufficientCandles: 0,
   insideChannel: 0,
   lowVolumeBreakout: 0,
@@ -50,6 +52,14 @@ export class Scenario14_QuantAlpha extends BaseScenario {
   protected override evaluateInternal(patternData: PatternData): boolean {
     const stats = Scenario14_QuantAlpha.stats;
     stats.totalEvals++;
+
+    // Mode guard (audit F-03): Scenario 14 is a 15m Classic breakout. In Sniper
+    // Mode the engine closes on 1m candles, so without this gate the identical
+    // 15m candle would be re-scanned on every tick (15x per candle) and could fill
+    // from a close up to 14 minutes stale. Mirrors Scenario 15's `wrongMode` gate.
+    if (this.config.enableSniperMode || this.config.ltfTimeframe !== '15') {
+      return this.reject('wrongMode', 'Scenario 14 is Classic 15m-only');
+    }
 
     const candles15m = patternData.candles15m ?? [];
     const candles4h = patternData.candles4h ?? [];

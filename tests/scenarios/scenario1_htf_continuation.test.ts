@@ -1,6 +1,6 @@
-import { Scenario1_HTFContinuation } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario1_HTFContinuation';
+import { Scenario1_HTFContinuation } from '../../src/engine/scenarios/Scenario1_HTFContinuation';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../../../src/config/env';
+import { BotConfig } from '../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',
@@ -203,6 +203,25 @@ describe('Scenario1: HTF Continuation', () => {
 
   beforeEach(() => {
     scenario = new Scenario1_HTFContinuation(mockConfig);
+  });
+
+  describe('mode guard (audit F-03)', () => {
+    it('fails closed when Sniper Mode drives 1m closes', () => {
+      Scenario1_HTFContinuation.resetStats();
+      const sniper = new Scenario1_HTFContinuation({ ...mockConfig, enableSniperMode: true });
+
+      expect(sniper.evaluate(buildPatternData({ direction: 'BULLISH' }))).toBe(false);
+      expect(sniper.getReason()).toMatch(/Classic 15m-only/);
+      expect(Scenario1_HTFContinuation.getRejectionStats().wrongMode).toBe(1);
+    });
+
+    it('fails closed on a non-15m execution timeframe', () => {
+      Scenario1_HTFContinuation.resetStats();
+      const fiveMin = new Scenario1_HTFContinuation({ ...mockConfig, ltfTimeframe: '5' });
+
+      expect(fiveMin.evaluate(buildPatternData({ direction: 'BULLISH' }))).toBe(false);
+      expect(Scenario1_HTFContinuation.getRejectionStats().wrongMode).toBe(1);
+    });
   });
 
   describe('bidirectional evaluation', () => {

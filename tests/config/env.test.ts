@@ -158,47 +158,79 @@ describe('loadConfig — Scenario 12 knobs', () => {
   });
 });
 
-describe('loadConfig — scenario registration bounds (S13 archived)', () => {
-  it('accepts Scenario 12 in ACTIVE_SCENARIOS', () => {
-    const config = loadConfig(env({ ACTIVE_SCENARIOS: '12' }));
-    expect(config.activeScenarios).toEqual([12]);
+describe('loadConfig — scenario registration (S1/S5 restored, strict registry)', () => {
+  it('materialises the full five-scenario registry when ACTIVE_SCENARIOS is unset', () => {
+    expect(loadConfig(env()).activeScenarios).toEqual([1, 5, 12, 14, 15]);
   });
 
-  it('accepts Scenario 12 in a per-symbol override', () => {
-    const config = loadConfig(env({ SCENARIOS_BTCUSDT: '12' }));
-    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([12]);
+  it('accepts the five live scenarios', () => {
+    const config = loadConfig(
+      env({ ACTIVE_SCENARIOS: '1,5,12,14,15', ENABLE_SNIPER_MODE: 'true' }),
+    );
+    expect(config.activeScenarios).toEqual([1, 5, 12, 14, 15]);
   });
 
-  it('rejects Scenario 13 now that it is archived', () => {
+  it('accepts Scenarios 1 and 5 now that they are re-registered', () => {
+    const config = loadConfig(env({ ACTIVE_SCENARIOS: '1,5' }));
+    expect(config.activeScenarios).toEqual([1, 5]);
+  });
+
+  it('rejects an archived id instead of silently dropping it', () => {
     expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '13' }))).toThrow(
-      /ACTIVE_SCENARIOS must contain valid scenario IDs \(1-12, 14, or 15; 13 is archived\)/,
+      /ACTIVE_SCENARIOS must contain ONLY registered scenario IDs/,
+    );
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '2' }))).toThrow(
+      /Archived and not tradeable: 2-4, 6-11, 13/,
     );
   });
 
-  it('accepts Scenario 14', () => {
-    expect(loadConfig(env({ ACTIVE_SCENARIOS: '14' })).activeScenarios).toEqual([14]);
+  it('rejects a mixed list containing an archived id (no silent narrowing)', () => {
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '1,5,6' }))).toThrow(/got: 6/);
   });
 
-  it('accepts Scenario 15 in a per-symbol override', () => {
-    const config = loadConfig(env({ SCENARIOS_BTCUSDT: '15' }));
-    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([15]);
+  it('rejects a non-numeric id', () => {
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '1,abc' }))).toThrow(/got: abc/);
   });
 
-  it('accepts Scenario 15 and rejects higher IDs', () => {
-    expect(loadConfig(env({ ACTIVE_SCENARIOS: '15' })).activeScenarios).toEqual([15]);
-    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '16' }))).toThrow(
-      /ACTIVE_SCENARIOS must contain valid scenario IDs \(1-12, 14, or 15; 13 is archived\)/,
+  it('rejects non-decimal numeric spellings instead of coercing them', () => {
+    // "0xC" must not be read as 12, and "1e1" must not be read as 10.
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '0xC' }))).toThrow(/got: 0xC/);
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '1e1' }))).toThrow(/got: 1e1/);
+  });
+
+  it('accepts Scenario 12 only when Sniper Mode is enabled', () => {
+    const config = loadConfig(
+      env({ ACTIVE_SCENARIOS: '12', ENABLE_SNIPER_MODE: 'true' }),
+    );
+    expect(config.activeScenarios).toEqual([12]);
+
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '12' }))).toThrow(
+      /FATAL: Scenario 12 requires ENABLE_SNIPER_MODE=true\./,
     );
   });
 
-  it('drops Scenario 13 from a per-symbol override', () => {
-    const config = loadConfig(env({ SCENARIOS_BTCUSDT: '12,13' }));
-    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([12]);
+  it('accepts per-symbol overrides built from live ids', () => {
+    expect(
+      loadConfig(env({ SCENARIOS_BTCUSDT: '1,5' })).symbolScenarios.get('BTCUSDT'),
+    ).toEqual([1, 5]);
+
+    expect(
+      loadConfig(
+        env({ SCENARIOS_BTCUSDT: '12,14,15', ENABLE_SNIPER_MODE: 'true' }),
+      ).symbolScenarios.get('BTCUSDT'),
+    ).toEqual([12, 14, 15]);
   });
 
-  it('accepts Scenario 14 and 15 in per-symbol overrides', () => {
-    const config = loadConfig(env({ SCENARIOS_BTCUSDT: '12,14,15' }));
-    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([12, 14, 15]);
+  it('rejects an archived id in a per-symbol override', () => {
+    expect(() => loadConfig(env({ SCENARIOS_BTCUSDT: '12,13' }))).toThrow(
+      /SCENARIOS_BTCUSDT must contain ONLY registered scenario IDs/,
+    );
+  });
+
+  it('rejects Scenario 12 for a symbol while Sniper Mode is off', () => {
+    expect(() => loadConfig(env({ SCENARIOS_BTCUSDT: '12' }))).toThrow(
+      /FATAL: Scenario 12 requires ENABLE_SNIPER_MODE=true \(requested by SCENARIOS_BTCUSDT\)/,
+    );
   });
 });
 

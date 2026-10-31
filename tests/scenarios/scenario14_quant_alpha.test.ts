@@ -73,6 +73,23 @@ function scenario(overrides: Partial<BotConfig> = {}): Scenario14_QuantAlpha {
 describe('Scenario14_QuantAlpha — Donchian / volume breakout', () => {
   beforeEach(() => Scenario14_QuantAlpha.resetStats());
 
+  describe('mode guard (audit F-03)', () => {
+    it('fails closed when Sniper Mode drives 1m closes', () => {
+      const sut = scenario({ enableSniperMode: true });
+
+      expect(sut.evaluate(pattern(candles15m('long')))).toBe(false);
+      expect(sut.getReason()).toMatch(/Classic 15m-only/);
+      expect(Scenario14_QuantAlpha.getRejectionStats().wrongMode).toBe(1);
+    });
+
+    it('fails closed on a non-15m execution timeframe', () => {
+      const sut = scenario({ ltfTimeframe: '5' });
+
+      expect(sut.evaluate(pattern(candles15m('long')))).toBe(false);
+      expect(Scenario14_QuantAlpha.getRejectionStats().wrongMode).toBe(1);
+    });
+  });
+
   it('triggers bullish with a 2ATR stop and 4R target', () => {
     const sut = scenario();
     expect(sut.evaluate(pattern(candles15m('long')))).toBe(true);

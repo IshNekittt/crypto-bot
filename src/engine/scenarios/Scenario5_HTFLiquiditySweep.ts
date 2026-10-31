@@ -1,7 +1,7 @@
-import { BaseScenario } from '../../../baseScenario';
+import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../../../config/env';
-import { resolveTakeProfit } from '../../../tpResolver';
+import { BotConfig } from '../../config/env';
+import { resolveTakeProfit } from '../tpResolver';
 
 /** Sweep window: the last 16 LTF candles (4H on a 15m entry timeframe). */
 const SWEEP_LOOKBACK_CANDLES = 16;
@@ -68,6 +68,7 @@ type Direction = 'BULLISH' | 'BEARISH';
  */
 export class Scenario5_HTFLiquiditySweep extends BaseScenario {
   private static rejectionStats = {
+    wrongMode: 0,
     killzone: 0,
     noPools: 0,
     noSweep: 0,
@@ -88,6 +89,7 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
 
   static resetStats() {
     this.rejectionStats = {
+      wrongMode: 0,
       killzone: 0,
       noPools: 0,
       noSweep: 0,
@@ -102,6 +104,20 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
   protected override evaluateInternal(patternData: any): boolean {
     const stats = Scenario5_HTFLiquiditySweep.rejectionStats;
     stats.totalEvals++;
+
+    // Mode guard (audit F-03): Scenario 5 is a 15m Classic pattern. In Sniper
+    // Mode the router is driven by 1m closes, so the same stale 15m candle would
+    // be re-evaluated on every tick. Fail closed rather than stage a stale entry.
+    if (
+      this.config.enableSniperMode ||
+      this.config.ltfTimeframe !== ENTRY_TIMEFRAME
+    ) {
+      this.logRejection(
+        'Scenario 5 is Classic 15m-only (Sniper Mode or non-15m LTF active)',
+      );
+      stats.wrongMode++;
+      return false;
+    }
 
     // Sweep must happen in a London/NY killzone (not ASIAN). Bypassable globally
     // via ENFORCE_KILLZONES=false (backtesting).

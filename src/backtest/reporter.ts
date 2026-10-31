@@ -2,6 +2,8 @@ import { Decimal } from 'decimal.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { TradeResult } from './executionSimulator';
+import { Scenario1_HTFContinuation } from '../engine/scenarios/Scenario1_HTFContinuation';
+import { Scenario5_HTFLiquiditySweep } from '../engine/scenarios/Scenario5_HTFLiquiditySweep';
 import { Scenario12_SniperTouch } from '../engine/scenarios/Scenario12_SniperTouch';
 import { Scenario14_QuantAlpha } from '../engine/scenarios/Scenario14_QuantAlpha';
 import { Scenario15_VolatilitySqueeze } from '../engine/scenarios/Scenario15_VolatilitySqueeze';
@@ -32,6 +34,8 @@ function sharePct(count: number, base: number): string {
  * run it was produced from.
  */
 export function resetScenarioRejectionStats(): void {
+  Scenario1_HTFContinuation.resetStats();
+  Scenario5_HTFLiquiditySweep.resetStats();
   Scenario12_SniperTouch.resetStats();
   Scenario14_QuantAlpha.resetStats();
   Scenario15_VolatilitySqueeze.resetStats();
@@ -232,8 +236,17 @@ export function generateReport(
   lines.push('');
 
   // Rejection stats for key scenarios
-  const scenario12Stats = Scenario12_SniperTouch.getRejectionStats();
+  // Scenarios 1 and 5 evaluate both directions per pass and do not track a
+  // dedicated `triggered` counter, so no derived trigger figure is printed —
+  // subtracting buckets would double-count mirror-direction rejections.
+  const scenario1Stats = Scenario1_HTFContinuation.getRejectionStats();
   lines.push('📊 SCENARIO REJECTION STATS');
+  lines.push('   Scenario 1 (HTF Continuation):');
+  lines.push(`     Total: ${scenario1Stats.totalEvals} | WrongMode: ${scenario1Stats.wrongMode} | Killzone: ${scenario1Stats.killzone} | NoCandles: ${scenario1Stats.noCandles} | NoOb: ${scenario1Stats.noOb} | NoTouch: ${scenario1Stats.noTouch} | WrongSide: ${scenario1Stats.wrongSide} | NoChoch: ${scenario1Stats.noChoch} | Displacement: ${scenario1Stats.displacement} | NoFvg: ${scenario1Stats.noFvg} | TpInvalid: ${scenario1Stats.tpInvalid}`);
+  const scenario5Stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
+  lines.push('   Scenario 5 (HTF Liquidity Sweep):');
+  lines.push(`     Total: ${scenario5Stats.totalEvals} | WrongMode: ${scenario5Stats.wrongMode} | Killzone: ${scenario5Stats.killzone} | NoPools: ${scenario5Stats.noPools} | NoSweep: ${scenario5Stats.noSweep} | NoChoch: ${scenario5Stats.noChoch} | Displacement: ${scenario5Stats.displacement} | NoFvg: ${scenario5Stats.noFvg} | TpInvalid: ${scenario5Stats.tpInvalid}`);
+  const scenario12Stats = Scenario12_SniperTouch.getRejectionStats();
   lines.push('   Scenario 12 (Sniper Touch):');
   lines.push(`     Total: ${scenario12Stats.totalEvals} | Triggered: ${scenario12Stats.triggered} | Killzone: ${scenario12Stats.killzone} | NoMacroLevels: ${scenario12Stats.noMacroLevels} | Disabled: ${scenario12Stats.disabled} | InsufficientCandles: ${scenario12Stats.insufficientCandles}`);
   lines.push(`     Sweep stage: Touched: ${scenario12Stats.levelTouched} | WeakWick: ${scenario12Stats.weakWick} (${sharePct(scenario12Stats.weakWick, scenario12Stats.levelTouched)} of touches) | NoSweep: ${scenario12Stats.noSweep} | SweepFound: ${scenario12Stats.sweepFound}`);
@@ -241,7 +254,7 @@ export function generateReport(
   lines.push(`     Entry gates (base ${scenario12Stats.sweepFound}): Proximity: ${scenario12Stats.proximity} (${sharePct(scenario12Stats.proximity, scenario12Stats.sweepFound)}) | PremDisc: ${scenario12Stats.premiumDiscount} (${sharePct(scenario12Stats.premiumDiscount, scenario12Stats.sweepFound)}) | InsufficientNetR: ${scenario12Stats.insufficientNetR} (${sharePct(scenario12Stats.insufficientNetR, scenario12Stats.sweepFound)}) | InsufficientVolatility: ${scenario12Stats.insufficientVolatility} (${sharePct(scenario12Stats.insufficientVolatility, scenario12Stats.sweepFound)}) | InsufficientRoom: ${scenario12Stats.insufficientRoom} (${sharePct(scenario12Stats.insufficientRoom, scenario12Stats.sweepFound)}) | TpInvalid: ${scenario12Stats.tpInvalid} | Geometry: ${scenario12Stats.geometry} | InvalidAtr: ${scenario12Stats.invalidAtr}`);
   const scenario14Stats = Scenario14_QuantAlpha.getRejectionStats();
   lines.push('   Scenario 14 (Trend Following / Donchian):');
-  lines.push(`     Total: ${scenario14Stats.totalEvals} | Triggered: ${scenario14Stats.triggered} | InsufficientCandles: ${scenario14Stats.insufficientCandles} | InsideChannel: ${scenario14Stats.insideChannel} | LowVolumeBreakout: ${scenario14Stats.lowVolumeBreakout} | InsufficientRr: ${scenario14Stats.insufficientRr} | TpInvalid: ${scenario14Stats.tpInvalid}`);
+  lines.push(`     Total: ${scenario14Stats.totalEvals} | Triggered: ${scenario14Stats.triggered} | WrongMode: ${scenario14Stats.wrongMode} | InsufficientCandles: ${scenario14Stats.insufficientCandles} | InsideChannel: ${scenario14Stats.insideChannel} | LowVolumeBreakout: ${scenario14Stats.lowVolumeBreakout} | InsufficientRr: ${scenario14Stats.insufficientRr} | TpInvalid: ${scenario14Stats.tpInvalid}`);
   const scenario15Stats = Scenario15_VolatilitySqueeze.getRejectionStats();
   lines.push('   Scenario 15 (Volatility Squeeze):');
   lines.push(`     Total: ${scenario15Stats.totalEvals} | Triggered: ${scenario15Stats.triggered} | WrongMode: ${scenario15Stats.wrongMode} | InsufficientCandles: ${scenario15Stats.insufficientCandles} | NoSqueezeFiring: ${scenario15Stats.noSqueezeFiring} | NeutralMomentum: ${scenario15Stats.neutralMomentum} | InvalidAtr: ${scenario15Stats.invalidAtr} | TpInvalid: ${scenario15Stats.tpInvalid}`);

@@ -5,23 +5,33 @@ import { DateTime } from 'luxon';
 import { ZoneDetails } from '../types';
 import { BotConfig, resolveSymbolConfig } from '../config/env';
 import { PatternData } from '../smc/patternRecognizer';
+import { Scenario1_HTFContinuation } from './scenarios/Scenario1_HTFContinuation';
+import { Scenario5_HTFLiquiditySweep } from './scenarios/Scenario5_HTFLiquiditySweep';
 import { Scenario12_SniperTouch } from './scenarios/Scenario12_SniperTouch';
 import { Scenario14_QuantAlpha } from './scenarios/Scenario14_QuantAlpha';
 import { Scenario15_VolatilitySqueeze } from './scenarios/Scenario15_VolatilitySqueeze';
+import {
+  ARCHIVED_SCENARIO_IDS_LABEL,
+  REGISTERED_SCENARIO_IDS,
+} from './scenarioRegistry';
 
 /**
  * Scenario IDs the router can actually construct.
  *
- * Scenarios 1–11 were archived to `src/engine/scenarios/archive/legacy_smc/`
- * after the 180-day unfiltered discovery sweep (3 symbols, killzones off, 565,898
- * scenario-candle evaluations → 21 trades): seven of them never filled a single
- * order, and the only one with a usable sample (S4, 13 trades) carried 82% of the
- * portfolio loss. Scenario 13 was archived earlier for the same class of reason.
+ * Re-exported from `scenarioRegistry.ts` — the dependency-free single source of
+ * truth shared with config validation (`ACTIVE_SCENARIOS` / `SCENARIOS_<SYMBOL>`).
+ * Importing `env.ts` from that module would cycle, because the router already
+ * imports `BotConfig` from `env.ts`.
  *
- * Exported as the single source of truth so config validation and tests assert
- * against the live registry instead of hardcoding IDs that no longer exist.
+ * Live registry: 1 (HTF Continuation), 5 (HTF Liquidity Sweep), 12 (Sniper
+ * Touch), 14 (Trend Following Alpha), 15 (Volatility Squeeze).
+ *
+ * Archived to `src/engine/scenarios/archive/legacy_smc/` after the 180-day
+ * unfiltered discovery sweep: 2, 3, 4, 6, 7, 8, 9, 10, 11. Scenario 13
+ * (Top-Down Order Flow) was archived separately. Their modules still compile and
+ * their suites still run, but no runtime path can schedule them.
  */
-export const REGISTERED_SCENARIO_IDS: readonly number[] = Object.freeze([12, 14, 15]);
+export { REGISTERED_SCENARIO_IDS } from './scenarioRegistry';
 
 export interface ScenarioRouterDeps {
   readonly symbol: string;
@@ -56,16 +66,19 @@ export class ScenarioRouter {
     this.config = resolveSymbolConfig(deps.config, deps.symbol);
 
     const allScenarios: IScenario[] = [
+      new Scenario1_HTFContinuation(this.config), // 1: HTF Continuation (15m Classic)
+      new Scenario5_HTFLiquiditySweep(this.config), // 5: HTF Liquidity Sweep (15m Classic)
       new Scenario12_SniperTouch(this.config), // 12: Sniper Touch (1m Macro)
       new Scenario14_QuantAlpha(this.config), // 14: Trend Following / Donchian (15m Classic)
       new Scenario15_VolatilitySqueeze(this.config), // 15: BB/KC Volatility Squeeze (15m Classic)
     ];
 
     // `activeScenarios` NARROWS the registry — it can never add a scenario the
-    // router does not own. Ids with no registered implementation (the archived
-    // 1–11 and 13) are reported rather than silently swallowed, because an empty
-    // intersection would otherwise leave a live process scanning forever without
-    // a single scenario to evaluate.
+    // router does not own. Ids with no registered implementation are reported
+    // rather than silently swallowed, because an empty intersection would
+    // otherwise leave a live process scanning forever without a single scenario
+    // to evaluate. `loadConfig()` already rejects such ids outright; this branch
+    // is the defensive backstop for callers that bypass config validation.
     const requested = deps.activeScenarios ?? [];
 
     if (requested.length === 0) {
@@ -82,7 +95,7 @@ export class ScenarioRouter {
       if (unregistered.length > 0) {
         logger.warn(
           `[${this.symbol}] ACTIVE_SCENARIOS requests unregistered scenario(s) ${unregistered.join(',')} — ignored. ` +
-            `Registered: ${REGISTERED_SCENARIO_IDS.join(',')} (1–11 and 13 are archived).`,
+            `Registered: ${REGISTERED_SCENARIO_IDS.join(',')} (archived: ${ARCHIVED_SCENARIO_IDS_LABEL}).`,
         );
       }
 

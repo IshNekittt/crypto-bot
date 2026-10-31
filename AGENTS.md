@@ -75,10 +75,10 @@ To run V4 Classic and V5 Sniper simultaneously, **complete infrastructure separa
 **Deployment Pattern**: Two services from the same Docker image, each with its own frozen profile file. Both profiles are **secret-free**: credentials are injected by the platform (Render dashboard, Docker `env_file` chain, systemd `EnvironmentFile`) and `loadConfig()` hard-fails when any of the six is missing.
 
 ```bash
-# V4 Classic Tank (.env.subaru) — Scenarios 1 + 5
+# V4 Classic Tank (.env.subaru) — Scenarios 1 + 5 + 14 + 15
 SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
 ENABLE_SNIPER_MODE=false
-ACTIVE_SCENARIOS=1,5
+ACTIVE_SCENARIOS=1,5,14,15
 LTF_TIMEFRAME=15
 HTF_TIMEFRAME=240
 HISTORY_CANDLES=200
@@ -93,7 +93,7 @@ SMC_DISPLACEMENT_MULTIPLIER=1.5
 SMART_ENTRY_THRESHOLD_PCT=0.15
 PREFLIGHT_BUFFER_PCT=0.05
 ENABLE_FUNDING_MONITOR=true
-# No SCENARIOS_<SYMBOL>: ACTIVE_SCENARIOS=1,5 applies to all three symbols, and an
+# No SCENARIOS_<SYMBOL>: ACTIVE_SCENARIOS=1,5,14,15 applies to all three symbols, and an
 # override would NARROW a symbol rather than extend the global list.
 # No MIN_NET_RR / MIN_VOLATILITY_FEE_RATIO / MIN_TP_DISTANCE_PCT: S12-only gates.
 
@@ -2040,7 +2040,7 @@ Development was frozen on the premise that both live engines had a real edge. Th
 
 Both windows ran to completion with **no data truncation**: 35,040 × 15m candles and 259,200 × 1m candles.
 
-> **Scope**: Run 1 validated **Scenario 14 (Donchian)**, forced with an inline `ACTIVE_SCENARIOS=14`. The local `.env` ships `ACTIVE_SCENARIOS=15` (Volatility Squeeze) and the frozen `.env.subaru` Tank preset runs **S1 + S5** — neither has been through a 365-day window, so their annual behaviour is unmeasured. Never transfer the +19.94% figure between presets: "Tank" is a nickname, not an engine identity.
+> **Scope**: Run 1 validated **Scenario 14 (Donchian)**, forced with an inline `ACTIVE_SCENARIOS=14`. The local `.env` ships `ACTIVE_SCENARIOS=15` (Volatility Squeeze) and the frozen `.env.subaru` Tank preset runs **S1 + S5 + S14 + S15** — S1, S5 and S15 have not been through a 365-day window, so their annual behaviour is unmeasured (only S14 was measured in that run). Never transfer the +19.94% figure between presets: "Tank" is a nickname, not an engine identity.
 
 #### 7.23.1 S14 / BTC — the annual truth is +20%, not +38%
 
@@ -2099,29 +2099,23 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 
 ---
 
-## 8. THE SCENARIOS (12, 14, 15 REGISTERED; 1–11 AND 13 ARCHIVED) — `src/engine/scenarios/`
+## 8. THE SCENARIOS (1, 5, 12, 14, 15 REGISTERED) — `src/engine/scenarios/`
 
-| ID     | Name                | Core Logic                                                 | Key Filters                                                                   |
-| ------ | ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| **1**  | HTF Continuation    | Tested 4H OB → 15m CHoCH at/after the touch → 15m FVG at/after the CHoCH (both inside the 4h window) | 4H OB direction defines the side; 16-candle causality window; displacement + dynamic TP |
-| **2**  | FVG Fill            | Direction from the tested **HTF** FVG (4H) → fill to 0.5 → 15m CHoCH at/after the fill | Mirrored Premium/Discount (bullish gap in discount, bearish in premium) + liquidity context before the gap formed (`NoLiqCtx`) + 15m CHoCH displacement |
-| **3**  | IDM (Inducement)    | Structural level swept (wick beyond + body back inside) → real 15m OB beyond the level, reached by the same wick | Bidirectional; level from `structures.price` (no `brokenSwing`); proximity `max(2 × ATR, 0.5%)`; block must pre-exist the trigger candle |
-| **4**  | Mitigation Chain    | 15m OB mitigated (bounce) → BOS strictly **after** the bounce (24h) → retest of the new block's equilibrium | Bidirectional + Premium/Discount; no CHoCH gate (a chain is a BOS continuation, not a reversal) |
-| **5**  | HTF Liquidity Sweep | PDH/PDL/PWH/PWL/BSL/SSL sweep in the last 16 LTF candles → CHoCH at/after the sweep | Killzone + sweep wick (SFP) + deterministic pool priority (`PDH > PDL > PWH > PWL > BSL > SSL`) + dynamic TP |
-| **6**  | SMS (Failure Swing) | Failed HH/LL → 15m CHoCH at/after the SMS → mitigation of the failed leg's 15m OB (0.5 entry) | **Strict 15m** for SMS/CHoCH/OB; causality `ob < sms ≤ choch`; 72h looking window; displacement ≥ 1.5 ATR on the CHoCH; `resolveTakeProfit` (`skipMinorObstacles: false`) |
-| **7**  | AMD (Asian Range)   | Freshest Asian extreme swept (strict SFP) → 15m CHoCH at/after the sweep → 15m FVG 0.5 entry | **Bidirectional** (Asian low → long to Asian high; Asian high → short to Asian low); newest-first sweep scan; CHoCH causality `>= sweep` inside 8h; range height ≤ 3 × ATR4H; opposing session extreme via `resolveTakeProfit` (no manual TP override) |
-| **8**  | Range Deviation     | Freshest boundary excursion → reclaim (body back inside) → 15m CHoCH at/after the reclaim → 15m FVG/OB 0.5 entry | **Bidirectional** (below low → long; above high → short); backwards scan; penetration `max(0.1 × ATR, 0.05%)`; a close through the opposite boundary voids the chain; 15m-only POI inside the range; TP = `RANGE_EQUILIBRIUM` / opposing boundary |
-| **9**  | Turtle Soup         | Last closed 15m candle SFP through the range boundary (EQH/EQL) → entry at the SFP close | **Bidirectional** (EQH sweep → short; EQL sweep → long); single-bar trigger; `sweptLevel = max/min(boundary, EQH/EQL)`; body closes strictly inside; wick ratio ≥ `SMC_SWEEP_MIN_WICK_RATIO`; SFP-range stop; TP = range equilibrium / opposing cluster |
-| **10** | Breaker Block       | 15m block whose far extreme was swept → broken by a 15m BOS with displacement + FVG → retest of the mirrored zone (0.5 entry) | **BOS-only** break (a CHoCH is a reversal, not a breaker break); block strictly before the break and ≤ 24h old; body close clears the WHOLE block; retest = current candle, wick in + body holding, within 4h; FVG window measured on the completion bar; `resolveTakeProfit` (`skipMinorObstacles: false`) |
-| **11** | Mitigation Block    | **Only after SMS** → 15m CHoCH (inside 8h) → mitigation of the failed leg's 15m OB inside 12h | **Strict 15m** for SMS/CHoCH/MB; chain `ob < sms ≤ choch < retest` inside a 72h looking window; displacement ≥ 1.5 ATR on the CHoCH; retest closes inside the block in the trade direction; P/D on the SMS→CHoCH impulse; `resolveTakeProfit` (`skipMinorObstacles: false`) |
-| **12** | Sniper Touch        | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + P0 shields (`MIN_VOLATILITY_FEE_RATIO` ATR-to-fee admission, `MIN_NET_RR` fee-inclusive R:R) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
-| **13** | ~~Top-Down Order Flow~~ | **ARCHIVED** — `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts`, not registered | Kept for reference; ID 13 is invalid in scenario config |
-| **14** | Trend Following Alpha | 15m Donchian breakout with volume confirmation | Classic mode; structural TP and ATR stop |
-| **15** | Volatility Compression Squeeze | BB(20,2) fully inside KC(SMA20 ± 1.5×ATR20); first expansion after ≥5 compressed candles | 15m Classic only; regression-slope direction; KC-midline ±1.5×ATR stop; `tpResolver`; trigger candle burned by timestamp |
+**Live registry.** These five IDs are the only scenarios the router can construct and the only IDs accepted by `ACTIVE_SCENARIOS` / `SCENARIOS_<SYMBOL>`. `REGISTERED_SCENARIO_IDS` in `src/engine/scenarioRegistry.ts` is the single source of truth (imported by both the router and `src/config/env.ts`); any other id is a **hard boot error**, never a silent drop. `loadConfig()` additionally aborts when Scenario 12 is requested with `ENABLE_SNIPER_MODE=false`.
+
+| ID     | Name                | Mode          | Core Logic                                                 | Key Filters                                                                   |
+| ------ | ------------------- | ------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **1**  | HTF Continuation    | 15m Classic   | Tested 4H OB → 15m CHoCH at/after the touch → 15m FVG at/after the CHoCH (both inside the 4h window) | 4H OB direction defines the side; 16-candle causality window; displacement + dynamic TP; `wrongMode` guard |
+| **5**  | HTF Liquidity Sweep | 15m Classic   | PDH/PDL/PWH/PWL/BSL/SSL sweep in the last 16 LTF candles → CHoCH at/after the sweep → 15m FVG 0.5 entry | Killzone + sweep wick (SFP) + deterministic pool priority (`PDH > PDL > PWH > PWL > BSL > SSL`) + dynamic TP; `wrongMode` guard |
+| **12** | Sniper Touch        | 1m Sniper     | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + P0 shields (`MIN_VOLATILITY_FEE_RATIO` ATR-to-fee admission, `MIN_NET_RR` fee-inclusive R:R) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
+| **14** | Trend Following Alpha | 15m Classic | 15m Donchian breakout with volume confirmation | Classic mode; structural TP and ATR stop; `wrongMode` guard |
+| **15** | Volatility Compression Squeeze | 15m Classic | BB(20,2) fully inside KC(SMA20 ± 1.5×ATR20); first expansion after ≥5 compressed candles | 15m Classic only; regression-slope direction; KC-midline ±1.5×ATR stop; `tpResolver`; trigger candle burned by timestamp; `wrongMode` guard |
+
+**Archived — not constructible, not tradeable:** 2 (FVG Fill), 3 (IDM), 4 (Mitigation Chain), 6 (SMS), 7 (AMD), 8 (Range Deviation), 9 (Turtle Soup), 10 (Breaker Block), 11 (Mitigation Block) live under `src/engine/scenarios/archive/legacy_smc/`; 13 (Top-Down Order Flow) lives under `src/engine/scenarios/archive/`. Their modules still compile and their suites still run, so the designs remain available for reference and possible revival — but no runtime path can schedule them, and their IDs fail validation.
 
 ### 8.1 Scenario Overview
 
-The router currently constructs Scenarios 12, 14 and 15. Scenarios 1–11 and 13 are archived and are not constructible by the live router. Scenario 12 is V5 Sniper (1m); Scenarios 14 and 15 are Classic 15m entries. Scenario 13 remains documented in §8.6 as a design reference. Active implementations expose rejection statistics for observability.
+`ScenarioRouter` constructs exactly five scenarios, in registry order: **1, 5, 12, 14, 15**. Scenario 12 is the only 1m producer and requires `ENABLE_SNIPER_MODE=true` — `loadConfig()` aborts the boot when `12` is requested with Sniper Mode off, and the router still rejects it with the `disabled` bucket as a defensive backstop. Scenarios 1, 5, 14 and 15 are Classic 15m entries and reject with the `wrongMode` bucket when Sniper Mode is active or `LTF_TIMEFRAME≠15`, so a stale 15m candle can never be re-scanned on 1m ticks. `ACTIVE_SCENARIOS` narrows the registry and can never add to it. Active implementations expose rejection statistics for observability.
 
 ### 8.7 Scenario 15 — Volatility Compression Squeeze
 
@@ -2143,9 +2137,11 @@ The router currently constructs Scenarios 12, 14 and 15. Scenarios 1–11 and 13
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
-- Scenarios setting `zoneDetails`: **1, 2, 3, 4, 5, 6, 7, 8, 10, 11**. Scenario 9 deliberately omits it (its `structureDetails` carries the sweep candle as the burn anchor) and Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21).
+- Scenarios setting `zoneDetails` in the live registry: **1, 5, 14**. Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 15 emits `structureDetails` only and burns the trigger candle by timestamp. Archived scenarios 2–4 and 6–11 keep their historical tagging inside the archive.
 
-### 8.3 Contextual Quality Filters (Confluence)
+### 8.3 Contextual Quality Filters (Confluence) — **ARCHIVED SCENARIOS**
+
+> None of the scenarios below is registered. They live under `src/engine/scenarios/archive/legacy_smc/`, still compile and still have suites, but no runtime path can schedule them. Retained as design reference.
 
 | Scenario                  | Filter                                       | Rejection Stat               |
 | ------------------------- | -------------------------------------------- | ---------------------------- |
@@ -2157,9 +2153,11 @@ All three also expose `totalEvals` / `noData` / `killzone`, and report only the 
 
 ---
 
-### 8.4 Scenario 11 — Mitigation Block — Full Implementation Details
+### 8.4 Scenario 11 — Mitigation Block — Full Implementation Details — **ARCHIVED**
 
-**File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
+> **ARCHIVED — not registered, not tradeable.** The module lives at `src/engine/scenarios/archive/legacy_smc/Scenario11_MitigationBlock.ts` and its suite at `tests/scenarios/archive/legacy_smc/`. Retained as design reference.
+
+**File**: `src/engine/scenarios/archive/legacy_smc/Scenario11_MitigationBlock.ts`
 
 **Core Logic**: Mitigation Block is a reversal pattern that forms after a Failed Swing (SMS):
 1. Price attempts a higher high (bearish SMS) / lower low (bullish SMS) but fails
@@ -2199,7 +2197,9 @@ All three also expose `totalEvals` / `noData` / `killzone`, and report only the 
 
 ### 8.5 V4 Classic Refactoring Standards (v2026-10-16)
 
-All Scenarios 1–11 were overhauled to eliminate array access hazards, enforce single-source-of-truth SL/TP math, and mandate mitigation tagging. Three rules are now mandatory for every classic scenario:
+All Scenarios 1–11 were overhauled to eliminate array access hazards, enforce single-source-of-truth SL/TP math, and mandate mitigation tagging. Three rules are now mandatory for every classic scenario.
+
+> **Scope today**: only Scenarios **1** and **5** (plus 14 and 15, added later) are live. The standards below still bind every live Classic scenario and every archived module that might be revived; references to 2–4 and 6–11 describe the v2026-10-16 pass that produced the archived code.
 
 #### 1. Freshness Guarantee (No `array[0]`)
 Scenarios MUST NEVER access the 0-th index or use a forward `.find()` when looking for OBs, FVGs, or CHoCHs — this fetches the oldest, stale structures. They MUST use `array[array.length - 1]` or `[...array].reverse().find(...)` to guarantee trading on the most recent market data.
@@ -2214,7 +2214,7 @@ Inline math for stop-loss or take-profit (e.g., `zone.bottom - offset`) is stric
 #### 3. Mandatory Mitigation Tagging
 Every scenario MUST populate `structureDetails` in its `RouterResult` — the trigger structure (`CHoCH`/`BOS`/`SMS` with `{ type, timestamp, price, direction }`). This allows `burnSetup()` and the live execution engine to instantly burn the trigger structure upon entry or abort, preventing Ghost Signal loops across all 11 classic patterns.
 
-> **Why**: Structures without `structureDetails` are never added to `mitigatedStructures` — the same trigger CHoCH can be re-detected on the next scan, producing infinite ghost re-entries. Zones are additionally tagged via `zoneDetails` (Scenarios 1–8, 10, 11). Scenario 9 intentionally omits `zoneDetails`: its `structureDetails` carries the sweep candle timestamp as the burn anchor.
+> **Why**: Structures without `structureDetails` are never added to `mitigatedStructures` — the same trigger CHoCH can be re-detected on the next scan, producing infinite ghost re-entries. Zones are additionally tagged via `zoneDetails` (live: Scenarios 1, 5 and 14; historically 1–8, 10, 11 in the archive). Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 15 emits `structureDetails` only.
 
 ---
 
@@ -2416,8 +2416,8 @@ BACKTEST_CSV_PATH=                 # optional local CSV source
 ENABLE_HEALTHCHECK_SERVER=false    # required true on Render
 
 # Scenarios
-ACTIVE_SCENARIOS=15                # Volatility Squeeze baseline; 12, 14, 15 are registered
-SCENARIOS_BTCUSDT=15               # optional per-symbol override (1–12, 14, 15; 13 is archived)
+ACTIVE_SCENARIOS=15                # live registry: 1, 5, 12, 14, 15 only; S12 needs ENABLE_SNIPER_MODE=true
+SCENARIOS_BTCUSDT=15               # optional per-symbol override (same five IDs; archived ids abort the boot)
 ENABLE_LIVE_TEST_ORDERS=false
 
 # Dynamic take-profit (structural targets instead of blind k * R)

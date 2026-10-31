@@ -1,6 +1,6 @@
-import { Scenario5_HTFLiquiditySweep } from '../../../../src/engine/scenarios/archive/legacy_smc/Scenario5_HTFLiquiditySweep';
+import { Scenario5_HTFLiquiditySweep } from '../../src/engine/scenarios/Scenario5_HTFLiquiditySweep';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../../../src/config/env';
+import { BotConfig } from '../../src/config/env';
 
 const mockConfig: BotConfig = {
   apiKey: '',
@@ -189,6 +189,23 @@ describe('Scenario5: HTF Liquidity Sweep', () => {
   beforeEach(() => {
     Scenario5_HTFLiquiditySweep.resetStats();
     scenario = new Scenario5_HTFLiquiditySweep(mockConfig);
+  });
+
+  describe('mode guard (audit F-03)', () => {
+    it('fails closed when Sniper Mode drives 1m closes', () => {
+      const sniper = new Scenario5_HTFLiquiditySweep({ ...mockConfig, enableSniperMode: true });
+
+      expect(sniper.evaluate(buildPatternData({ direction: 'BEARISH' }))).toBe(false);
+      expect(sniper.getReason()).toMatch(/Classic 15m-only/);
+      expect(Scenario5_HTFLiquiditySweep.getRejectionStats().wrongMode).toBe(1);
+    });
+
+    it('fails closed on a non-15m execution timeframe', () => {
+      const fiveMin = new Scenario5_HTFLiquiditySweep({ ...mockConfig, ltfTimeframe: '5' });
+
+      expect(fiveMin.evaluate(buildPatternData({ direction: 'BEARISH' }))).toBe(false);
+      expect(Scenario5_HTFLiquiditySweep.getRejectionStats().wrongMode).toBe(1);
+    });
   });
 
   describe('positive cases', () => {

@@ -1,5 +1,11 @@
 import "dotenv/config";
 import { Decimal } from "decimal.js";
+import {
+  ARCHIVED_SCENARIO_IDS_LABEL,
+  describeRegisteredScenarios,
+  isRegisteredScenarioId,
+  REGISTERED_SCENARIO_IDS,
+} from "../engine/scenarioRegistry";
 
 export interface RiskConfig {
   readonly baseRiskPercent: string;
@@ -201,18 +207,52 @@ function parseSymbols(raw: string): string[] {
   return symbols;
 }
 
-function parseActiveScenarios(raw: string | null): number[] {
-  if (!raw || !raw.trim()) return [];
-  const ids = raw
+/**
+ * Strict scenario-ID list parser (audit F-02).
+ *
+ * Only the five IDs in `REGISTERED_SCENARIO_IDS` are accepted. An archived id is
+ * a hard error, never a silent drop: a dropped id used to leave a live process
+ * with fewer scenarios than the operator configured — and in the extreme
+ * (`.env.example` shipped `1..12` with Sniper OFF) with none that could ever
+ * fire, while `/health` stayed green. Configuration mistakes must fail at boot.
+ */
+function parseScenarioIdList(raw: string, label: string): number[] {
+  const tokens = raw
     .split(",")
-    .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isInteger(n) && (n >= 1 && n <= 12 || n === 14 || n === 15));
-  if (ids.length === 0) {
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  if (tokens.length === 0) {
     throw new Error(
-      "ACTIVE_SCENARIOS must contain valid scenario IDs (1-12, 14, or 15; 13 is archived), e.g. ACTIVE_SCENARIOS=15",
+      `${label} must contain at least one scenario ID from [${describeRegisteredScenarios()}].`,
     );
   }
+
+  const invalid: string[] = [];
+  const ids: number[] = [];
+  for (const token of tokens) {
+    // Digits only: `Number()` alone would accept "0xC" as 12 or "1e1" as 10.
+    const id = /^\d+$/.test(token) ? Number(token) : Number.NaN;
+    if (!Number.isInteger(id) || !isRegisteredScenarioId(id)) {
+      invalid.push(token);
+      continue;
+    }
+    ids.push(id);
+  }
+
+  if (invalid.length > 0) {
+    throw new Error(
+      `${label} must contain ONLY registered scenario IDs [${describeRegisteredScenarios()}]; ` +
+        `got: ${invalid.join(",")}. Archived and not tradeable: ${ARCHIVED_SCENARIO_IDS_LABEL}.`,
+    );
+  }
+
   return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+function parseActiveScenarios(raw: string | null): number[] {
+  if (!raw || !raw.trim()) return [];
+  return parseScenarioIdList(raw, "ACTIVE_SCENARIOS");
 }
 
 function parseAllowedDaysOfWeek(raw: string): number[] {
@@ -406,16 +446,9 @@ function parseSymbolScenarios(
     const key = `SCENARIOS_${symbol}`;
     const raw = env[key];
     if (raw && raw.trim()) {
-      const ids = raw
-        .split(",")
-        .map((s) => parseInt(s.trim(), 10))
-        .filter((n) => Number.isInteger(n) && (n >= 1 && n <= 12 || n === 14 || n === 15));
-      if (ids.length > 0) {
-        map.set(
-          symbol,
-          [...new Set(ids)].sort((a, b) => a - b),
-        );
-      }
+      // Strict: an archived id here fails the boot instead of silently narrowing
+      // the symbol to a subset the operator never asked for.
+      map.set(symbol, parseScenarioIdList(raw, key));
     }
   }
   return map;
@@ -829,6 +862,48 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     (optionalEnv(env, "ENABLE_TRADE_NOTIFICATIONS") ?? "true").toLowerCase() ===
     "true";
 
+  // ==========================================================================
+  // P0 BOOT-TIME FAIL-FAST — audit F-02
+  // ==========================================================================
+  // A process that resolves to zero *effective* scenarios stays alive, keeps
+  // `/health` green and never emits a signal. That silent-failure mode is how a
+  // `.env.example` carrying only archived ids could ship unnoticed, so every
+  // configuration that cannot possibly trade now aborts the boot instead.
+  const explicitActiveScenarios = parseActiveScenarios(
+    optionalEnv(env, "ACTIVE_SCENARIOS"),
+  );
+  // Unset means "every registered scenario" — the router's documented contract.
+  // `loadConfig` materialises it so the emptiness check below is a real
+  // invariant rather than dead code.
+  const activeScenarios =
+    explicitActiveScenarios.length > 0
+      ? explicitActiveScenarios
+      : [...REGISTERED_SCENARIO_IDS];
+
+  if (activeScenarios.length === 0) {
+    throw new Error(
+      "FATAL: Resolved active scenario list is empty. Check ACTIVE_SCENARIOS.",
+    );
+  }
+
+  if (explicitActiveScenarios.includes(12) && !enableSniperMode) {
+    throw new Error("FATAL: Scenario 12 requires ENABLE_SNIPER_MODE=true.");
+  }
+
+  // The per-symbol family can starve a single symbol the same way: configuring
+  // only Scenario 12 for one pair while Sniper Mode is off leaves that pair with
+  // a scenario that rejects on every candle (`disabled`).
+  const sniperScenarioSymbols = [...symbolScenarios.entries()]
+    .filter(([, ids]) => ids.includes(12))
+    .map(([symbol]) => symbol);
+  if (!enableSniperMode && sniperScenarioSymbols.length > 0) {
+    throw new Error(
+      `FATAL: Scenario 12 requires ENABLE_SNIPER_MODE=true (requested by ${sniperScenarioSymbols
+        .map((symbol) => `SCENARIOS_${symbol}`)
+        .join(", ")}).`,
+    );
+  }
+
   return {
     cooldownCandles,
     apiKey: requireEnv(env, "BYBIT_API_KEY"),
@@ -856,7 +931,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     enableLiveTestOrders:
       (optionalEnv(env, "ENABLE_LIVE_TEST_ORDERS") ?? "false").toLowerCase() ===
       "true",
-    activeScenarios: parseActiveScenarios(optionalEnv(env, "ACTIVE_SCENARIOS")),
+    activeScenarios,
     enableFundingMonitor,
     fundingMonitorSymbols,
     fundingAlertThresholdPct,

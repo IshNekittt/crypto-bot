@@ -1,7 +1,7 @@
-import { BaseScenario, TradeLevels } from '../../../baseScenario';
+import { BaseScenario, TradeLevels } from '../baseScenario';
 import { Decimal } from 'decimal.js';
-import { BotConfig } from '../../../../config/env';
-import { resolveTakeProfit } from '../../../tpResolver';
+import { BotConfig } from '../../config/env';
+import { resolveTakeProfit } from '../tpResolver';
 
 /** 15m entry timeframe of this scenario. */
 const ENTRY_TIMEFRAME = '15';
@@ -36,8 +36,9 @@ interface EntryPlan {
 }
 
 /** Funnel counters surfaced in the backtest report (AGENTS.md §8.1). */
-interface Scenario1Stats {
+export interface Scenario1Stats {
   totalEvals: number;
+  wrongMode: number;
   killzone: number;
   noCandles: number;
   noOb: number;
@@ -76,6 +77,7 @@ export class Scenario1_HTFContinuation extends BaseScenario {
 
   private static stats: Scenario1Stats = {
     totalEvals: 0,
+    wrongMode: 0,
     killzone: 0,
     noCandles: 0,
     noOb: 0,
@@ -94,6 +96,7 @@ export class Scenario1_HTFContinuation extends BaseScenario {
   static resetStats(): void {
     this.stats = {
       totalEvals: 0,
+      wrongMode: 0,
       killzone: 0,
       noCandles: 0,
       noOb: 0,
@@ -115,6 +118,21 @@ export class Scenario1_HTFContinuation extends BaseScenario {
     stats.totalEvals++;
     this.lastFailure = '';
     this.lastFailureKind = 'none';
+
+    // Mode guard (audit F-03): Scenario 1 is a 15m Classic pattern. In Sniper
+    // Mode the engine drives 1m closes, so this scenario would re-evaluate the
+    // same stale 15m candle on every tick and could stage an entry from a close
+    // up to 14 minutes old. Fail closed instead of degrading silently.
+    if (
+      this.config.enableSniperMode ||
+      this.config.ltfTimeframe !== ENTRY_TIMEFRAME
+    ) {
+      this.logRejection(
+        'Scenario 1 is Classic 15m-only (Sniper Mode or non-15m LTF active)',
+      );
+      stats.wrongMode++;
+      return false;
+    }
 
     // London/NY only. `isInKillzone()` intentionally accepts ASIAN for other
     // scenarios, so the session gate is explicit here. Still bypassable globally
