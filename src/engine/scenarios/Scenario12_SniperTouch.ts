@@ -1,7 +1,7 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../../config/env';
-import { ROUND_TRIP_TAKER_FEE } from '../../config/fees';
+import { ROUND_TRIP_TAKER_FEE, shouldUseMarketEntry } from '../../config/fees';
 import { PatternData, MacroContext, Structure } from '../../smc/patternRecognizer';
 import { resolveTakeProfit } from '../tpResolver';
 import { logger } from '../../utils/logger';
@@ -17,8 +17,11 @@ import { logger } from '../../utils/logger';
  *   netRr = (targetDistance − roundTripFee) / (stopDistance + roundTripFee)
  *
  * A nominal 1.5R target with a stop smaller than the fee is a net loser even
- * when it hits. This floor is measured in price units on the SAME entry the
- * trade will be booked against, so it cannot be gamed by a favourable fill.
+ * when it hits. Both distances are measured from the price the entry will
+ * actually be BOOKED at — `idealEntry` for a resting Limit, the market price for
+ * a Market fill (see `resolveShieldEntry`). Measuring from `idealEntry` while
+ * the executor pays a drifted market price understates the risk and overstates
+ * the reward, so the shield would pass a trade that is already sub-1.0R.
  */
 
 /** CHoCH / OB must sit within 0.3% of the swept level (or the source's ATR band, whichever is wider). */
@@ -157,6 +160,52 @@ export class Scenario12_SniperTouch extends BaseScenario {
     Scenario12_SniperTouch.rejectionStats[key] += 1;
     this.logRejection(reason);
     return false;
+  }
+
+  /**
+   * Resolve the price the entry will actually be booked at, for the P0 shields.
+   *
+   * `idealEntry` is the OB midpoint — the *planned* price. Execution does not
+   * always pay it: `shouldUseMarketEntry()` routes a discount or an at-entry
+   * signal to a Market order that fills at the market price, and only an adverse
+   * move beyond `SMART_ENTRY_THRESHOLD_PCT` rests a Limit at `idealEntry`.
+   *
+   * Judging `netRr` / `minTpDistancePct` against `idealEntry` while the fill
+   * happens somewhere else makes the shields cosmetic: a long filled 0.15% above
+   * plan simultaneously widens the stop and shortens the target, turning a
+   * nominal 1.5R into a realised sub-1.0R trade with both gates "passed".
+   *
+   * The Market/Limit decision is delegated to `shouldUseMarketEntry` — the exact
+   * helper used by `executeStagedEntry()`, `handleApproval()` and the backtester —
+   * so the shield and the executor can never disagree about the order type.
+   *
+   * A market price that already left the SL..TP envelope is NOT priced here: the
+   * setup is DEAD, and the pre-flight guard owns it (including its mitigation
+   * burn). Evaluating a fill that cannot happen would only move the rejection
+   * into this funnel and skip the burn.
+   */
+  private resolveShieldEntry(
+    idealEntry: Decimal,
+    marketPrice: Decimal,
+    stopLoss: Decimal,
+    takeProfit: Decimal,
+    isLong: boolean
+  ): { entry: Decimal; orderType: 'Market' | 'Limit' } {
+    const limitEntry = { entry: idealEntry, orderType: 'Limit' as const };
+
+    if (!marketPrice.gt(0)) return limitEntry;
+
+    const threshold = new Decimal(this.config.smartEntryThresholdPct || '0.0015');
+    if (!shouldUseMarketEntry(idealEntry, marketPrice, isLong, threshold)) {
+      return limitEntry;
+    }
+
+    const insideEnvelope = isLong
+      ? marketPrice.gt(stopLoss) && marketPrice.lt(takeProfit)
+      : marketPrice.lt(stopLoss) && marketPrice.gt(takeProfit);
+    if (!insideEnvelope) return limitEntry;
+
+    return { entry: marketPrice, orderType: 'Market' };
   }
 
   // Override evaluate to accept 1m candles
@@ -473,23 +522,35 @@ export class Scenario12_SniperTouch extends BaseScenario {
     // This is the deterministic kill switch for the sub-1.0 Net-RR trades: a
     // target that is nominally 1.5R but sits inside the fee envelope is rejected
     // here instead of being discovered as a loss on the exchange.
-    const stopDistance = baseLevels.entry.minus(baseLevels.stopLoss).abs();
+    //
+    // Both distances are measured from the EXECUTION price, never from the OB
+    // midpoint unconditionally: a Market fill pays the market, so the realised
+    // stop widens and the realised target shortens the moment price drifts.
+    const shield = this.resolveShieldEntry(
+      idealEntry,
+      currentPrice,
+      baseLevels.stopLoss,
+      resolution.takeProfit,
+      direction === 'BULLISH'
+    );
+    const shieldEntry = shield.entry;
+
+    const stopDistance = shieldEntry.minus(baseLevels.stopLoss).abs();
     if (stopDistance.lte(0)) {
       return this.reject('geometry', 'Zero stop distance — Net-R undefined');
     }
-    const targetDistance = resolution.takeProfit.minus(baseLevels.entry).abs();
-    const roundTripFeeInPrice = baseLevels.entry.mul(ROUND_TRIP_TAKER_FEE);
+    const targetDistance = resolution.takeProfit.minus(shieldEntry).abs();
+    const roundTripFeeInPrice = shieldEntry.mul(ROUND_TRIP_TAKER_FEE);
     const netRr = targetDistance.minus(roundTripFeeInPrice).div(stopDistance.plus(roundTripFeeInPrice));
 
     if (netRr.lt(this.config.minNetRr)) {
       return this.reject(
         'insufficientNetR',
-        `Net R:R ${netRr.toFixed(3)} < ${this.config.minNetRr.toString()} (target ${targetDistance
-          .div(baseLevels.entry)
+        `Net R:R ${netRr.toFixed(3)} < ${this.config.minNetRr.toString()} (entry ${shield.orderType} ${shieldEntry
+          .toString()} | target ${targetDistance.div(shieldEntry).mul(100).toFixed(3)}% | stop ${stopDistance
+          .div(shieldEntry)
           .mul(100)
-          .toFixed(3)}% | stop ${stopDistance.div(baseLevels.entry).mul(100).toFixed(3)}% | fee ${ROUND_TRIP_TAKER_FEE.mul(
-          100
-        ).toFixed(3)}%)`
+          .toFixed(3)}% | fee ${ROUND_TRIP_TAKER_FEE.mul(100).toFixed(3)}%)`
       );
     }
 
@@ -497,12 +558,15 @@ export class Scenario12_SniperTouch extends BaseScenario {
     // Bybit charges ~0.11% round-trip taker fees. A target closer than
     // `minTpDistancePct` (default 0.35%) hands 30-45% of the gross move to the
     // exchange, so the trade is fee-dominated even when it reaches TP. This is a
-    // hard floor on the RESOLVED target, so it covers structural and fixed-R alike.
-    const targetDistancePct = resolution.takeProfit.minus(idealEntry).abs().div(idealEntry);
+    // hard floor on the RESOLVED target, so it covers structural and fixed-R alike,
+    // and it is measured from the same execution price as Filter 4A.
+    const targetDistancePct = targetDistance.div(shieldEntry);
     if (targetDistancePct.lt(this.config.minTpDistancePct)) {
       return this.reject(
         'insufficientRoom',
-        `Target distance ${targetDistancePct.mul(100).toFixed(3)}% < fee threshold ${this.config.minTpDistancePct.mul(100).toFixed(2)}%`
+        `Target distance ${targetDistancePct.mul(100).toFixed(3)}% < fee threshold ${this.config.minTpDistancePct
+          .mul(100)
+          .toFixed(2)}% (entry ${shield.orderType} ${shieldEntry.toString()})`
       );
     }
 

@@ -139,6 +139,22 @@ function buildCandles(options: { sweepAfterChoch?: boolean; farOb?: boolean } = 
 }
 
 /**
+ * Rewrite the final (signal) 1m candle.
+ *
+ * S12 prices the P0 shields from this close, so entry-drift tests need to move
+ * it WITHOUT touching the setup geometry (sweep, OB, CHoCH). Keep the high at
+ * `prevClose + 0.4` whenever the ATR must stay at 0.4: the true range of the
+ * replaced candle is then unchanged, so the stop and target stay put and only
+ * the execution price moves.
+ */
+function setLastCandle(
+  candles: any[],
+  ohlc: { open: string; high: string; low: string; close: string },
+) {
+  candles[candles.length - 1] = { ...candles[candles.length - 1], ...ohlc };
+}
+
+/**
  * Closed 4H history for the persistent trend gate.
  *
  * S12 now fails closed below 20 closed 4H candles, so an empty `candles4h` would
@@ -592,6 +608,12 @@ describe('Scenario12: arithmetic shields', () => {
   });
 
   it('rejects with insufficientNetR when fee-inclusive R:R is below 1.5', () => {
+    // Signal candle priced exactly at the OB midpoint (100.875): the Market fill
+    // pays the plan, so the shield measures the nominal geometry. Drift is
+    // covered by the dedicated "P0 shield entry drift" suite below.
+    const candles = buildCandles();
+    setLastCandle(candles, { open: '100.86', high: '101.0', low: '100.85', close: '100.875' });
+
     const s = new Scenario12_SniperTouch({
       ...mockConfig,
       enableDynamicTp: false,
@@ -601,7 +623,7 @@ describe('Scenario12: arithmetic shields', () => {
       minTpDistancePct: new Decimal('0'),
     });
 
-    expect(s.evaluate(buildPatternData(buildCandles()))).toBe(false);
+    expect(s.evaluate(buildPatternData(candles))).toBe(false);
     expect(s.getReason()).toMatch(/Net R:R 0\.852 < 1\.5/);
   });
 
@@ -620,6 +642,89 @@ describe('Scenario12: arithmetic shields', () => {
     }).evaluate(buildPatternData(lowVol));
     const stats = Scenario12_SniperTouch.getRejectionStats();
     expect(stats.insufficientVolatility).toBeGreaterThan(0);
+  });
+});
+
+describe('Scenario12: P0 shield entry drift', () => {
+  // The shields are measured against the price the entry will actually be
+  // BOOKED at, never against the OB midpoint unconditionally:
+  //
+  //   discount or within SMART_ENTRY_THRESHOLD_PCT -> Market -> market price
+  //   adverse move beyond the threshold             -> Limit  -> idealEntry
+  //
+  // Measuring a Market fill at `idealEntry` understates risk and overstates
+  // reward: a long filled above plan has a longer stop and a shorter target, so
+  // a nominal 1.5R can be a realised sub-1.0R trade with both gates "passed".
+  const driftShieldConfig = {
+    ...mockConfig,
+    enableDynamicTp: false,
+    fixedTpRr: new Decimal('2.9'),
+    minNetRr: new Decimal('1.5'),
+    minVolatilityFeeRatio: new Decimal(1),
+    minTpDistancePct: new Decimal('0'),
+  };
+
+  it('rejects an adverse Market drift that turns a passing plan into a sub-floor Net-R', () => {
+    // Same sweep/OB/CHoCH, same SL (100.5) and TP (101.9625) — only the signal
+    // close moves, exactly like a live tape drifting while the setup matures.
+    const atEntry = buildCandles();
+    setLastCandle(atEntry, { open: '100.86', high: '101.0', low: '100.85', close: '100.875' });
+
+    const planned = new Scenario12_SniperTouch(driftShieldConfig);
+    expect(planned.evaluate(buildPatternData(atEntry))).toBe(true);
+
+    // +0.104% adverse (still inside the 0.15% Market threshold) widens the stop
+    // from 0.375 to 0.48 and shortens the target from 1.0875 to 0.9825.
+    const drifted = buildCandles();
+    setLastCandle(drifted, { open: '100.90', high: '101.0', low: '100.85', close: '100.98' });
+
+    const adverse = new Scenario12_SniperTouch(driftShieldConfig);
+    expect(adverse.evaluate(buildPatternData(drifted))).toBe(false);
+    expect(adverse.getReason()).toMatch(/Net R:R 1\.474 < 1\.5/);
+    expect(adverse.getReason()).toMatch(/entry Market 100\.98/);
+  });
+
+  it('prices a favourable discount at the price the Market fill actually pays', () => {
+    // At the OB midpoint this geometry is 0.852 Net-R (see the arithmetic-shield
+    // suite). The fixture close is 100.6 — a 0.27% discount — so the Market fill
+    // buys a shorter stop and a longer target instead of inheriting the fiction.
+    const s = new Scenario12_SniperTouch({
+      ...driftShieldConfig,
+      fixedTpRr: new Decimal('1.4'),
+    });
+
+    expect(s.evaluate(buildPatternData(buildCandles()))).toBe(true);
+    // The shield only re-prices the fill; the emitted geometry stays anchored to
+    // the OB midpoint, so Limit placement and pre-flight guards are untouched.
+    expect(s.getLevels().entry.toString()).toBe('100.875');
+  });
+
+  it('prices an adverse move beyond the threshold at idealEntry (resting Limit)', () => {
+    // 101.2 is +0.32% from the plan: too far for a Market order, so execution
+    // rests a Limit at 100.875 and THAT is the price the shields must judge.
+    const candles = buildCandles();
+    setLastCandle(candles, { open: '101.0', high: '101.25', low: '101.15', close: '101.2' });
+
+    const s = new Scenario12_SniperTouch({
+      ...driftShieldConfig,
+      fixedTpRr: new Decimal('1.4'),
+    });
+
+    expect(s.evaluate(buildPatternData(candles))).toBe(false);
+    expect(s.getReason()).toMatch(/Net R:R 0\.86\d < 1\.5/);
+    expect(s.getReason()).toMatch(/entry Limit 100\.875/);
+  });
+
+  it('leaves a price already beyond the stop to the pre-flight DEAD-setup guard', () => {
+    // 100.4 is below the 100.5 stop: the trade is dead, not sub-floor. Rejecting
+    // it here would move the rejection into the shield funnel and skip the
+    // mitigation burn that the pre-flight path performs.
+    const candles = buildCandles();
+    setLastCandle(candles, { open: '100.5', high: '100.6', low: '100.3', close: '100.4' });
+
+    const s = new Scenario12_SniperTouch(driftShieldConfig);
+
+    expect(s.evaluate(buildPatternData(candles))).toBe(true);
   });
 });
 
@@ -1047,15 +1152,19 @@ describe('Scenario12: persistent 4H trend gate', () => {
 
 describe('Scenario12: fee-aware target distance floor', () => {
   it('rejects a resolved target closer than minTpDistancePct', () => {
-    // The default fixed 3R target is 1.125 from 100.875 (1.115%). A 5% floor
-    // makes it fee-dominated by definition.
+    // The default fixed 3R target is 1.125 from the OB midpoint (1.115%). The
+    // fixture's signal close is 100.6, a discount the executor fills at Market,
+    // so the shield measures the target from 100.6 (1.392%) — the distance the
+    // trade actually has to travel. A 5% floor makes it fee-dominated either way.
     const s = new Scenario12_SniperTouch({
       ...mockConfig,
       minTpDistancePct: new Decimal('0.05'),
     });
 
     expect(s.evaluate(buildPatternData(buildCandles()))).toBe(false);
-    expect(s.getReason()).toMatch(/Target distance 1\.115% < fee threshold 5\.00%/);
+    expect(s.getReason()).toMatch(
+      /Target distance 1\.392% < fee threshold 5\.00% \(entry Market 100\.6\)/,
+    );
   });
 
   it('accepts a target that clears the default 0.35% floor', () => {

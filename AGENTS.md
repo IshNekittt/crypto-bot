@@ -1626,7 +1626,7 @@ Two hard gates close the audit's two largest loss sources: counter-trend shorts 
 | Gate | Rule | Rejection key |
 | --- | --- | --- |
 | **Persistent 4H trend (SMA50)** | `sma50 = mean(last min(50, len) closed 4H closes)` from `patternData.candles4h`. Shorts require the last 4H close `≤ sma50 × 1.002`; longs require `≥ sma50 × 0.998`. The only exception is price at the unmitigated opposing 4H POI (`isAtOpposingHtfZone`). Fewer than **20** closed 4H candles fails closed. The existing 4H BOS/CHoCH check remains as a secondary confirmation. | `htfContradiction` |
-| **Fee-aware target floor** | After `resolveTakeProfit()` succeeds: `targetDistancePct = \|target − idealEntry\| / idealEntry`. If it is below `MIN_TP_DISTANCE_PCT` (default `0.0035` = 0.35%) the setup is rejected. Applies to structural and fixed-R targets alike. | `insufficientRoom` |
+| **Fee-aware target floor** | After `resolveTakeProfit()` succeeds: `targetDistancePct = \|target − executionEntry\| / executionEntry`, where `executionEntry` is the price the entry will actually be booked at (`currentPrice` for a Market fill, `idealEntry` for a resting Limit — see §7.13.5). If it is below `MIN_TP_DISTANCE_PCT` (default `0.0035` = 0.35%) the setup is rejected. Applies to structural and fixed-R targets alike. | `insufficientRoom` |
 
 **Config**: `MIN_TP_DISTANCE_PCT` is parsed into `BotConfig.minTpDistancePct` as a `Decimal`, must be `> 0` and `< 0.1`; an absent value defaults to `0.0035`. `SNIPER_LIMIT_EXPIRATION_CANDLES` remains `15`.
 
@@ -1641,7 +1641,7 @@ Two hard gates close the audit's two largest loss sources: counter-trend shorts 
 
 Against the 3-symbol subset of the §7.13.3 baseline (**+$227.04 / 40 trades / 52.50% WR / $326.30 fees**), the refinements add **+$42.81** net while cutting trades by **47.5%** and fees by **50.4%**. LINK is the only regression (−$27.60 vs +$7.06): the fee floor removed a micro-target short winner (2026-10-16, 0.192% target) and the SMA50 gate removed a counter-trend long winner (2026-10-18, 4H close 6.9% below SMA50), while the surviving losses clustered. The gates are behaving as designed — they trade frequency for directional and fee alignment.
 
-> **Boundary note**: the fee floor is measured against `idealEntry` (as specified). A Market fill at a premium can realize a slightly shorter target distance; the LINK 2026-10-22 trade is the observed edge case (planned 0.353%, realized 0.287%). Extending the floor to the actual fill is a deliberate future decision, not a silent clamp.
+> **Boundary note (resolved v2026-11-01)**: the floor originally measured against `idealEntry`, so a Market fill at a premium realised a shorter target distance — the LINK 2026-10-22 trade is the observed edge case (planned 0.353%, realized 0.287%). Both arithmetic shields now measure the **execution entry** (§7.13.5), which closes that gap by construction: the gate and the fill can no longer disagree.
 
 #### 7.13.5 S12 P0 Arithmetic Shields — Net R:R + ATR-to-Fee Admission — **NEW v2026-10-26**
 
@@ -1650,7 +1650,28 @@ Two arithmetic gates reject fee-dominated geometry **before** an order is ever s
 | Gate | Env | Rejection bucket | Rule |
 | --- | --- | --- | --- |
 | **Volatility admission** | `MIN_VOLATILITY_FEE_RATIO` (default `1.0`) | `insufficientVolatility` | `atr1m / close ≥ ratio × ROUND_TRIP_TAKER_FEE`. At `1.5` the 1m ATR must be ≥ **~0.165%** of price. |
-| **Net reward:risk** | `MIN_NET_RR` (default `1.0`) | `insufficientNetR` | `netRr = (targetDistance − roundTripFeeInPrice) / (stopDistance + roundTripFeeInPrice) ≥ ratio`. Fees are added to the **denominator** as well, so a tight stop is punished exactly as much as a short target. |
+| **Net reward:risk** | `MIN_NET_RR` (default `1.0`) | `insufficientNetR` | `netRr = (targetDistance − roundTripFeeInPrice) / (stopDistance + roundTripFeeInPrice) ≥ ratio`, with both distances measured from `executionEntry` (below). Fees are added to the **denominator** as well, so a tight stop is punished exactly as much as a short target. |
+
+**Execution-price anchoring** (`resolveShieldEntry()`, v2026-11-01): both gates price the entry the trade will actually be **booked at**, not the OB midpoint unconditionally.
+
+| Condition | Order type | `executionEntry` |
+| --- | --- | --- |
+| Discount (`idealEntry` better than the market) or within `SMART_ENTRY_THRESHOLD_PCT` (0.15%) | Market | `currentPrice` — the signal 1m close, which is exactly the backtester's Market fill |
+| Adverse move beyond the threshold | Limit @ OB midpoint | `idealEntry` |
+| Market price already outside `SL..TP` | — | `idealEntry` (the setup is DEAD; pre-flight owns it and performs the burn) |
+
+The Market/Limit decision is delegated to `shouldUseMarketEntry()` from `src/config/fees.ts` — the same helper used by `executeStagedEntry()`, `handleApproval()` and the backtester — so the shield and the executor can never disagree about the order type.
+
+**Why it matters**: on a long, an adverse fill simultaneously **widens** the stop (`entry − SL`) and **shortens** the target (`TP − entry`). Judging the same geometry from `idealEntry` therefore understates risk and overstates reward. A measured example from the NEAR 60-day control: the 2026-10-05 04:54 trade passed the `MIN_NET_RR=1.0` gate at 1.004 on `idealEntry = 4.8537`, but filled at 4.854 — a 0.006% premium — where the realised geometry is (0.0240 − 0.0053) / (0.0138 + 0.0053) = **0.973**. The gate now rejects it with `insufficientNetR`.
+
+**Measured effect (NEARUSDT, identical 60-day window 2026-09-01 → 2026-10-31, clock pinned so both runs read the same cache)**:
+
+| Run | Trades | Net | WR | PF | Max DD | Fees |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before (idealEntry) | 10 | +$284.94 (+28.49%) | 70.00% | 6.19 | 2.22% | $78.26 |
+| After (execution entry) | 9 | +$252.24 (+25.22%) | 66.67% | 5.64 | 2.22% | $68.83 |
+
+Nine of ten signals are byte-identical (same timestamps, same prices); the only delta is the 2026-10-05 trade above. The funnel shifts accordingly: `insufficientNetR` falls 84 → 38 because discount fills are now credited with the better price they actually pay, while `insufficientRoom` rises 550 → 614 as those setups advance one gate further. The removed trade was a winner (+$31.54), so the gate costs profit on this window — that is the price of enforcing a floor the trade violated at fill. Directionally this is a correctness fix, not a tuning knob: do not lower `MIN_NET_RR` to buy the trade back.
 
 **Why both, and why two separate buckets**:
 - The volatility gate answers *"is this market worth paying to trade at all?"* — a 1m ATR narrower than the round-trip fee makes the stop noise-wide relative to its own cost, and no win rate survives that. It fires **before** CHoCH detection, so a dead-volatility minute never even reaches structure matching.
@@ -1662,6 +1683,8 @@ Two arithmetic gates reject fee-dominated geometry **before** an order is ever s
 2. The net-R gate runs on `baseLevels` (the pre-target geometry) and rejects on zero stop distance (`geometry`) before dividing.
 3. Neither gate clamps, rounds or "adjusts" a target — rejection only. Widening a stop or shrinking a target to satisfy a ratio would silently rewrite the scenario's structure.
 4. Both are resolved per symbol through `resolveSymbolConfig()`, so `MIN_NET_RR_<SYMBOL>` and `MIN_VOLATILITY_FEE_RATIO_<SYMBOL>` calibrate one pair without touching the portfolio.
+5. The Net-R gate and the fee floor share **one** `executionEntry` per evaluation (`resolveShieldEntry`); neither may be measured from `idealEntry` while the other uses the fill. The emitted `levels.entry` stays the OB midpoint — the shield only prices the fill, so Limit placement and the pre-flight DEAD-setup guards keep their existing anchors.
+6. A market price that has already left the `SL..TP` envelope is **not** priced as a fill: the setup is DEAD and the pre-flight path must own it so the mitigation burn still happens. Moving that rejection into the shield funnel would skip the burn and risk a ghost re-entry.
 
 **Scope**: both parameters are read **exclusively** by `Scenario12_SniperTouch.ts`. Scenarios 1–11 never consult them, which is why a Classic deployment (`.env.subaru`) must not carry them — a knob that is never evaluated is worse than an absent one, because it reads as protection.
 
@@ -2439,7 +2462,7 @@ SMC_SWEEP_MIN_WICK_RATIO=0.25      # S12 + S9: min rejection wick share of candl
 # S12 sweep sources (opt-in; macro PDH/PDL/PWH/PWL is always armed)
 S12_SESSION_SWEEPS=false           # true = newest ASIAN high/low becomes a sweepable level
 S12_EQH_EQL_SWEEPS=false           # true = 15m EQH/EQL pools become sweepable levels
-MIN_TP_DISTANCE_PCT=0.0035         # S12 fee floor: reject targets < 0.35% from idealEntry (must be > 0 and < 0.1)
+MIN_TP_DISTANCE_PCT=0.0035         # S12 fee floor: reject targets < 0.35% from the execution entry (must be > 0 and < 0.1)
 
 # S12 P0 shields (see §7.13.5). Inert for Scenarios 1-11.
 MIN_NET_RR=1.0                     # fee-inclusive R:R floor: (target - fee) / (stop + fee)
@@ -2509,7 +2532,7 @@ docker compose up -d
 | Domain | Invariants |
 | --- | --- |
 | **Money, Precision & Capacity** | 1, 30, 34, 55 |
-| **Execution Physics** (pre-flight → fill → bookkeeping) | 6, 18, 23, 24, 29, 31, 33, 34, 38, 39, 47, 49, 52, 54 |
+| **Execution Physics** (pre-flight → fill → bookkeeping) | 6, 18, 23, 24, 29, 31, 33, 34, 38, 39, 47, 49, 52, 54, 61 |
 | **Exchange Truth & Reconciliation** | 7, 26, 27, 28, 35, 40, 53 |
 | **State Machine & Concurrency** | 6, 16, 23, 36, 37, 47, 49, 60 |
 | **Ghost Signals & Mitigation** | 4, 5, 14, 15, 19, 21, 25, 36, 39 |
@@ -2614,9 +2637,11 @@ docker compose up -d
 
 58. **Persistent 4H Trend Gate (S12)** — Scenario 12 MUST require the last **closed** 4H close to be aligned with the reversal via a causal SMA50 of `patternData.candles4h`: shorts need `close ≤ sma50 × 1.002`, longs need `close ≥ sma50 × 0.998`, unless price is at the unmitigated opposing 4H POI (`isAtOpposingHtfZone`). With fewer than **20** closed 4H candles the gate fails closed. The SMA is the primary gate; the 4H BOS/CHoCH direction check remains secondary. The SMA is never recomputed from the forming 4H candle.
 
-59. **Fee-Aware TP Distance Floor (S12)** — After `resolveTakeProfit()` succeeds, Scenario 12 MUST reject any setup whose resolved target sits closer than `MIN_TP_DISTANCE_PCT` (default `0.35%`) from `idealEntry`: `|target − idealEntry| / idealEntry`. The floor applies to structural and fixed-R targets alike, uses `Decimal`, and rejects with the `insufficientRoom` bucket. `MIN_TP_DISTANCE_PCT` is parsed as `Decimal` and validated in `(0, 0.1)`.
+59. **Fee-Aware TP Distance Floor (S12)** — After `resolveTakeProfit()` succeeds, Scenario 12 MUST reject any setup whose resolved target sits closer than `MIN_TP_DISTANCE_PCT` (default `0.35%`) from the **execution entry**: `|target − executionEntry| / executionEntry`, where `executionEntry` is the price the entry will actually be booked at (Market → market price, resting Limit → `idealEntry`; Invariant 61). The floor applies to structural and fixed-R targets alike, uses `Decimal`, and rejects with the `insufficientRoom` bucket. `MIN_TP_DISTANCE_PCT` is parsed as `Decimal` and validated in `(0, 0.1)`.
 
 60. **A WS Close Event May Only End a Trade It Can See** — In `processClosedPosition()`, when `db.getOpenTrade(symbol)` returns `null`, the handler MUST log and `return` **without** calling `transition(...)` or `burnSetup()`. An empty DB row while the engine is `IN_TRADE` means the entry pipeline is still inside the Invariant 47 bookkeeping window (`transition(IN_TRADE)` → 500 ms → `getOpenPositions()` → `db.openTrade()`), not that the state must be reset. Forcing `SCANNING` there leaves a live trade whose Adaptive Fractioning is permanently disabled — the position rides an unmanaged full stop-loss. Any genuine instant close during that window is adopted by the 10-minute ReconciliationLoop (Invariant 27, §3.4) once the row lands as `OPEN`. Resetting on absence of evidence is strictly forbidden. See §16.3.9.
+
+61. **P0 Shields Price the Execution Entry, Not the Plan** — Scenario 12's `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` gates MUST be evaluated against the price the entry will actually be booked at. `resolveShieldEntry()` delegates the Market/Limit decision to `shouldUseMarketEntry()` (`src/config/fees.ts`): a discount or an at-entry/adverse move inside `SMART_ENTRY_THRESHOLD_PCT` is a Market fill priced at `currentPrice`; an adverse move beyond the threshold rests a Limit priced at `idealEntry`. Both gates share that single entry. Measuring a Market fill from `idealEntry` understates risk and overstates reward, so a nominal 1.5R can be a realised sub-1.0R trade with both gates "passed". Two boundaries are mandatory: the emitted `levels.entry` remains the OB midpoint (the shield re-prices the fill only), and a market price already outside `SL..TP` is left to the pre-flight DEAD-setup guard — pricing it here would move the rejection into the funnel and skip the mitigation burn. See §7.13.5.
 
 ---
 
@@ -2823,6 +2848,11 @@ docker compose up -d --build
 **Root Cause**: Awaiting `notifySetupFound()` before `execute()` injected Telegram latency — and a new failure mode — ahead of order submission.
 **Fix**: Notifications are fire-and-forget **after** the exchange confirms: `notifySetupFound(...).catch(...)`.
 **Rule**: No blocking messenger I/O before `executionEngine.execute()`.
+
+#### 16.1.8 Shields measured the plan, not the fill
+**Root Cause**: `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` were computed from `idealEntry` (the OB midpoint) while Smart Entry could route the same signal to a **Market** fill at the signal close. On a long, a premium fill widens the stop `entry − SL` and shortens the target `TP − entry` simultaneously, so a geometry that scored 1.5R at the plan could be a sub-1.0R trade at fill with both gates "passed". OPUSDT 2026-09-08 realised net R 0.69 (target 0.396% / stop 0.303%); 2026-09-25 realised 0.59 on a 0.330% target — under the 0.35% floor it was supposed to respect.
+**Fix**: `resolveShieldEntry()` prices the entry the trade will actually be booked at — `currentPrice` for a Market fill (discount or within `SMART_ENTRY_THRESHOLD_PCT`), `idealEntry` for a resting Limit — reusing `shouldUseMarketEntry()` so the gate and the executor cannot disagree. A price already outside `SL..TP` is deliberately not priced as a fill: that setup is DEAD and the pre-flight guard owns it, including the mitigation burn.
+**Rule**: An arithmetic gate must be evaluated on the same price the trade will be booked at. Measuring a fill at the plan is an assumed fill (Invariant 34) wearing a risk check's clothes. See §7.13.5, Invariant 61.
 
 ### 16.2 Closure Detection & PnL Truth
 
@@ -3074,5 +3104,7 @@ const evaluationData: PatternData = { ...basePd, structures: safeStructures, zon
 **Rule**: New user-facing strings are English. No new Cyrillic is introduced anywhere.
 
 ---
+
+_Last updated: 2026-11-01. **S12 shield execution-price fix.** `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` are no longer measured against `idealEntry`; `resolveShieldEntry()` prices the entry the trade will actually be booked at — the market price for a Market fill (discount or within `SMART_ENTRY_THRESHOLD_PCT`), `idealEntry` for a resting Limit — delegating the routing decision to `shouldUseMarketEntry()` so the gate and the executor cannot disagree (§7.13.5, Invariant 61, §16.1.8). A market price already outside `SL..TP` stays with the pre-flight DEAD-setup guard so its mitigation burn is preserved. Measured on the identical NEARUSDT 60-day window with a pinned clock: **+$252.24 / 9 trades / PF 5.64 / DD 2.22%** vs **+$284.94 / 10 trades / PF 6.19 / DD 2.22%** — nine signals unchanged, the single removed trade realised net R 0.973 (below the 1.0 floor) and was a winner, so the gate costs profit to enforce correctness. Test suite: **866 tests / 43 suites green**, typecheck clean.
 
 _Last updated: 2026-10-28. **Endurance freeze release.** Two long-horizon audits are now recorded in §7.23: S14 Tank on BTCUSDT over **365 days** (+19.94%, PF 1.20, Max DD 19.82%, MAR 1.01 — 160.4 days underwater, fees eating 49.7% of gross) and S12 Sniper on NEARUSDT over **180 days** (+22.40%, PF 3.24, Max DD 4.74% at the audited calibration; the global `1.5` volatility shield starved the same window to +3.46%). The audit produced exactly one configuration change — `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` in `.env` and `.env.emilia`, with the global shield left untouched for every other pair. Harness fix: `src/backtest/run.ts` appends the 1m history in a loop instead of `push(...fetched1m)`, which had thrown `Maximum call stack size exceeded` on any Sniper window beyond ~100k candles (§16.6.8). Also carried over from v2026-10-26: the V4 Classic scenario refactor (batches 1–4), Invariants 1–60, anti-patterns consolidated into §16.1–§16.8, and the live hotfix that stopped `processClosedPosition()` from resetting the state machine during the entry-bookkeeping window (§16.3.9, Invariant 60). Toolchain: typecheck clean, **853 tests / 43 suites green**, build passing.
