@@ -114,6 +114,21 @@ export interface BotConfig {
    */
   readonly smcSweepMinWickRatio: Decimal;
   /**
+   * Scenario 5 — institutional volume expansion required at the sweep candle.
+   *
+   * `SMC_SWEEP_VOLUME_MULTIPLIER` (default `1.3`): the SFP candle's volume must
+   * reach at least this multiple of the SMA of the **20 confirmed candles before
+   * it**. The baseline deliberately excludes the sweep candle, otherwise the very
+   * expansion being measured inflates its own reference (Invariant 56).
+   *
+   * This is the confirmation that replaced the lagging Sweep → CHoCH → FVG chain:
+   * a wick through liquidity is manipulation, the close back inside is the
+   * rejection, and volume is the institutional participation that distinguishes a
+   * real stop-run from a casual poke. Values above 3 are extremely selective —
+   * the gate fails closed, it never widens the stop to compensate.
+   */
+  readonly sweepVolumeMultiplier: Decimal;
+  /**
    * Scenario 12 — opt-in intraday sweep sources (default `false`).
    *
    * With both flags off, the Sniper funnel reproduces the macro-only baseline
@@ -714,6 +729,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     "SMC_SWEEP_MIN_WICK_RATIO",
   );
 
+  // Scenario 5 volume expansion multiple. Strictly positive; the sweep candle
+  // must print at least this many times the SMA(volume, 20) that precedes it.
+  const sweepVolumeMultiplier = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "SMC_SWEEP_VOLUME_MULTIPLIER"),
+    "1.3",
+    "SMC_SWEEP_VOLUME_MULTIPLIER",
+  );
+
   // Scenario 12 opt-in sweep sources. Default false = macro-only baseline.
   const s12SessionSweeps =
     (optionalEnv(env, "S12_SESSION_SWEEPS") ?? "false").toLowerCase() === "true";
@@ -942,6 +965,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     smcSlAtrOffset,
     smcDisplacementMultiplier,
     smcSweepMinWickRatio,
+    sweepVolumeMultiplier,
     s12SessionSweeps,
     s12EqhEqlSweeps,
     minTpDistancePct,

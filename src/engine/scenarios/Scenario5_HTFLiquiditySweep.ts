@@ -1,22 +1,33 @@
 import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../../config/env';
+import { ROUND_TRIP_TAKER_FEE } from '../../config/fees';
 import { resolveTakeProfit } from '../tpResolver';
 
-/** Sweep window: the last 16 LTF candles (4H on a 15m entry timeframe). */
-const SWEEP_LOOKBACK_CANDLES = 16;
 /** 15m entry timeframe of this scenario. */
 const ENTRY_TIMEFRAME = '15';
-/** `detectFVGs()` stamps a gap at c1; it completes two bars later on c3. */
-const FVG_FORMATION_CANDLES = 2;
-/** Fallback LTF spacing when the candle series is too short to measure. */
-const DEFAULT_LTF_MS = 15 * 60 * 1000;
+
+/**
+ * Volume baseline window: the 20 CONFIRMED candles immediately BEFORE the sweep
+ * candle.
+ *
+ * The sweep candle is excluded from its own baseline (see `evaluateInternal`).
+ * Including it would contaminate the reference distribution with exactly the
+ * expansion the gate is trying to measure — the same causality rule that governs
+ * the volume-exhaustion baseline in `src/engine/brain/volumeExhaustion.ts`
+ * (Invariant 56).
+ */
+const VOLUME_BASELINE_CANDLES = 20;
+
+/** Fallback when `SMC_SWEEP_VOLUME_MULTIPLIER` is absent from the config object. */
+const DEFAULT_SWEEP_VOLUME_MULTIPLIER = new Decimal('1.3');
 
 /**
  * Deterministic tie-break when several pools are swept by the SAME candle.
- * Recency remains the primary causal key: the CHoCH must react to the latest
- * liquidity event. Priority only decides which pool is reported when two events
- * share a timestamp, so the output never depends on array order.
+ *
+ * Pool priority decides which liquidity event is reported (and therefore which
+ * direction is traded) when one candle pierces more than one level: the dominant
+ * macro pool wins, so the output never depends on array order.
  */
 const POOL_PRIORITY: Record<string, number> = {
   PDH: 0,
@@ -48,57 +59,81 @@ const SWEEP_POOL_TYPES = Object.keys(POOL_PRIORITY);
 
 type Direction = 'BULLISH' | 'BEARISH';
 
+export interface Scenario5RejectionStats {
+  totalEvals: number;
+  wrongMode: number;
+  killzone: number;
+  noPools: number;
+  insufficientCandles: number;
+  noSweep: number;
+  lowVolumeSweep: number;
+  tpInvalid: number;
+  triggered: number;
+}
+
+const EMPTY_STATS: Scenario5RejectionStats = {
+  totalEvals: 0,
+  wrongMode: 0,
+  killzone: 0,
+  noPools: 0,
+  insufficientCandles: 0,
+  noSweep: 0,
+  lowVolumeSweep: 0,
+  tpInvalid: 0,
+  triggered: 0,
+};
+
 /**
- * Scenario 5 — HTF Liquidity Sweep.
+ * Scenario 5 — HTF Liquidity Sweep (Volume-Confirmed SFP).
  *
- * PDH/PDL/PWH/PWL/BSL/SSL sweep in a London/NY killzone → 15m CHoCH → 15m FVG
- * retest entry.
+ * A London/NY SFP that takes PDH/PDL/PWH/PWL/BSL/SSL liquidity and closes back
+ * inside the level, CONFIRMED by institutional volume expansion on the sweep
+ * candle itself.
  *
- * Causal contract:
- *  1. The sweep is searched across the last 16 LTF candles (4H on 15m), not only
- *     the latest one — a sweep is frequently confirmed a few candles after the
- *     wick that produced it.
- *  2. When several pools are swept, the LATEST sweep is the causal event; pool
- *     priority only breaks same-candle ties deterministically.
- *  3. The CHoCH must print at/after `sweptAt` (`>=`, so a same-candle break is
- *     allowed) and inside one 4H window. A structure that formed BEFORE the
- *     sweep can never justify it.
- *  4. The FVG must COMPLETE at/after the CHoCH. Raw `c1` stamps are two bars
- *     early and would discard the impulse gap the CHoCH itself creates.
+ * Why the confirmation chain was replaced
+ * ---------------------------------------
+ * The previous implementation required Sweep → 15m CHoCH (≥1.5 ATR displacement)
+ * → 15m FVG, then entered at the FVG midpoint. Each link is a lagging structure:
+ * by the time the gap retraced, the sweep was 3–10 candles old and the entry sat
+ * far from the liquidity that justified it. Setup frequency collapsed while the
+ * entry quality did not improve — the FVG was a proxy for the reaction, not the
+ * reaction itself.
+ *
+ * The SFP is self-confirming. The wick is the manipulation, the close back
+ * inside is the rejection, and VOLUME is the institutional participation that
+ * separates a genuine stop-run from a casual poke. Nothing is deferred to a
+ * later candle, so the entry is the sweep candle's own close and the invalidation
+ * is the wick that must not be revisited.
+ *
+ * Causal contract
+ * ---------------
+ *  1. The sweep candle is the LAST CLOSED 15m candle. There is no lookback: the
+ *     entry is placed at that candle's close, so an older wick would enter at a
+ *     price totally disconnected from the liquidity event being traded.
+ *  2. The stop is the sweep candle's pierced extreme (high for a short, low for
+ *     a long) pushed away by `0.5 × atr15m` (`SMC_SL_ATR_OFFSET`, never below the
+ *     `calculateLevels()` 0.1% floor). A stop sitting exactly on the wick is
+ *     consumed by ordinary 15m noise — the double sweep — so the volatility
+ *     buffer is what makes the invalidation survivable rather than decorative.
+ *  3. The volume baseline ends BEFORE the sweep candle. The reference window can
+ *     never contain the candle it is judging.
+ *  4. Macro liquidity pools are NEVER burned (Invariant 21). The trigger is
+ *     burned as a structure (timestamp identity), so the same candle can never
+ *     re-fire while PDH/PDL/PWH/PWL stay tradable for the rest of the session.
  */
 export class Scenario5_HTFLiquiditySweep extends BaseScenario {
-  private static rejectionStats = {
-    wrongMode: 0,
-    killzone: 0,
-    noPools: 0,
-    noSweep: 0,
-    noChoch: 0,
-    displacement: 0,
-    noFvg: 0,
-    tpInvalid: 0,
-    totalEvals: 0,
-  };
+  private static rejectionStats: Scenario5RejectionStats = { ...EMPTY_STATS };
 
   constructor(config: BotConfig) {
     super(5, 'HTF Liquidity Sweep', config);
   }
 
-  static getRejectionStats() {
-    return { ...this.rejectionStats };
+  static getRejectionStats(): Readonly<Scenario5RejectionStats> {
+    return { ...Scenario5_HTFLiquiditySweep.rejectionStats };
   }
 
-  static resetStats() {
-    this.rejectionStats = {
-      wrongMode: 0,
-      killzone: 0,
-      noPools: 0,
-      noSweep: 0,
-      noChoch: 0,
-      displacement: 0,
-      noFvg: 0,
-      tpInvalid: 0,
-      totalEvals: 0,
-    };
+  static resetStats(): void {
+    Scenario5_HTFLiquiditySweep.rejectionStats = { ...EMPTY_STATS };
   }
 
   protected override evaluateInternal(patternData: any): boolean {
@@ -112,11 +147,10 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       this.config.enableSniperMode ||
       this.config.ltfTimeframe !== ENTRY_TIMEFRAME
     ) {
-      this.logRejection(
+      return this.reject(
+        'wrongMode',
         'Scenario 5 is Classic 15m-only (Sniper Mode or non-15m LTF active)',
       );
-      stats.wrongMode++;
-      return false;
     }
 
     // Sweep must happen in a London/NY killzone (not ASIAN). Bypassable globally
@@ -126,16 +160,14 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       this.config.enforceKillzones !== false &&
       (!killzone || (killzone !== 'LONDON' && killzone !== 'NY'))
     ) {
-      this.logRejection('HTF Liquidity Sweep requires London or NY killzone');
-      stats.killzone++;
-      return false;
+      return this.reject(
+        'killzone',
+        'HTF Liquidity Sweep requires London or NY killzone',
+      );
     }
 
-    const { candles15m, liquidityPools, structures, zones } = patternData;
-    if (!candles15m?.length || !liquidityPools?.length) {
-      stats.noPools++;
-      return false;
-    }
+    const liquidityPools: any[] = patternData.liquidityPools ?? [];
+    const candles15m: any[] = patternData.candles15m ?? [];
 
     // Find HTF liquidity pools: PDH, PDL, PWH, PWL, BSL, SSL
     const htfPools = liquidityPools.filter(
@@ -143,170 +175,136 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
         SWEEP_POOL_TYPES.includes(pool.type) &&
         !pool.isTaken &&
         pool.priceLevel instanceof Decimal &&
+        pool.priceLevel.isFinite() &&
         pool.priceLevel.gt(0),
     );
 
     if (!htfPools.length) {
-      this.logRejection(
+      return this.reject(
+        'noPools',
         'No HTF liquidity pools (PDH/PDL/PWH/PWL/BSL/SSL) available',
       );
-      stats.noPools++;
-      return false;
     }
 
-    const ltfMs = this.resolveCandleMs(candles15m);
-    const causalityWindowMs = SWEEP_LOOKBACK_CANDLES * ltfMs;
-
-    // === SWEEP SCAN (last 4H of 15m candles) ===
-    // A sweep is not a "last candle" event: price can take a pool and only close
-    // back inside a few bars later. Scanning the whole 4H window is what makes
-    // the causality gate below meaningful.
-    // SMC: sweep = wick pierces the level AND price closes back inside (SFP).
-    const sweepWindow = candles15m.slice(-SWEEP_LOOKBACK_CANDLES);
-    if (sweepWindow.length === 0) {
-      this.logRejection('No 15m candle available');
-      stats.noPools++;
-      return false;
+    // 20 baseline candles + 1 sweep candle. Without the full baseline the volume
+    // gate cannot be evaluated and must fail closed rather than silently pass.
+    if (candles15m.length < VOLUME_BASELINE_CANDLES + 1) {
+      return this.reject(
+        'insufficientCandles',
+        `Requires ${VOLUME_BASELINE_CANDLES + 1} confirmed 15m candles (volume baseline + sweep)`,
+      );
     }
 
-    // Deterministic pool ranking: on a timestamp tie the higher-ranked pool is
-    // the dominant liquidity event (PDH > PDL > PWH > PWL > BSL > SSL).
-    const rankedPools = [...htfPools].sort(
-      (a: any, b: any) =>
-        (POOL_PRIORITY[a.type] ?? 99) - (POOL_PRIORITY[b.type] ?? 99),
-    );
+    const sweepCandle = candles15m[candles15m.length - 1];
+    const sfp = this.detectSfp(sweepCandle, htfPools);
 
-    let sweptPool: any = null;
-    let sweepDirection: Direction | null = null;
-    let sweptAt = 0;
+    if (!sfp) {
+      return this.reject(
+        'noSweep',
+        'No SFP on the last closed 15m candle: no HTF pool pierced and rejected by the close',
+      );
+    }
 
-    for (const pool of rankedPools) {
-      const level = pool.priceLevel;
-      const side = POOL_SIDE[pool.type];
-      if (!side) continue;
+    // === VOLUME CONFIRMATION (Zvezdin rule) ===
+    // The SFP is only institutional if the sweep candle expands volume. The
+    // baseline is the SMA of the 20 closed candles BEFORE it; the sweep candle
+    // must reach `multiplier` x that baseline.
+    const multiplier = this.resolveVolumeMultiplier();
+    const baselineCandles = candles15m.slice(-(VOLUME_BASELINE_CANDLES + 1), -1);
 
-      // Newest -> oldest: the first hit is this pool's most recent sweep.
-      for (let i = sweepWindow.length - 1; i >= 0; i--) {
-        const candle = sweepWindow[i];
-        const high = new Decimal(candle.high);
-        const low = new Decimal(candle.low);
-        const close = new Decimal(candle.close);
-
-        const isSweep =
-          side === 'HIGH'
-            ? high.gt(level) && close.lt(level)
-            : low.lt(level) && close.gt(level);
-        if (!isSweep) continue;
-
-        // The LATEST sweep across ALL pools is the causal liquidity event.
-        // Strict `>` keeps the higher-ranked pool on a timestamp tie, because
-        // pools are iterated in rank order.
-        const candleTimestamp = Number(candle.timestamp);
-        if (candleTimestamp > sweptAt) {
-          sweptAt = candleTimestamp;
-          sweptPool = pool;
-          sweepDirection = side === 'HIGH' ? 'BEARISH' : 'BULLISH';
+    let baselineVolume: Decimal;
+    let sweepVolume: Decimal;
+    try {
+      // Explicit loop, not `.reduce()`: reduce SKIPS array holes, so a sparse or
+      // partially missing series would silently average fewer candles and lower
+      // the bar the sweep candle has to clear. Every baseline slot is required.
+      let volumeSum = new Decimal(0);
+      for (const baselineCandle of baselineCandles) {
+        const candleVolume = new Decimal(baselineCandle.volume);
+        if (!candleVolume.isFinite() || candleVolume.lt(0)) {
+          throw new Error('unusable baseline candle volume');
         }
-        break;
+        volumeSum = volumeSum.plus(candleVolume);
       }
-    }
-
-    if (!sweptPool || !sweepDirection) {
-      this.logRejection('No HTF liquidity sweep detected in last 16 candles');
-      stats.noSweep++;
-      return false;
-    }
-
-    const direction: Direction = sweepDirection;
-
-    // === CAUSALITY: the CHoCH must FOLLOW the sweep ===
-    // A CHoCH that printed before the sweep describes the previous reaction and
-    // must never validate this one. The same candle is allowed because sweep and
-    // break can print together.
-    const chochs = (structures ?? [])
-      .filter(
-        (s: any) =>
-          s.type === 'CHOCH' &&
-          s.direction === direction &&
-          String(s.timeframe) === ENTRY_TIMEFRAME &&
-          Number(s.timestamp) >= sweptAt &&
-          Number(s.timestamp) <= sweptAt + causalityWindowMs,
-      )
-      .sort((a: any, b: any) => Number(a.timestamp) - Number(b.timestamp));
-
-    const choch = chochs[chochs.length - 1];
-    if (!choch) {
-      this.logRejection(
-        `No aggressive 15m CHoCH ${direction} after ${sweptPool.type} sweep`,
+      baselineVolume = volumeSum.div(VOLUME_BASELINE_CANDLES);
+      sweepVolume = new Decimal(sweepCandle.volume);
+    } catch {
+      return this.reject(
+        'lowVolumeSweep',
+        'Sweep candle volume or baseline is missing/unparseable',
       );
-      stats.noChoch++;
-      return false;
     }
 
-    // MUST check Displacement - body >= 1.5 * ATR (AGENTS.md §7.2)
-    if (!this.isValidDisplacement(choch, 1.5)) {
-      this.logRejection('15m CHoCH displacement < 1.5 ATR after sweep');
-      stats.displacement++;
-      return false;
-    }
-
-    // === FVG after the CHoCH (completion-bar causality) ===
-    // `detectFVGs()` stamps the gap at c1, two bars before it completes on c3.
-    // Measuring from the completion bar admits the impulse FVG left by the CHoCH
-    // while still rejecting a gap that fully formed before the trigger.
-    const fvgs = (zones ?? []).filter((z: any) => {
-      if (z.type !== 'FVG') return false;
-      if (z.direction !== direction) return false;
-      if (String(z.timeframe) !== ENTRY_TIMEFRAME) return false;
-      const completesAt =
-        Number(z.timestamp) + FVG_FORMATION_CANDLES * ltfMs;
-      return (
-        completesAt >= Number(choch.timestamp) &&
-        completesAt <= Number(choch.timestamp) + causalityWindowMs
+    if (
+      !sweepVolume.isFinite() ||
+      sweepVolume.lte(0) ||
+      !baselineVolume.isFinite() ||
+      baselineVolume.lte(0)
+    ) {
+      return this.reject(
+        'lowVolumeSweep',
+        `Volume baseline is unusable (baseline=${baselineVolume.toString()}, sweep=${sweepVolume.toString()})`,
       );
-    });
-
-    const fvg = fvgs[fvgs.length - 1];
-    if (!fvg) {
-      this.logRejection('No 15m FVG found after CHoCH following sweep');
-      stats.noFvg++;
-      return false;
     }
 
-    // Entry at 0.5 (Equilibrium) of FVG
-    const entry = new Decimal(fvg.top).plus(fvg.bottom).dividedBy(2);
-    const fvgZone = {
-      top: new Decimal(fvg.top),
-      bottom: new Decimal(fvg.bottom),
+    const requiredVolume = baselineVolume.mul(multiplier);
+    if (sweepVolume.lt(requiredVolume)) {
+      return this.reject(
+        'lowVolumeSweep',
+        `Sweep lacks institutional volume expansion: ${sweepVolume.toFixed(2)} < ${multiplier.toString()}x baseline ${requiredVolume.toFixed(2)}`,
+      );
+    }
+
+    const direction = sfp.direction;
+
+    // Entry = the sweep candle's close. This is the price at which the rejection
+    // was confirmed; the live path decides Market vs Limit against it, but the
+    // scenario never invents a better fill than the market printed.
+    const entry = new Decimal(sweepCandle.close);
+
+    if (!entry.isFinite() || entry.lte(0)) {
+      return this.reject('noSweep', 'Sweep candle close is not a usable price');
+    }
+
+    // The sweep candle's own range is the invalidation. `calculateLevels()` puts
+    // the stop strictly beyond the PIERCED extreme — `max(top, bottom, entry)` for
+    // a short, `min(top, bottom, entry)` for a long — and enforces the 0.1% floor,
+    // so an inverted or same-side zone cannot place the stop behind the entry.
+    const wickZone = {
+      top: new Decimal(sweepCandle.high),
+      bottom: new Decimal(sweepCandle.low),
       direction,
     };
 
-    const atr =
-      patternData.atr15m instanceof Decimal && patternData.atr15m.gt(0)
+    // VOLATILITY BUFFER: the wick alone is not an invalidation, it is the edge of
+    // one. A stop parked on the pierced extreme is consumed by the next 15m noise
+    // candle (the classic double sweep), so the buffer is pushed a further
+    // `0.5 × atr15m` away. `calculateLevels()` keeps the 0.1% floor and the
+    // inverted-zone defense, so a missing/short ATR degrades to the old floor
+    // rather than moving the stop behind the entry.
+    const stopAtr =
+      patternData.atr15m instanceof Decimal &&
+      patternData.atr15m.isFinite() &&
+      patternData.atr15m.gt(0)
         ? patternData.atr15m
-        : new Decimal('0.01');
+        : new Decimal(0);
 
-    const offsetMultiplier = this.config.smcSlAtrOffset
-      ? new Decimal(this.config.smcSlAtrOffset)
-      : new Decimal('0.5');
-
-    // The stop comes from `calculateLevels()` (single source of truth); the
-    // target from market structure. `skipMinorObstacles: false` keeps the legacy
-    // wall semantics — the nearest obstacle decides, and no room means no trade.
-    const base = this.calculateLevels(
+    // `rr = 1` is a placeholder — only the STOP is consumed from this call. The
+    // target is resolved from market structure below. `calculateLevels()` applies
+    // `SMC_SL_ATR_OFFSET` (default 0.5) to `stopAtr` and keeps its 0.1% floor.
+    const baseLevels = this.calculateLevels(
       entry,
-      fvgZone,
+      wickZone,
       direction,
-      atr,
+      stopAtr,
       new Decimal(1),
-      offsetMultiplier,
     );
 
     const resolution = resolveTakeProfit({
       direction,
-      entry: base.entry,
-      stopLoss: base.stopLoss,
-      zones: zones ?? [],
+      entry: baseLevels.entry,
+      stopLoss: baseLevels.stopLoss,
+      zones: patternData.zones ?? [],
       liquidityPools: patternData.liquidityPools ?? [],
       tradingRange: patternData.tradingRange ?? null,
       macroContext: patternData.macroContext ?? null,
@@ -316,22 +314,57 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       fixedRr: this.config.fixedTpRr,
       enableDynamicTp: this.config.enableDynamicTp,
       requireTarget: this.config.dynamicTpRequireTarget,
-      skipMinorObstacles: false,
+      // MACRO TARGETING: a major HTF liquidity sweep carries enough momentum to
+      // trade through internal 15m swings, so a minor bump is not a wall — the
+      // resolver steps over it and targets the next real pool / HTF zone. A MAJOR
+      // barrier still rejects (see tpResolver), which is the point: the setup must
+      // have genuine macro room, not manufactured room.
+      skipMinorObstacles: true,
     });
 
     if (!resolution.ok) {
-      this.logRejection(`Take-profit rejected: ${resolution.reason}`);
-      stats.tpInvalid++;
-      return false;
+      return this.reject('tpInvalid', `Take-profit rejected: ${resolution.reason}`);
     }
 
+    // === FEE-INCLUSIVE NET R:R FLOOR ===
+    // Both legs are charged, so the fee is subtracted from the reward AND added
+    // to the risk:
+    //
+    //   netRr = (targetDistance − roundTripFee) / (stopDistance + roundTripFee)
+    //
+    // A 1:2 geometry that survives only before fees is not a 1:2 trade.
+    const stopDistance = baseLevels.entry.minus(baseLevels.stopLoss).abs();
+    if (stopDistance.lte(0)) {
+      return this.reject('tpInvalid', 'Zero stop distance — Net R:R is undefined');
+    }
+
+    const targetDistance = resolution.takeProfit.minus(baseLevels.entry).abs();
+    const roundTripFeeInPrice = baseLevels.entry.mul(ROUND_TRIP_TAKER_FEE);
+    const netRr = targetDistance
+      .minus(roundTripFeeInPrice)
+      .div(stopDistance.plus(roundTripFeeInPrice));
+
+    if (!netRr.isFinite() || netRr.lt(this.config.dynamicTpMinRr)) {
+      return this.reject(
+        'tpInvalid',
+        `Net R:R ${netRr.toFixed(3)} < ${this.config.dynamicTpMinRr.toString()} (target ${targetDistance
+          .div(baseLevels.entry)
+          .mul(100)
+          .toFixed(3)}% | stop ${stopDistance
+          .div(baseLevels.entry)
+          .mul(100)
+          .toFixed(3)}% | fee ${ROUND_TRIP_TAKER_FEE.mul(100).toFixed(3)}%)`,
+      );
+    }
+
+    // Stop geometry is re-derived through the single source of truth; the target
+    // is substituted only after it has been validated against entry side.
     const levels = this.calculateLevelsWithTarget(
       entry,
-      fvgZone,
+      wickZone,
       direction,
-      atr,
+      stopAtr,
       resolution.takeProfit,
-      offsetMultiplier,
     );
 
     this.setLevels({
@@ -340,44 +373,110 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
       takeProfit: levels.takeProfit,
     });
 
-    // Set zone details for mitigation tracking (the FVG we entered from)
-    this.setZoneDetails({
-      type: 'FVG',
-      top: fvgZone.top,
-      bottom: fvgZone.bottom,
-      timeframe: ENTRY_TIMEFRAME,
-      direction,
-      timestamp: Number(fvg.timestamp),
-    });
-
-    // Set structure details for mitigation tracking (the CHoCH is the trigger)
+    // No `zoneDetails`: PDH/PDL/PWH/PWL must never be burned (Invariant 21). The
+    // trigger is a candle event, so it is burned as a STRUCTURE — its timestamp is
+    // the identity that stops the same candle from firing twice (Invariant 39).
     this.setStructureDetails({
-      type: 'CHoCH',
-      timestamp: Number(choch.timestamp),
-      price: new Decimal(choch.price),
+      type: 'SWEEP',
+      timestamp: Number(sweepCandle.timestamp),
+      price:
+        direction === 'BEARISH'
+          ? new Decimal(sweepCandle.high)
+          : new Decimal(sweepCandle.low),
       direction,
     });
 
+    stats.triggered++;
     this.setReason(
-      `HTF Liquidity Sweep: ${sweptPool.type} swept at ${sweptAt} in killzone + 15m CHoCH + FVG 0.5 entry`,
+      `HTF Liquidity Sweep: ${sfp.pool.type} (${sfp.level.toString()}) swept at ${Number(sweepCandle.timestamp)} ` +
+        `(high ${sweepCandle.high} / low ${sweepCandle.low}, close ${entry.toString()}) ` +
+        `+ volume ${sweepVolume.div(baselineVolume).toFixed(2)}x baseline → ${direction} SFP`,
     );
     return true;
   }
 
   /**
-   * Candle spacing of the entry series, in milliseconds.
+   * SFP detection on a single candle across the ranked pool set.
    *
-   * The sweep / CHoCH / FVG windows are all "16 LTF candles", so the budget must
-   * be expressed in the LTF actually in use, never assumed to be 15 minutes
-   * (Invariant 12).
+   * Short (high-side pool): `high > level && close < level`.
+   * Long  (low-side pool) : `low < level && close > level`.
+   *
+   * Pools are consumed in `POOL_PRIORITY` order, so a candle that pierces two
+   * levels deterministically reports the dominant one (PDH > PDL > PWH > PWL >
+   * BSL > SSL) instead of depending on the order the recognizer emitted them in.
    */
-  private resolveCandleMs(candles: any[]): number {
-    const start = Math.max(1, candles.length - 5);
-    for (let i = start; i < candles.length; i++) {
-      const delta =
-        Number(candles[i].timestamp) - Number(candles[i - 1].timestamp);
-      if (Number.isFinite(delta) && delta > 0) return delta;
+  private detectSfp(
+    candle: any,
+    htfPools: any[],
+  ): { pool: any; direction: Direction; level: Decimal } | null {
+    let high: Decimal;
+    let low: Decimal;
+    let close: Decimal;
+    try {
+      high = new Decimal(candle.high);
+      low = new Decimal(candle.low);
+      close = new Decimal(candle.close);
+    } catch {
+      return null;
     }
-    return DEFAULT_LTF_MS;
+
+    if (
+      !high.isFinite() ||
+      !low.isFinite() ||
+      !close.isFinite() ||
+      high.lt(low) ||
+      close.lte(0)
+    ) {
+      return null;
+    }
+
+    const rankedPools = [...htfPools].sort(
+      (a: any, b: any) =>
+        (POOL_PRIORITY[a.type] ?? 99) - (POOL_PRIORITY[b.type] ?? 99),
+    );
+
+    for (const pool of rankedPools) {
+      const side = POOL_SIDE[pool.type];
+      if (!side) continue;
+
+      const level: Decimal = pool.priceLevel;
+      const isSfp =
+        side === 'HIGH'
+          ? high.gt(level) && close.lt(level)
+          : low.lt(level) && close.gt(level);
+
+      if (!isSfp) continue;
+
+      return {
+        pool,
+        direction: side === 'HIGH' ? 'BEARISH' : 'BULLISH',
+        level,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Institutional volume multiple (`SMC_SWEEP_VOLUME_MULTIPLIER`, default 1.3).
+   *
+   * Declared with a defensive fallback for hand-built config objects: a missing
+   * value must never silently downgrade the gate to "no confirmation".
+   */
+  private resolveVolumeMultiplier(): Decimal {
+    const configured = this.config.sweepVolumeMultiplier;
+    if (configured instanceof Decimal && configured.isFinite() && configured.gt(0)) {
+      return configured;
+    }
+    return DEFAULT_SWEEP_VOLUME_MULTIPLIER;
+  }
+
+  private reject(
+    bucket: keyof Omit<Scenario5RejectionStats, 'totalEvals'>,
+    reason: string,
+  ): false {
+    Scenario5_HTFLiquiditySweep.rejectionStats[bucket]++;
+    this.setReason(reason);
+    return false;
   }
 }

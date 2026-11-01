@@ -35,6 +35,7 @@ const mockConfig: BotConfig = {
   limitExpirationCandles: 6,
   sniperLimitExpirationCandles: 15,
   smcSweepMinWickRatio: new Decimal('0.25'),
+  sweepVolumeMultiplier: new Decimal('1.5'),
   smartEntryThresholdPct: '0.0015',
     enableSniperMode: false,
     enableDynamicTp: false,

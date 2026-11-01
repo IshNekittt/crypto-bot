@@ -235,17 +235,17 @@ export function generateReport(
   lines.push('═══════════════════════════════════════════════════════════');
   lines.push('');
 
-  // Rejection stats for key scenarios
-  // Scenarios 1 and 5 evaluate both directions per pass and do not track a
-  // dedicated `triggered` counter, so no derived trigger figure is printed —
-  // subtracting buckets would double-count mirror-direction rejections.
+  // Rejection stats for key scenarios. Scenario 1 evaluates both directions per
+  // pass and does not track a dedicated `triggered` counter, so no derived trigger
+  // figure is printed for it — subtracting buckets would double-count
+  // mirror-direction rejections.
   const scenario1Stats = Scenario1_HTFContinuation.getRejectionStats();
   lines.push('📊 SCENARIO REJECTION STATS');
   lines.push('   Scenario 1 (HTF Continuation):');
   lines.push(`     Total: ${scenario1Stats.totalEvals} | WrongMode: ${scenario1Stats.wrongMode} | Killzone: ${scenario1Stats.killzone} | NoCandles: ${scenario1Stats.noCandles} | NoOb: ${scenario1Stats.noOb} | NoTouch: ${scenario1Stats.noTouch} | WrongSide: ${scenario1Stats.wrongSide} | NoChoch: ${scenario1Stats.noChoch} | Displacement: ${scenario1Stats.displacement} | NoFvg: ${scenario1Stats.noFvg} | TpInvalid: ${scenario1Stats.tpInvalid}`);
   const scenario5Stats = Scenario5_HTFLiquiditySweep.getRejectionStats();
-  lines.push('   Scenario 5 (HTF Liquidity Sweep):');
-  lines.push(`     Total: ${scenario5Stats.totalEvals} | WrongMode: ${scenario5Stats.wrongMode} | Killzone: ${scenario5Stats.killzone} | NoPools: ${scenario5Stats.noPools} | NoSweep: ${scenario5Stats.noSweep} | NoChoch: ${scenario5Stats.noChoch} | Displacement: ${scenario5Stats.displacement} | NoFvg: ${scenario5Stats.noFvg} | TpInvalid: ${scenario5Stats.tpInvalid}`);
+  lines.push('   Scenario 5 (HTF Liquidity Sweep / Volume-Confirmed SFP):');
+  lines.push(`     Total: ${scenario5Stats.totalEvals} | Triggered: ${scenario5Stats.triggered} | WrongMode: ${scenario5Stats.wrongMode} | Killzone: ${scenario5Stats.killzone} | InsufficientCandles: ${scenario5Stats.insufficientCandles} | NoPools: ${scenario5Stats.noPools} | NoSweep: ${scenario5Stats.noSweep} | LowVolumeSweep: ${scenario5Stats.lowVolumeSweep} | TpInvalid: ${scenario5Stats.tpInvalid}`);
   const scenario12Stats = Scenario12_SniperTouch.getRejectionStats();
   lines.push('   Scenario 12 (Sniper Touch):');
   lines.push(`     Total: ${scenario12Stats.totalEvals} | Triggered: ${scenario12Stats.triggered} | Killzone: ${scenario12Stats.killzone} | NoMacroLevels: ${scenario12Stats.noMacroLevels} | Disabled: ${scenario12Stats.disabled} | InsufficientCandles: ${scenario12Stats.insufficientCandles}`);

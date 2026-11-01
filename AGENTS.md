@@ -2129,7 +2129,7 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 | ID     | Name                | Mode          | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | **1**  | HTF Continuation    | 15m Classic   | Tested 4H OB → 15m CHoCH at/after the touch → 15m FVG at/after the CHoCH (both inside the 4h window) | 4H OB direction defines the side; 16-candle causality window; displacement + dynamic TP; `wrongMode` guard |
-| **5**  | HTF Liquidity Sweep | 15m Classic   | PDH/PDL/PWH/PWL/BSL/SSL sweep in the last 16 LTF candles → CHoCH at/after the sweep → 15m FVG 0.5 entry | Killzone + sweep wick (SFP) + deterministic pool priority (`PDH > PDL > PWH > PWL > BSL > SSL`) + dynamic TP; `wrongMode` guard |
+| **5**  | HTF Liquidity Sweep | 15m Classic   | PDH/PDL/PWH/PWL/BSL/SSL sweep on the LAST CLOSED 15m candle: wick pierces the pool, close returns inside (SFP), entry at that close | Killzone + deterministic pool priority (`PDH > PDL > PWH > PWL > BSL > SSL`) + volume confirmation (`SMC_SWEEP_VOLUME_MULTIPLIER` × 20-candle SMA baseline) + wick stop with a `0.5 × atr15m` volatility buffer + structural TP (`skipMinorObstacles: true`) + fee-inclusive net R:R ≥ `DYNAMIC_TP_MIN_RR`; `wrongMode` guard |
 | **12** | Sniper Touch        | 1m Sniper     | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + P0 shields (`MIN_VOLATILITY_FEE_RATIO` ATR-to-fee admission, `MIN_NET_RR` fee-inclusive R:R) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
 | **14** | Trend Following Alpha | 15m Classic | 15m Donchian breakout with volume confirmation | Classic mode; structural TP and ATR stop; `wrongMode` guard |
 | **15** | Volatility Compression Squeeze | 15m Classic | BB(20,2) fully inside KC(SMA20 ± 1.5×ATR20); first expansion after ≥5 compressed candles | 15m Classic only; regression-slope direction; KC-midline ±1.5×ATR stop; `tpResolver`; trigger candle burned by timestamp; `wrongMode` guard |
@@ -2152,15 +2152,85 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 - The trigger candle timestamp is emitted as `structureDetails` (no synthetic zone) so the live engine and backtester burn the exact consumed breakout and prevent duplicate entries.
 - Dedicated rejection counters are reset and printed per symbol by `src/backtest/reporter.ts`.
 
-### S1 & S5 FVG Completion-Bar Timing
+### S1 FVG Completion-Bar Timing
 
-**Scenarios 1 and 5 use the FVG completion bar, not the candle timestamp that `detectFVGs()` stamps.** `detectFVGs()` assigns the zone timestamp to `c1` (the first candle), while the three-bar FVG becomes complete only on `c3`. Both scenarios therefore evaluate `timestamp + 2 × LTF spacing` as the completion time (the spacing is measured from the series, never assumed to be 15 minutes — Invariant 12). CHoCH/FVG causality means the completed FVG must exist at or after the CHoCH; the impulse FVG left behind by the CHoCH is valid because the break candle is `c3`, but a later FVG can only be used within the 4H causality window. Comparing raw `c1` timestamps would incorrectly exclude a valid same-CHoCH FVG (the exact gap the break itself creates, which S5 previously discarded) or admit a gap that is not yet complete.
+**Scenario 1 uses the FVG completion bar, not the candle timestamp that `detectFVGs()` stamps.** `detectFVGs()` assigns the zone timestamp to `c1` (the first candle), while the three-bar FVG becomes complete only on `c3`. S1 therefore evaluates `timestamp + 2 × LTF spacing` as the completion time (the spacing is measured from the series, never assumed to be 15 minutes — Invariant 12). CHoCH/FVG causality means the completed FVG must exist at or after the CHoCH; the impulse FVG left behind by the CHoCH is valid because the break candle is `c3`, but a later FVG can only be used within the 4H causality window. Comparing raw `c1` timestamps would incorrectly exclude a valid same-CHoCH FVG or admit a gap that is not yet complete.
+
+> **Scenario 5 no longer uses FVG timing.** The Sweep → CHoCH → FVG chain was replaced by the volume-confirmed SFP (§8.8).
+
+### 8.8 Scenario 5 — HTF Liquidity Sweep (Volume-Confirmed SFP)
+
+**File**: `src/engine/scenarios/Scenario5_HTFLiquiditySweep.ts`
+
+**Premise**: a sweep is self-confirming. The wick is the manipulation, the close back inside the level is the rejection, and volume expansion is the institutional participation that separates a real stop-run from a casual poke. Nothing is deferred to a later candle.
+
+| Step | Rule |
+| --- | --- |
+| **1. Pool set** | PDH/PDL/PWH/PWL/BSL/SSL, untaken, finite and > 0. Consumed in `POOL_PRIORITY` order (`PDH > PDL > PWH > PWL > BSL > SSL`) so a candle piercing several levels always reports the same one. Side is fixed per pool type (`HIGH`: PDH/PWH/BSL, `LOW`: PDL/PWL/SSL) — a "PDH sweep" can never be manufactured by a move that took no buy-side liquidity. |
+| **2. SFP** | Last **closed** candle only. High pool: `high > level && close < level` → BEARISH. Low pool: `low < level && close > level` → BULLISH. No lookback window: the entry IS that candle's close, so an older wick would trade a price disconnected from the liquidity event. |
+| **3. Volume** | Baseline = SMA of the **20 confirmed candles immediately before** the sweep candle (the sweep candle is excluded from its own baseline — Invariant 56). Reject as `lowVolumeSweep` when `sweepVolume < baseline × SMC_SWEEP_VOLUME_MULTIPLIER` (default **1.3**). A sparse/unparseable baseline fails closed. |
+| **4. Entry** | The sweep candle's close. |
+| **5. Stop** | The sweep candle's pierced extreme routed through `calculateLevels()` with `atr = atr15m`, so the stop is the wick extreme pushed away by `max(0.5 × atr15m, 0.1% of entry)` (`SMC_SL_ATR_OFFSET`). A stop parked exactly on the wick is consumed by the next 15m noise candle — the double sweep — so the volatility buffer is what makes the invalidation survivable. A missing/non-positive `atr15m` degrades to the 0.1% floor; the stop never moves behind the entry. |
+| **6. Target** | `resolveTakeProfit({ skipMinorObstacles: true })`: a major HTF sweep carries enough momentum to trade through internal 15m swings, so minor candidates (BSL/SSL, 15m zones, range equilibrium, session extremes) are stepped over and the resolver continues to the first candidate clearing `DYNAMIC_TP_MIN_RR`. A MAJOR barrier (PDH/PDL/PWH/PWL/EQH/EQL/DO/WO, 4H+ zones) inside the floor still rejects — genuine room is required, not manufactured room. |
+| **7. Net R:R** | `(targetDistance − entry × ROUND_TRIP_TAKER_FEE) / (stopDistance + entry × ROUND_TRIP_TAKER_FEE) ≥ DYNAMIC_TP_MIN_RR`, else `tpInvalid`. Both legs are charged, so a 1:2 that survives only before fees is not a 1:2 trade. |
+| **8. Mitigation** | No `zoneDetails` — macro pools are never burned (Invariant 21). The trigger is burned as `structureDetails` (`type: 'SWEEP'`, sweep candle timestamp, wick price, direction), matching the burn-on-entry contract (Invariant 39). |
+
+**Rejection funnel**: `totalEvals`, `wrongMode`, `killzone`, `noPools`, `insufficientCandles` (< 21 candles — the 20-candle baseline cannot be built), `noSweep`, `lowVolumeSweep`, `tpInvalid`, `triggered`. Printed per symbol by `src/backtest/reporter.ts`.
+
+**Invariant**: All volume and price math is `Decimal` — the baseline, the multiplier comparison and the net-R:R arithmetic never touch `number`.
+
+**Baseline — 180 days, 2026-05-05 → 2026-11-01, $1,000/symbol, `ENFORCE_KILLZONES=false`, `ALLOWED_DAYS_OF_WEEK=1..7`, `ENABLE_DYNAMIC_TP=true`, `DYNAMIC_TP_MAX_RR=6.0`, wick-tight stop (`atr = 0`), `skipMinorObstacles: false`, `SMC_SWEEP_VOLUME_MULTIPLIER=1.5`:**
+
+| `DYNAMIC_TP_MIN_RR` | Symbol | Trades | W/L | Win rate | Net | PF | Max DD | Fees |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.5 | BTCUSDT | 7 | 3/4 | 42.86% | **+$43.70 (+4.37%)** | 1.65 | 5.92% | $42.25 |
+| 1.5 | ETHUSDT | 14 | 5/9 | 35.71% | −$11.45 (−1.15%) | 0.95 | 9.86% | $97.09 |
+| 1.5 | SOLUSDT | 12 | 2/10 | 16.67% | −$147.06 (−14.71%) | 0.26 | 14.71% | $65.45 |
+| 1.5 | **Portfolio** | **33** | **10/23** | **30.30%** | **−$114.81 (−3.83%)** | — | — | **$204.79** |
+| 2.0 | BTCUSDT | 1 | 1/0 | 100.00% | +$33.49 (+3.35%) | ∞ | 0.00% | $8.77 |
+| 2.0 | ETHUSDT | 7 | 1/6 | 14.29% | −$124.71 (−12.47%) | 0.18 | 12.47% | $42.89 |
+| 2.0 | SOLUSDT | 5 | 0/5 | 0.00% | −$98.13 (−9.81%) | 0.00 | 9.81% | $29.52 |
+| 2.0 | **Portfolio** | **13** | **2/11** | **15.38%** | **−$189.35 (−6.31%)** | — | — | **$81.18** |
+
+**Baseline funnel reading** (BTC, 17,172 evaluations): `NoSweep` 12,976 (75.6%), `LowVolumeSweep` 3,010 of 4,196 SFPs (71.7%), `TpInvalid` 1,179 of the 1,186 volume-confirmed survivors (**99.4%**), `Triggered` 7. The volume gate was selective but honest; the **target gate was the binding constraint**. With a wick-tight stop, 1R is 0.1–0.3% of price, so the fee-inclusive `MIN_NET_RR` demanded a structural target 3.5–5R away — and `skipMinorObstacles: false` took the NEAREST candidate, which on a 15m chart is almost always closer.
+
+#### 8.8.1 Refined Geometry — Volatility Stop Buffer + Macro Targeting + 1.3 Volume (v2026-11-01)
+
+Three changes, all inside Scenario 5 (no cross-scenario impact):
+
+1. **Stop volatility buffer** — `calculateLevels()` now receives `atr15m` instead of `0`, so the stop sits `max(0.5 × atr15m, 0.1% of entry)` beyond the pierced wick (`SMC_SL_ATR_OFFSET`). This is the double-sweep defence: a stop on the wick is consumed by ordinary 15m noise.
+2. **`skipMinorObstacles: true`** — the resolver steps over minor structure and targets major macro liquidity. A major barrier inside the floor still rejects.
+3. **`SMC_SWEEP_VOLUME_MULTIPLIER` default 1.5 → 1.3** (`env.ts`, `.env.example`, `.env`) — +30% institutional expansion instead of +50%.
+
+**Measured after the refinement** (identical window/flags, `DYNAMIC_TP_MIN_RR=1.5`, `SMC_SWEEP_VOLUME_MULTIPLIER=1.3`):
+
+| Symbol | Trades | W/L | Win rate | Net | PF | Max DD | Fees | `tpInvalid` (of survivors) | Before |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BTCUSDT | 31 | 13/18 | 41.94% | **+$176.28 (+17.63%)** | 1.48 | 13.44% | $163.79 | 1,333 / 1,364 (97.7%) | +$43.70, 7 trades |
+| ETHUSDT | 44 | 14/30 | 31.82% | −$36.74 (−3.67%) | 0.94 | 19.49% | $190.53 | 1,129 / 1,173 (96.2%) | −$11.45, 14 trades |
+| SOLUSDT | 67 | 22/45 | 32.84% | −$47.13 (−4.71%) | 0.94 | 12.56% | $229.32 | 976 / 1,043 (93.6%) | −$147.06, 12 trades |
+| **Portfolio** | **142** | **49/93** | **34.51%** | **+$92.41 (+3.08%)** | — | — | **$583.64** | 3,438 / 3,580 (96.0%) | **−$114.81, 33 trades** |
+
+**Funnel deltas** (portfolio, `tpInvalid` as a share of volume-confirmed survivors `total − noSweep − lowVolumeSweep`):
+
+| Bucket | Baseline | Refined | Delta |
+| --- | --- | --- | --- |
+| Total evals | 51,330 | 48,385 | −2,945 (more time spent in trades/cooldown) |
+| `NoSweep` | 40,172 | 37,952 | −2,220 |
+| `LowVolumeSweep` | 7,944 | 6,853 | −1,091 (1.3 admits more SFPs) |
+| Volume-confirmed survivors | 3,214 | 3,580 | +366 |
+| `TpInvalid` | 3,181 (98.97%) | 3,438 (**96.03%**) | share −2.94 pp, count +257 |
+| `Triggered` | 33 (1.03%) | 142 (**3.97%**) | **4.3×** |
+
+**What actually moved the needle**: `Triggered` multiplied 4.3×, not because `tpInvalid` collapsed in absolute terms — the looser volume gate fed 366 extra survivors into the same gate — but because its **share** fell 2.94 pp, and every survivor now has a wider stop (larger 1R, so fewer R-multiples needed) and a further target (minors skipped). Per-symbol: BTC quadrupled its net (+$43.70 → +$176.28) on 4.4× the trades while keeping a 1.48 PF; SOL's win rate doubled (16.67% → 32.84%) and its loss shrank by two thirds (−$147.06 → −$47.13); ETH is the one regression (−$11.45 → −$36.74) with the deepest drawdown in the set (19.49%).
+
+**Honest reading**: the portfolio sign flipped (+3.08%), but that is *one* symbol carrying it — BTC's +$176.28 against ETH+SOL's combined −$83.87 — and fees rose to $583.64 (6.3× the $92.41 net). Max DD widened on both BTC (5.92% → 13.44%) and ETH (9.86% → 19.49%). The refinement fixed the geometric deadlock it was aimed at (the scenario is alive and tradable, `Triggered` up 4.3×), but it did **not** produce a portfolio-wide edge: 34.51% win rate with a 1.48/0.94/0.94 PF spread means the distribution across symbols is still the dominant variable. Do not deploy on the strength of BTC alone.
 
 ### 8.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
-- Scenarios setting `zoneDetails` in the live registry: **1, 5, 14**. Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 15 emits `structureDetails` only and burns the trigger candle by timestamp. Archived scenarios 2–4 and 6–11 keep their historical tagging inside the archive.
+- Scenarios setting `zoneDetails` in the live registry: **1, 14**. Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 5 never emits a zone for the same reason (its trigger is burned as a `SWEEP` structure); Scenario 15 emits `structureDetails` only and burns the trigger candle by timestamp. Archived scenarios 2–4 and 6–11 keep their historical tagging inside the archive.
 
 ### 8.3 Contextual Quality Filters (Confluence) — **ARCHIVED SCENARIOS**
 
@@ -2458,6 +2528,7 @@ COOLDOWN_CANDLES=16
 SMC_SL_ATR_OFFSET=0.5              # ATR multiplier for SL offset
 SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR
 SMC_SWEEP_MIN_WICK_RATIO=0.25      # S12 + S9: min rejection wick share of candle range (0 < x < 1)
+SMC_SWEEP_VOLUME_MULTIPLIER=1.3   # S5 only: sweep-candle volume as a multiple of the 20-candle SMA baseline
 
 # S12 sweep sources (opt-in; macro PDH/PDL/PWH/PWL is always armed)
 S12_SESSION_SWEEPS=false           # true = newest ASIAN high/low becomes a sweepable level
@@ -3007,10 +3078,15 @@ if (isZeroSize || isClosedSide) { /* position closed */ }
 **Fix**: Single-pass indexed `for` loops; macro context builds in milliseconds.
 **Rule**: No nested candle loops, no `while (true)` scan loops. Pre-compute arrays and advance pointers.
 
-#### 16.5.7 A sweep is confirmed after the wick, not on the next candle
-**Root Cause**: Scenario 5 searched for the sweep only in the **latest** 15m candle, so a CHoCH that printed two or three candles after the wick — the normal confirmation lag — was rejected as `NoSweep`. The scenario almost never fired.
-**Fix**: The sweep scan covers the last **16 LTF candles** (4H on a 15m entry timeframe), and causality is enforced with `CHoCH.timestamp >= sweptAt`. Ties on the same candle are broken deterministically by `POOL_PRIORITY` (`PDH > PDL > PWH > PWL > BSL > SSL`) so results are reproducible.
-**Rule**: Search the setup window, not the last candle; keep the ordering explicit when several pools qualify.
+#### 16.5.7 Confirm a sweep with volume on the sweep candle itself
+**Root Cause**: Scenario 5 originally searched for the sweep only in the latest 15m candle, so a CHoCH printed two or three candles later — the normal confirmation lag — was rejected as `NoSweep`. Widening the scan to 16 candles fixed the frequency but replaced the problem: Sweep → CHoCH → FVG is a chain of lagging structures, so by the time the gap retraced the sweep was 3–10 candles old and the entry sat far from the liquidity that justified it. The FVG was a proxy for the reaction, not the reaction.
+**Fix**: The chain is gone (§8.8). The SFP is evaluated on the last closed candle — wick pierces the pool, close returns inside — and countersigned by volume: the sweep candle must print ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` × the SMA of the 20 candles before it. Entry is that candle's close, the stop is its pierced extreme pushed `0.5 × atr15m` further (v2026-11-01), and the target is structural (`skipMinorObstacles: true`) with a fee-inclusive net R:R floor.
+**Rule**: A liquidity event is confirmed by the candle that printed it plus its volume, not by structure that forms afterwards. The baseline window always excludes the candle it judges.
+
+#### 16.5.8 A wick-tight stop plus a nearest-wall filter is a mathematical deadlock
+**Root Cause**: Scenario 5's original geometry combined a stop placed exactly on the pierced wick (0.1–0.3% of price) with `skipMinorObstacles: false`. Because 1R was so small, the fee-inclusive net-R:R floor demanded a structural target 3.5–5R away, while the nearest-wall filter capped the target at the first 15m bump — almost always closer than the floor required. The two gates could not both be satisfied: 99.4% of volume-confirmed survivors died at `tpInvalid` and the scenario produced 7–14 trades per symbol over 180 days.
+**Fix**: Two changes that attack the numerator and the denominator at once (v2026-11-01, §8.8.1). The stop receives a volatility buffer (`atr = atr15m` through `calculateLevels()`, so `max(0.5 × atr15m, 0.1%)`), which enlarges 1R and reduces the R-multiple the target must clear; and the resolver runs with `skipMinorObstacles: true`, so a minor swing is stepped over instead of becoming the target. A MAJOR barrier inside the floor still rejects. `Triggered` rose 4.3× (33 → 142 trades) and `tpInvalid`'s share of survivors fell 2.94 pp.
+**Rule**: A stop so tight that the fee-inclusive reward gate can never be met is not a conservative setting, it is a silent off-switch. When a stop is tightened, the target filter must be loosened by the same amount — or the scenario is guaranteed to reject its own valid setups.
 
 ### 16.6 Backtester Fidelity
 
@@ -3104,6 +3180,10 @@ const evaluationData: PatternData = { ...basePd, structures: safeStructures, zon
 **Rule**: New user-facing strings are English. No new Cyrillic is introduced anywhere.
 
 ---
+
+_Last updated: 2026-11-01. **Scenario 5 rebuilt — volume-confirmed SFP.** *(Superseded the same day by the geometry unlock above: the stop is now buffered, `skipMinorObstacles` is `true`, and the volume default is 1.3.)* The Sweep → CHoCH → FVG chain is gone (§8.8): S5 now evaluates an SFP on the **last closed** 15m candle (wick pierces a ranked PDH/PDL/PWH/PWL/BSL/SSL pool, close returns inside), requires the sweep candle to print ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` (default 1.5) × the SMA volume of the 20 candles before it, enters at that close, stops just beyond the pierced wick through `calculateLevels()` with `atr = 0` (exact 0.1% floor), resolves the target with `skipMinorObstacles: false`, and rejects below a fee-inclusive net R:R (`(target − fee) / (stop + fee) ≥ DYNAMIC_TP_MIN_RR`). Macro pools are never burned; the trigger is burned as a `SWEEP` structure. New config: `SMC_SWEEP_VOLUME_MULTIPLIER`. Funnel: `noSweep` / `lowVolumeSweep` / `tpInvalid` / `insufficientCandles`. Measured 180 days (2026-05-05 → 2026-11-01, $1,000/symbol, killzones bypassed, `DYNAMIC_TP_MIN_RR=1.5`): BTC **+4.37% / 7 trades / PF 1.65**, ETH **−1.15% / 14 / 0.95**, SOL **−14.71% / 12 / 0.26**, portfolio **−3.83% / 33 trades / $204.79 fees**. At `2.0` the scenario is dormant (13 trades across the three symbols, portfolio −6.31%). The binding constraint is the target gate, not the volume gate: with a 0.1–0.3% stop, a fee-inclusive 1.5–2.0R demands a 3.5–5R structural target that the nearest-wall filter (`skipMinorObstacles: false`) rarely finds. Harness note: the S5 suite caught a sparse-array fixture whose `reduce()` silently skipped holes and averaged 11 of 20 baseline candles; the baseline is now summed with an explicit loop that fails closed. Toolchain: typecheck clean, **875 tests / 43 suites green**, build passing.
+
+_Last updated: 2026-11-01. **Scenario 5 geometry unlock.** Three refinements, all scoped to Scenario 5 (§8.8.1, §16.5.8): the stop is buffered by `max(0.5 × atr15m, 0.1%)` beyond the pierced wick instead of sitting on it; `resolveTakeProfit()` runs with `skipMinorObstacles: true` so minor 15m swings are stepped over (a MAJOR pool inside the floor still rejects); and `SMC_SWEEP_VOLUME_MULTIPLIER` defaults to **1.3** in `env.ts`, `.env.example` and `.env`. Rationale: a wick-tight stop made 1R 0.1–0.3% of price, so the fee-inclusive net-R:R floor demanded a 3.5–5R structural target that the nearest-wall filter could almost never deliver — 99.4% of volume-confirmed survivors died at `tpInvalid`. Measured over the identical 180 days (2026-05-05 → 2026-11-01, $1,000/symbol, killzones bypassed, `DYNAMIC_TP_MIN_RR=1.5`): BTC **+$176.28 (+17.63%) / 31 trades / PF 1.48**, ETH **−$36.74 (−3.67%) / 44 / 0.94**, SOL **−$47.13 (−4.71%) / 67 / 0.94**, portfolio **+$92.41 (+3.08%) / 142 trades / 34.51% WR / $583.64 fees** — up from **−$114.81 / 33 trades**. `Triggered` rose 4.3× and `tpInvalid`'s share of survivors fell 98.97% → 96.03%, but the absolute count rose (3,181 → 3,438) because the looser volume gate fed 366 more survivors into the same gate. The portfolio sign flip is carried by BTC alone (ETH+SOL combined −$83.87) and Max DD widened to 13.44% / 19.49% / 12.56%, so this is a geometric repair, not a validated portfolio edge. Toolchain: typecheck clean, **878 tests / 43 suites green**.
 
 _Last updated: 2026-11-01. **S12 shield execution-price fix.** `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` are no longer measured against `idealEntry`; `resolveShieldEntry()` prices the entry the trade will actually be booked at — the market price for a Market fill (discount or within `SMART_ENTRY_THRESHOLD_PCT`), `idealEntry` for a resting Limit — delegating the routing decision to `shouldUseMarketEntry()` so the gate and the executor cannot disagree (§7.13.5, Invariant 61, §16.1.8). A market price already outside `SL..TP` stays with the pre-flight DEAD-setup guard so its mitigation burn is preserved. Measured on the identical NEARUSDT 60-day window with a pinned clock: **+$252.24 / 9 trades / PF 5.64 / DD 2.22%** vs **+$284.94 / 10 trades / PF 6.19 / DD 2.22%** — nine signals unchanged, the single removed trade realised net R 0.973 (below the 1.0 floor) and was a winner, so the gate costs profit to enforce correctness. Test suite: **866 tests / 43 suites green**, typecheck clean.
 

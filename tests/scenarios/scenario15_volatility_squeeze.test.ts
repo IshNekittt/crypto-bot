@@ -18,6 +18,7 @@ const config: BotConfig = {
   smcDisplacementMultiplier: '1.5', sniperDisplacementMultiplier: '1.5',
   limitExpirationCandles: 6, sniperLimitExpirationCandles: 15,
   smcSweepMinWickRatio: new Decimal('0.25'), smartEntryThresholdPct: '0.0015',
+  sweepVolumeMultiplier: new Decimal('1.5'),
   preflightBufferPct: '0.05', enableSniperMode: false, enableDynamicTp: false,
   fixedTpRr: new Decimal(3), dynamicTpMinRr: new Decimal('1.5'),
   dynamicTpMaxRr: new Decimal(6), dynamicTpRequireTarget: false,
