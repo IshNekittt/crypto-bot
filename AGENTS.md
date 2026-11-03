@@ -2136,6 +2136,8 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 
 **Archived — not constructible, not tradeable:** 2 (FVG Fill), 3 (IDM), 4 (Mitigation Chain), 6 (SMS), 7 (AMD), 8 (Range Deviation), 9 (Turtle Soup), 10 (Breaker Block), 11 (Mitigation Block) live under `src/engine/scenarios/archive/legacy_smc/`; 13 (Top-Down Order Flow) lives under `src/engine/scenarios/archive/`. Their modules still compile and their suites still run, so the designs remain available for reference and possible revival — but no runtime path can schedule them, and their IDs fail validation.
 
+**Scenario 16 (ATR Exhaustion Reversal)** also lives in `archive/legacy_smc/` — archived on **v2026-11-03** after a 60-day stress test showed a **negative mathematical expectancy**: trading counter-trend volatility flags (fading an over-extended swing on the first BB/KC expansion) lost money at both calibrations, and relaxing the gates only increased the loss (−$170.41 / 15 trades → −$387.57 / 64 trades across NEAR/BTC/SOL). The module and its suite are retained as a reference implementation (§8.9); its ID fails validation.
+
 ### 8.1 Scenario Overview
 
 `ScenarioRouter` constructs exactly five scenarios, in registry order: **1, 5, 12, 14, 15**. Scenario 12 is the only 1m producer and requires `ENABLE_SNIPER_MODE=true` — `loadConfig()` aborts the boot when `12` is requested with Sniper Mode off, and the router still rejects it with the `disabled` bucket as a defensive backstop. Scenarios 1, 5, 14 and 15 are Classic 15m entries and reject with the `wrongMode` bucket when Sniper Mode is active or `LTF_TIMEFRAME≠15`, so a stale 15m candle can never be re-scanned on 1m ticks. `ACTIVE_SCENARIOS` narrows the registry and can never add to it. Active implementations expose rejection statistics for observability.
@@ -2225,6 +2227,40 @@ Three changes, all inside Scenario 5 (no cross-scenario impact):
 **What actually moved the needle**: `Triggered` multiplied 4.3×, not because `tpInvalid` collapsed in absolute terms — the looser volume gate fed 366 extra survivors into the same gate — but because its **share** fell 2.94 pp, and every survivor now has a wider stop (larger 1R, so fewer R-multiples needed) and a further target (minors skipped). Per-symbol: BTC quadrupled its net (+$43.70 → +$176.28) on 4.4× the trades while keeping a 1.48 PF; SOL's win rate doubled (16.67% → 32.84%) and its loss shrank by two thirds (−$147.06 → −$47.13); ETH is the one regression (−$11.45 → −$36.74) with the deepest drawdown in the set (19.49%).
 
 **Honest reading**: the portfolio sign flipped (+3.08%), but that is *one* symbol carrying it — BTC's +$176.28 against ETH+SOL's combined −$83.87 — and fees rose to $583.64 (6.3× the $92.41 net). Max DD widened on both BTC (5.92% → 13.44%) and ETH (9.86% → 19.49%). The refinement fixed the geometric deadlock it was aimed at (the scenario is alive and tradable, `Triggered` up 4.3×), but it did **not** produce a portfolio-wide edge: 34.51% win rate with a 1.48/0.94/0.94 PF spread means the distribution across symbols is still the dominant variable. Do not deploy on the strength of BTC alone.
+
+### 8.9 Scenario 16 — ATR Exhaustion Reversal — **ARCHIVED v2026-11-03**
+
+> **ARCHIVED — not registered, not tradeable.** The module lives at `src/engine/scenarios/archive/legacy_smc/Scenario16_AtrExhaustionReversal.ts` and its suite at `tests/scenarios/archive/legacy_smc/`. Retained as design reference. **Why archived**: trading counter-trend volatility flags — fading an over-extended swing on the first BB/KC expansion — produced a negative mathematical expectancy at both calibrations; relaxing the exhaustion and squeeze gates raised frequency 4.3× but increased the loss (§8.9 verdict below).
+
+**File (archived)**: `src/engine/scenarios/archive/legacy_smc/Scenario16_AtrExhaustionReversal.ts`
+
+**Premise**: a 20-candle swing that has already travelled ≥ 1.0 × ATR4H is over-extended, and when it ends on the first volatility expansion after a BB/KC compression the thrust is more often terminal than the start of a new leg. The trade fades the extreme the close sits nearest.
+
+| Step | Rule |
+| --- | --- |
+| **1. Mode** | `ENABLE_SNIPER_MODE=false` and `LTF_TIMEFRAME=15`; otherwise `wrongMode`. |
+| **2. Data** | Last closed 15m candle + `atr15m` + `atr4h` + last closed 4H candle; fewer than 41 15m candles → `insufficientCandles`. |
+| **3. Exhaustion** | `high − low` of the last 20 15m candles ≥ `1.0 × atr4h`; else `noExhaustion`. ATR4H is the macro unit — a 5-hour swing must outrun a full 4H bar, which a 15m ATR would almost never enforce. Calibrated from `1.5` to `1.0` (v2026-11-03) after `1.5` rejected 76–81% of evaluations. |
+| **4. Direction** | Close nearer the window high → `BEARISH` (Sell); nearer the low → `BULLISH` (Buy); exact midpoint → `ambiguousDirection`. |
+| **5. Squeeze** | `calculateVolatilitySqueeze` (BB 20/2, KC 20/1.5); the trigger must be the first non-squeezed candle after at least **one** compressed candle (`priorSqueezeCandles >= 1`); else `noSqueeze`. Calibrated from 3 to 1 because the exhaustion gate already demands an impulse — requiring most of the preceding hour to be dead made the two gates mutually exclusive. |
+| **6. Volume** | Trigger volume ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` × SMA(20) of the preceding candles — the trigger is excluded from its own baseline (Invariant 56); else `lowVolume`. |
+| **7. Geometry** | Entry = trigger close. Stop = the squeeze base (the 5 candles before the trigger) routed through `calculateLevels()`; TP = `resolveTakeProfit({ skipMinorObstacles: true })`, falling back to `FIXED_TP_RR` when no structural target exists. |
+| **8. Burn** | `structureDetails` = `{ type: 'CHoCH', timestamp: trigger, price: entry, direction }`; no `zoneDetails` — the squeeze base is stop geometry, not an SMC mitigation zone, and burning it as one would remove a real order block from the router's pool. |
+
+**Funnel**: `totalEvals`, `wrongMode`, `insufficientCandles`, `noExhaustion`, `noSqueeze`, `lowVolume`, `ambiguousDirection`, `invalidGeometry`, `tpInvalid`, `triggered`.
+
+**Measured baselines** (60 days 2026-09-04 → 2026-11-03, `USE_LOCAL_CACHE_ONLY=true`, $1,000/symbol; `1.5 × ATR4H` + 3 prior squeeze candles → `1.0 × ATR4H` + 1 prior squeeze candle):
+
+| Symbol | Before | After |
+| --- | --- | --- |
+| NEARUSDT | −$50.74 (−5.07%), 4 trades, 25.00% WR, PF 0.20, DD 6.32% | **+$18.11 (+1.81%)**, 25 trades, 44.00% WR, PF 1.06, DD 14.25% |
+| BTCUSDT | −$51.28 (−5.13%), 6 trades, 33.33% WR, PF 0.46, DD 7.62% | −$237.01 (−23.70%), 20 trades, 20.00% WR, PF 0.17, DD 25.71% |
+| SOLUSDT | −$68.39 (−6.84%), 5 trades, 20.00% WR, PF 0.26, DD 6.84% | −$168.67 (−16.87%), 19 trades, 26.32% WR, PF 0.40, DD 17.85% |
+| **Portfolio** | **−$170.41 (−5.68%)**, 15 trades, 26.67% WR | **−$387.57 (−12.92%)**, 64 trades, 31.25% WR |
+
+Funnel after: NEAR `Total 5,330 | NoExhaustion 2,666 | NoSqueeze 2,580 | LowVolume 36 | TpInvalid 18 | Triggered 25`; BTC `5,313 | 2,778 | 2,460 | 39 | 16 | 20`; SOL `5,349 | 2,796 | 2,485 | 36 | 9 | 19`.
+
+> **Verdict (v2026-11-03)**: the relaxation raised trade count 4.3× (15 → 64) but made the portfolio worse (−5.68% → −12.92%). Only NEAR turned positive; BTC and SOL deteriorated sharply, and Max DD widened on all three. Fees rose from $102.77 to $354.77 against a −$387.57 net. By the pre-registered criterion (negative PnL + low win rate after relaxation) the algorithm is not working, so **Scenario 16 was archived** — do not tune it further on this window.
 
 ### 8.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
@@ -2582,7 +2618,7 @@ LOG_LEVEL=info                     # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (853 tests / 43 suites, all green)
+npm test             # jest (911 tests / 45 suites, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -3188,3 +3224,5 @@ _Last updated: 2026-11-01. **Scenario 5 geometry unlock.** Three refinements, al
 _Last updated: 2026-11-01. **S12 shield execution-price fix.** `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` are no longer measured against `idealEntry`; `resolveShieldEntry()` prices the entry the trade will actually be booked at — the market price for a Market fill (discount or within `SMART_ENTRY_THRESHOLD_PCT`), `idealEntry` for a resting Limit — delegating the routing decision to `shouldUseMarketEntry()` so the gate and the executor cannot disagree (§7.13.5, Invariant 61, §16.1.8). A market price already outside `SL..TP` stays with the pre-flight DEAD-setup guard so its mitigation burn is preserved. Measured on the identical NEARUSDT 60-day window with a pinned clock: **+$252.24 / 9 trades / PF 5.64 / DD 2.22%** vs **+$284.94 / 10 trades / PF 6.19 / DD 2.22%** — nine signals unchanged, the single removed trade realised net R 0.973 (below the 1.0 floor) and was a winner, so the gate costs profit to enforce correctness. Test suite: **866 tests / 43 suites green**, typecheck clean.
 
 _Last updated: 2026-10-28. **Endurance freeze release.** Two long-horizon audits are now recorded in §7.23: S14 Tank on BTCUSDT over **365 days** (+19.94%, PF 1.20, Max DD 19.82%, MAR 1.01 — 160.4 days underwater, fees eating 49.7% of gross) and S12 Sniper on NEARUSDT over **180 days** (+22.40%, PF 3.24, Max DD 4.74% at the audited calibration; the global `1.5` volatility shield starved the same window to +3.46%). The audit produced exactly one configuration change — `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` in `.env` and `.env.emilia`, with the global shield left untouched for every other pair. Harness fix: `src/backtest/run.ts` appends the 1m history in a loop instead of `push(...fetched1m)`, which had thrown `Maximum call stack size exceeded` on any Sniper window beyond ~100k candles (§16.6.8). Also carried over from v2026-10-26: the V4 Classic scenario refactor (batches 1–4), Invariants 1–60, anti-patterns consolidated into §16.1–§16.8, and the live hotfix that stopped `processClosedPosition()` from resetting the state machine during the entry-bookkeeping window (§16.3.9, Invariant 60). Toolchain: typecheck clean, **853 tests / 43 suites green**, build passing.
+
+_Last updated: 2026-11-03. **Scenario 16 archived — negative expectancy confirmed.** S16 was registered, stress-tested, then retired: `REGISTERED_SCENARIO_IDS` / `CLASSIC_ONLY_SCENARIO_IDS` are back to `1, 5, 12, 14, 15`, `ScenarioId` (`src/types.ts`) mirrors that union, and the module moved to `src/engine/scenarios/archive/legacy_smc/Scenario16_AtrExhaustionReversal.ts` with its suite beside it (both still compile and still run, but no runtime path can schedule them; `16` is a hard boot error). S16 was a 15m Classic fade — 20-candle swing ≥ N × ATR4H, first BB/KC expansion after a compression run, trigger volume ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` × the preceding SMA20 — and the premise was the problem: trading counter-trend volatility flags has negative mathematical expectancy. The initial 60-day screen (`1.5 × ATR4H`, ≥3 squeeze candles) produced 15 trades across NEAR/BTC/SOL and **−$170.41 (−5.68%)**; relaxing both gates to `1.0 × ATR4H` and ≥1 squeeze candle raised frequency 4.3× (64 trades) but worsened the portfolio to **−$387.57 (−12.92%)**, 31.25% WR, Max DD 14.25% / 25.71% / 17.85%, fees $354.77 — only NEARUSDT positive (+$18.11, 44.00% WR, PF 1.06). Design record kept in §8.9; do not tune it further on this window. Harness correction retained: `tests/config/profiles.test.ts` asserts the Classic profile resolves `6 × 15m`, matching `resolveLimitExpirationCandles()` and §7.20.2. Toolchain: typecheck clean, **911 tests / 45 suites green**, build passing.

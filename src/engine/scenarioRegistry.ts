@@ -16,9 +16,9 @@
  *   15 Volatility Squeeze      (15m Classic)
  *
  * Archived and NOT constructible: 2, 3, 4, 6, 7, 8, 9, 10, 11 (legacy SMC
- * discovery sweep) and 13 (Top-Down Order Flow). Their modules remain under
- * `src/engine/scenarios/archive/` for reference and are still unit-tested, but
- * no runtime path can schedule them.
+ * discovery sweep), 13 (Top-Down Order Flow) and 16 (ATR Exhaustion
+ * Reversal). Their modules remain under `src/engine/scenarios/archive/` for
+ * reference and are still unit-tested, but no runtime path can schedule them.
  */
 export const REGISTERED_SCENARIO_IDS: readonly number[] = Object.freeze([
   1, 5, 12, 14, 15,
@@ -53,4 +53,4 @@ export function describeRegisteredScenarios(): string {
  * Human-readable list of archived IDs, kept next to the registry so an
  * operator reading a validation failure sees exactly what was retired.
  */
-export const ARCHIVED_SCENARIO_IDS_LABEL = '2-4, 6-11, 13';
+export const ARCHIVED_SCENARIO_IDS_LABEL = '2-4, 6-11, 13, 16';

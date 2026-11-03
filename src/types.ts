@@ -3,6 +3,17 @@ import { BotConfig } from './config/env';
 
 export type Direction = 'BULLISH' | 'BEARISH';
 export type StructureBreakKind = 'BOS' | 'CHOCH';
+
+/**
+ * Scenario IDs the live `ScenarioRouter` can construct.
+ *
+ * Type-level mirror of `REGISTERED_SCENARIO_IDS` (`src/engine/scenarioRegistry.ts`),
+ * which stays the runtime single source of truth. A scenario implementation pins
+ * its own id to this union, so adding a scenario forces both sides to move
+ * together instead of drifting silently. Archived ids (2-4, 6-11, 13, 16) are
+ * intentionally absent: no runtime path can schedule them.
+ */
+export type ScenarioId = 1 | 5 | 12 | 14 | 15;
 export type SwingType = 'HIGH' | 'LOW';
 export type Timeframe = '1' | '3' | '5' | '15' | '30' | '60' | '120' | '240' | '360' | '720' | 'D' | 'W' | 'M';
 export type TradeSide = 'Buy' | 'Sell';

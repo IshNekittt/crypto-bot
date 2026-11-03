@@ -112,10 +112,11 @@ describe('Preset .env.subaru.example — V4 Classic Tank', () => {
   it('uses Classic candle counts for cooldown and limit lifetime', () => {
     expect(config.cooldownCandles).toBe(16);
     expect(config.limitExpirationCandles).toBe(6);
-    // 6 x 15m = 90 min. The Sniper knob is absent, so the fallback is the
-    // Classic-independent default rather than the LTF count.
+    // The Sniper knob is absent, so it keeps the Classic-independent code
+    // default — it is inert while enableSniperMode is false.
     expect(config.sniperLimitExpirationCandles).toBe(15);
-    expect(resolveLimitExpirationCandles(config)).toBe(15);
+    // Classic resolves the LTF knob: 6 x 15m = 90 min (AGENTS.md §7.20.2).
+    expect(resolveLimitExpirationCandles(config)).toBe(6);
   });
 
   it('runs 24/7 entry filters', () => {
