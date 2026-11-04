@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "backtest": "tsc && node dist/backtest/run.js",
+    "matrix:test": "ts-node scripts/matrix_tester.ts",
     "dn:backtest": "tsc && node dist/dn_arbitrage/backtest/run.js",
     "decrypt": "ts-node scripts/decrypt_backup.ts"
   },

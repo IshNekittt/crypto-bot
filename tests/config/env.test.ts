@@ -159,11 +159,11 @@ describe('loadConfig — Scenario 12 knobs', () => {
 });
 
 describe('loadConfig — scenario registration (S1/S5 restored, strict registry)', () => {
-  it('materialises the full five-scenario registry when ACTIVE_SCENARIOS is unset', () => {
+  it('materialises the full registered registry when ACTIVE_SCENARIOS is unset', () => {
     expect(loadConfig(env()).activeScenarios).toEqual([1, 5, 12, 14, 15]);
   });
 
-  it('accepts the five live scenarios', () => {
+  it('accepts the live scenarios', () => {
     const config = loadConfig(
       env({ ACTIVE_SCENARIOS: '1,5,12,14,15', ENABLE_SNIPER_MODE: 'true' }),
     );
@@ -180,8 +180,11 @@ describe('loadConfig — scenario registration (S1/S5 restored, strict registry)
       /ACTIVE_SCENARIOS must contain ONLY registered scenario IDs/,
     );
     expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '2' }))).toThrow(
-      /Archived and not tradeable: 2-4, 6-11, 13/,
+      /Archived and not tradeable: 2-4, 6-11, 13, 16, 17/,
     );
+    // Scenario 17 (Judas Swing) was archived on 2026-11-04: a profile that still
+    // requests it must abort the boot rather than run an empty Classic process.
+    expect(() => loadConfig(env({ ACTIVE_SCENARIOS: '17' }))).toThrow(/got: 17/);
   });
 
   it('rejects a mixed list containing an archived id (no silent narrowing)', () => {

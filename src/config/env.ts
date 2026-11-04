@@ -225,7 +225,7 @@ function parseSymbols(raw: string): string[] {
 /**
  * Strict scenario-ID list parser (audit F-02).
  *
- * Only the five IDs in `REGISTERED_SCENARIO_IDS` are accepted. An archived id is
+ * Only the IDs in `REGISTERED_SCENARIO_IDS` are accepted. An archived id is
  * a hard error, never a silent drop: a dropped id used to leave a live process
  * with fewer scenarios than the operator configured — and in the extreme
  * (`.env.example` shipped `1..12` with Sniper OFF) with none that could ever

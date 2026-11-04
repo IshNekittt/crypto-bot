@@ -125,17 +125,19 @@ describe('ScenarioRouter', () => {
       expect(REGISTERED_SCENARIO_IDS).toEqual([1, 5, 12, 14, 15]);
     });
 
-    it('does not register the archived Scenarios 2–4, 6–11 or 13', () => {
-      const archivedRouter = new ScenarioRouter({
-        symbol: 'SOLUSDT',
-        patternRecognizer: mockPatternRecognizer,
-        notifier: mockNotifier,
-        activeScenarios: [13],
-        config: { ...mockConfig, activeScenarios: [13] },
-      });
+    it('does not register the archived Scenarios 2–4, 6–11, 13, 16 or 17', () => {
+      for (const archivedId of [13, 16, 17]) {
+        const archivedRouter = new ScenarioRouter({
+          symbol: 'SOLUSDT',
+          patternRecognizer: mockPatternRecognizer,
+          notifier: mockNotifier,
+          activeScenarios: [archivedId],
+          config: { ...mockConfig, activeScenarios: [archivedId] },
+        });
 
-      // Scenario 13 was archived: the router simply has nothing to evaluate.
-      expect((archivedRouter as any).scenarios).toHaveLength(0);
+        // Archived scenarios have no constructor: the router has nothing to evaluate.
+        expect((archivedRouter as any).scenarios).toHaveLength(0);
+      }
     });
 
     it('ignores archived ids without dropping the registered scenarios', () => {

@@ -10,7 +10,7 @@ export type StructureBreakKind = 'BOS' | 'CHOCH';
  * Type-level mirror of `REGISTERED_SCENARIO_IDS` (`src/engine/scenarioRegistry.ts`),
  * which stays the runtime single source of truth. A scenario implementation pins
  * its own id to this union, so adding a scenario forces both sides to move
- * together instead of drifting silently. Archived ids (2-4, 6-11, 13, 16) are
+ * together instead of drifting silently. Archived ids (2-4, 6-11, 13, 16, 17) are
  * intentionally absent: no runtime path can schedule them.
  */
 export type ScenarioId = 1 | 5 | 12 | 14 | 15;

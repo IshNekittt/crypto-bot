@@ -2134,9 +2134,13 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 | **14** | Trend Following Alpha | 15m Classic | 15m Donchian breakout with volume confirmation | Classic mode; structural TP and ATR stop; `wrongMode` guard |
 | **15** | Volatility Compression Squeeze | 15m Classic | BB(20,2) fully inside KC(SMA20 ± 1.5×ATR20); first expansion after ≥5 compressed candles | 15m Classic only; regression-slope direction; KC-midline ±1.5×ATR stop; `tpResolver`; trigger candle burned by timestamp; `wrongMode` guard |
 
-**Archived — not constructible, not tradeable:** 2 (FVG Fill), 3 (IDM), 4 (Mitigation Chain), 6 (SMS), 7 (AMD), 8 (Range Deviation), 9 (Turtle Soup), 10 (Breaker Block), 11 (Mitigation Block) live under `src/engine/scenarios/archive/legacy_smc/`; 13 (Top-Down Order Flow) lives under `src/engine/scenarios/archive/`. Their modules still compile and their suites still run, so the designs remain available for reference and possible revival — but no runtime path can schedule them, and their IDs fail validation.
+**Archived — not constructible, not tradeable:** 2 (FVG Fill), 3 (IDM), 4 (Mitigation Chain), 6 (SMS), 7 (AMD), 8 (Range Deviation), 9 (Turtle Soup), 10 (Breaker Block), 11 (Mitigation Block) live under `src/engine/scenarios/archive/legacy_smc/`; 13 (Top-Down Order Flow) lives under `src/engine/scenarios/archive/`; 16 (ATR Exhaustion Reversal) and 17 (Killzone Session Sweep / Judas Swing) also live under `archive/legacy_smc/` (both documented below). Their modules still compile and their suites still run, so the designs remain available for reference and possible revival — but no runtime path can schedule them, and their IDs fail validation.
 
 **Scenario 16 (ATR Exhaustion Reversal)** also lives in `archive/legacy_smc/` — archived on **v2026-11-03** after a 60-day stress test showed a **negative mathematical expectancy**: trading counter-trend volatility flags (fading an over-extended swing on the first BB/KC expansion) lost money at both calibrations, and relaxing the gates only increased the loss (−$170.41 / 15 trades → −$387.57 / 64 trades across NEAR/BTC/SOL). The module and its suite are retained as a reference implementation (§8.9); its ID fails validation.
+
+**Scenario 17 (Killzone Session Sweep / Judas Swing)** also lives in `archive/legacy_smc/` — archived on **v2026-11-04** with the opposite diagnosis to S16: the directional edge was **real and gross-positive**, but the round-trip taker fee consumed it. The 60-day / 11-symbol matrix measured **+$392.89 gross** before fees against **$710.70** of costs, i.e. **−$317.81 net** across 229 trades ($1.72 gross per trade vs $3.10 of cost); 5 of 11 symbols were profitable and none cleared the alpha gate. The module and its suite are retained as a reference implementation (§8.10); its ID fails validation.
+
+> **Archived v2026-11-04: Confirmed POSITIVE Gross Edge (directional alpha exists), but killed by Taker fees due to tight wick-geometry. Needs ATR-based geometry unlock (like S5) for future revival.**
 
 ### 8.1 Scenario Overview
 
@@ -2262,11 +2266,52 @@ Funnel after: NEAR `Total 5,330 | NoExhaustion 2,666 | NoSqueeze 2,580 | LowVolu
 
 > **Verdict (v2026-11-03)**: the relaxation raised trade count 4.3× (15 → 64) but made the portfolio worse (−5.68% → −12.92%). Only NEAR turned positive; BTC and SOL deteriorated sharply, and Max DD widened on all three. Fees rose from $102.77 to $354.77 against a −$387.57 net. By the pre-registered criterion (negative PnL + low win rate after relaxation) the algorithm is not working, so **Scenario 16 was archived** — do not tune it further on this window.
 
+### 8.10 Scenario 17 — Killzone Session Sweep (Judas Swing) — **ARCHIVED v2026-11-04**
+
+> **ARCHIVED — not registered, not tradeable.** The module lives at `src/engine/scenarios/archive/legacy_smc/Scenario17_JudasSwing.ts` and its suite at `tests/scenarios/archive/legacy_smc/scenario17_judas_swing.test.ts`. Retained as design reference. **Why archived**: the pattern produced a **positive gross** edge that the round-trip taker fee destroyed — the wick-anchored stop is too tight to pay for its own execution.
+
+> **Archived v2026-11-04: Confirmed POSITIVE Gross Edge (directional alpha exists), but killed by Taker fees due to tight wick-geometry. Needs ATR-based geometry unlock (like S5) for future revival.**
+
+**Premise**: the Asian session (20:00–24:00 NY) builds an accumulation range; London (02:00–05:00 NY) or New York (07:00–10:00 NY) runs one side of it — the Judas Swing — and the same 15m candle that pierces the boundary closes back inside. Entry is that close, the stop sits beyond the pierced wick, and the target is structural.
+
+| Step | Rule |
+| --- | --- |
+| **1. Mode** | `ENABLE_SNIPER_MODE=false` and `LTF_TIMEFRAME=15`; otherwise `wrongMode`. |
+| **2. Killzone** | London or NY only (ASIAN excluded — the range is still forming); bypassable via `ENFORCE_KILLZONES=false`. |
+| **3. Asian range** | Newest COMPLETED ASIAN range, fully behind the trigger candle and ≤24h old; the still-forming session (same NY calendar date as the trigger) is skipped. |
+| **4. SFP** | Last closed 15m candle only: `high > asianHigh && close < asianHigh` → BEARISH; `low < asianLow && close > asianLow` → BULLISH. A two-sided pierce resolves by deeper penetration; an exact tie resolves BEARISH. |
+| **5. Volume** | Sweep candle ≥ **1.0×** the SMA of the 20 candles before it (trigger excluded, Invariant 56). Deliberately independent of `SMC_SWEEP_VOLUME_MULTIPLIER` (S5's 1.3 calibration). |
+| **6. Geometry** | Entry = sweep close; stop = pierced wick pushed `max(SMC_SL_ATR_OFFSET × atr15m, 0.1%)` via `calculateLevels()`; target = `resolveTakeProfit({ skipMinorObstacles: true })`, falling back to `FIXED_TP_RR`. |
+| **7. Burn** | `structureDetails = { type: 'SWEEP', timestamp, price: pierced wick, direction }`; no `zoneDetails` — session liquidity is never burned (Invariant 21). |
+
+**Funnel** (11 symbols, 59,721 evaluations): `notInKillzone` 45,523 (76.2% — structural, since London+NY are 6h of a 24h day), `noSweep` 13,038 (**91.8%** of the 14,198 in-killzone evaluations), `lowVolume` 524, `tpInvalid` 406, `triggered` 230. `wrongMode`, `insufficientCandles` and `noAsianRange` were 0 on every symbol. The binding constraint is the SFP itself, not the session gate.
+
+**Measured baseline** (60 days 2026-09-05 → 2026-11-04, `ACTIVE_SCENARIOS=17`, `ENABLE_SNIPER_MODE=false`, `LTF_TIMEFRAME=15`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=true`, `ALLOWED_DAYS_OF_WEEK=1..7`, $1,000/symbol):
+
+| Symbol | Net | Trades | W/L | Win rate | PF | Max DD | Fees |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| APTUSDT | **+$87.85 (+8.79%)** | 19 | 8/11 | 42.11% | 1.56 | 5.56% | $48.69 |
+| LINKUSDT | +$57.08 (+5.71%) | 19 | 9/10 | 47.37% | 1.28 | 8.60% | $96.77 |
+| WLDUSDT | +$48.27 (+4.83%) | 20 | 8/12 | 40.00% | 1.24 | 7.32% | $53.99 |
+| NEARUSDT | +$33.69 (+3.37%) | 14 | 6/8 | 42.86% | 1.23 | 9.03% | $22.30 |
+| SUIUSDT | +$25.35 (+2.53%) | 30 | 13/17 | 43.33% | 1.07 | 11.82% | $102.97 |
+| ARBUSDT | −$4.98 (−0.50%) | 18 | 7/11 | 38.89% | 0.97 | 10.43% | $40.55 |
+| OPUSDT | −$31.86 (−3.19%) | 14 | 4/10 | 28.57% | 0.77 | 7.49% | $29.40 |
+| INJUSDT | −$44.11 (−4.41%) | 16 | 5/11 | 31.25% | 0.76 | 11.62% | $40.82 |
+| SOLUSDT | −$81.08 (−8.11%) | 32 | 9/23 | 28.13% | 0.74 | 17.14% | $129.60 |
+| AVAXUSDT | −$142.56 (−14.26%) | 20 | 5/15 | 25.00% | 0.46 | 17.79% | $63.83 |
+| DOGEUSDT | −$265.46 (−26.55%) | 27 | 3/24 | 11.11% | 0.20 | 29.11% | $81.78 |
+| **Portfolio** | **−$317.81 (−2.89%)** | **229** | **77/152** | **33.62%** | — | **29.11%** | **$710.70** |
+
+MATICUSDT was not evaluated (`insufficient-data` — Bybit retired the MATIC perp, so no 15m cache exists).
+
+> **Verdict (v2026-11-04)**: the failure is **unit economics, not direction**. Portfolio gross was **+$392.89** before fees and **−$317.81** after **$710.70** of round-trip taker fees — **$1.72 gross per trade against $3.10 of cost** across 229 trades. Five of eleven symbols were profitable; APTUSDT was the only NEAR (two of three gates: +8.79%, PF 1.56, DD 5.56%) and none cleared the alpha gate (Net > 10%, DD < 10%, PF > 1.5). The dispersion is the other half of the story: APTUSDT at +8.79% against DOGEUSDT at −26.55% (11.11% WR) is a regime bet, not a portfolio edge. Note that the implemented stop already carried the `0.5 × atr15m` buffer — a revival must widen the **distance itself** (minimum stop as a % of price and/or higher-timeframe invalidation) rather than re-adding a buffer that is already present, then re-measure on ≥180 days before any sizing decision.
+
 ### 8.2 Zone Mitigation (No Re-entry) — `ScenarioRouter` + `StrategyEngine`
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
-- Scenarios setting `zoneDetails` in the live registry: **1, 14**. Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 5 never emits a zone for the same reason (its trigger is burned as a `SWEEP` structure); Scenario 15 emits `structureDetails` only and burns the trigger candle by timestamp. Archived scenarios 2–4 and 6–11 keep their historical tagging inside the archive.
+- Scenarios setting `zoneDetails` in the live registry: **1, 14**. Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 5 never emits a zone for the same reason (its trigger is burned as a `SWEEP` structure); Scenario 15 emits `structureDetails` only and burns the trigger candle by timestamp. Archived scenarios (2–4, 6–11, 13, 16, 17) keep their historical tagging inside the archive.
 
 ### 8.3 Contextual Quality Filters (Confluence) — **ARCHIVED SCENARIOS**
 
@@ -3226,3 +3271,5 @@ _Last updated: 2026-11-01. **S12 shield execution-price fix.** `MIN_NET_RR` and 
 _Last updated: 2026-10-28. **Endurance freeze release.** Two long-horizon audits are now recorded in §7.23: S14 Tank on BTCUSDT over **365 days** (+19.94%, PF 1.20, Max DD 19.82%, MAR 1.01 — 160.4 days underwater, fees eating 49.7% of gross) and S12 Sniper on NEARUSDT over **180 days** (+22.40%, PF 3.24, Max DD 4.74% at the audited calibration; the global `1.5` volatility shield starved the same window to +3.46%). The audit produced exactly one configuration change — `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` in `.env` and `.env.emilia`, with the global shield left untouched for every other pair. Harness fix: `src/backtest/run.ts` appends the 1m history in a loop instead of `push(...fetched1m)`, which had thrown `Maximum call stack size exceeded` on any Sniper window beyond ~100k candles (§16.6.8). Also carried over from v2026-10-26: the V4 Classic scenario refactor (batches 1–4), Invariants 1–60, anti-patterns consolidated into §16.1–§16.8, and the live hotfix that stopped `processClosedPosition()` from resetting the state machine during the entry-bookkeeping window (§16.3.9, Invariant 60). Toolchain: typecheck clean, **853 tests / 43 suites green**, build passing.
 
 _Last updated: 2026-11-03. **Scenario 16 archived — negative expectancy confirmed.** S16 was registered, stress-tested, then retired: `REGISTERED_SCENARIO_IDS` / `CLASSIC_ONLY_SCENARIO_IDS` are back to `1, 5, 12, 14, 15`, `ScenarioId` (`src/types.ts`) mirrors that union, and the module moved to `src/engine/scenarios/archive/legacy_smc/Scenario16_AtrExhaustionReversal.ts` with its suite beside it (both still compile and still run, but no runtime path can schedule them; `16` is a hard boot error). S16 was a 15m Classic fade — 20-candle swing ≥ N × ATR4H, first BB/KC expansion after a compression run, trigger volume ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` × the preceding SMA20 — and the premise was the problem: trading counter-trend volatility flags has negative mathematical expectancy. The initial 60-day screen (`1.5 × ATR4H`, ≥3 squeeze candles) produced 15 trades across NEAR/BTC/SOL and **−$170.41 (−5.68%)**; relaxing both gates to `1.0 × ATR4H` and ≥1 squeeze candle raised frequency 4.3× (64 trades) but worsened the portfolio to **−$387.57 (−12.92%)**, 31.25% WR, Max DD 14.25% / 25.71% / 17.85%, fees $354.77 — only NEARUSDT positive (+$18.11, 44.00% WR, PF 1.06). Design record kept in §8.9; do not tune it further on this window. Harness correction retained: `tests/config/profiles.test.ts` asserts the Classic profile resolves `6 × 15m`, matching `resolveLimitExpirationCandles()` and §7.20.2. Toolchain: typecheck clean, **911 tests / 45 suites green**, build passing.
+
+_Last updated: 2026-11-04. **Scenario 17 archived — positive gross edge, fee-negative net.** S17 (Killzone Session Sweep / Judas Swing) was implemented, registered, and retired the same day. The 60-day / 11-symbol matrix (`ACTIVE_SCENARIOS=17`, `ENABLE_SNIPER_MODE=false`, `LTF_TIMEFRAME=15`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=true`, $1,000/symbol, 2026-09-05 → 2026-11-04) produced 229 trades at 33.62% WR: **+$392.89 gross before fees**, **−$317.81 net** after **$710.70** of round-trip taker fees ($1.72 gross per trade vs $3.10 of cost). Five of eleven symbols were profitable; APTUSDT was the only NEAR (+8.79%, PF 1.56, DD 5.56%) and **0 cleared the alpha gate** (Net > 10%, DD < 10%, PF > 1.5). The rejection funnel is dominated by `notInKillzone` (45,523 / 59,721 = 76.2%, structural for a 6h-of-24h session gate) and `noSweep` (13,038 = 91.8% of the 14,198 in-killzone evaluations); `lowVolume` 524, `tpInvalid` 406, `triggered` 230. **Diagnosis: directional alpha exists, unit economics do not** — the wick-anchored stop is too tight to pay its own round-trip cost. Module moved to `src/engine/scenarios/archive/legacy_smc/Scenario17_JudasSwing.ts` with its suite at `tests/scenarios/archive/legacy_smc/scenario17_judas_swing.test.ts`; `REGISTERED_SCENARIO_IDS` / `CLASSIC_ONLY_SCENARIO_IDS` are back to `1, 5, 12, 14, 15`, `ScenarioId` mirrors that union, `ARCHIVED_SCENARIO_IDS_LABEL` is now `2-4, 6-11, 13, 16, 17`, and `17` is a hard boot error. Design record kept in §8.10. `.env` was returned to the V5 Sniper profile (`ACTIVE_SCENARIOS=12`, `ENABLE_SNIPER_MODE=true`, `LTF_TIMEFRAME=15`, `HTF_TIMEFRAME=240`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=false`) for the next symbol-search matrix. Revival condition: widen the stop **distance** (minimum stop as a % of price and/or higher-timeframe invalidation — the `0.5 × atr15m` buffer already exists and was not sufficient), then re-measure on ≥180 days before any sizing decision.
