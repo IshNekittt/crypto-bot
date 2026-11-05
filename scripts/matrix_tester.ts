@@ -50,21 +50,22 @@ import { dirname, resolve } from 'path';
 // Defaults & thresholds
 // ---------------------------------------------------------------------------
 
-/** Requested matrix universe. MATICUSDT is kept on purpose: it exercises the
- *  per-symbol failure path (Bybit retired the MATIC perp in favour of POL). */
+/**
+ * Requested matrix universe — the four finalists selected by the 60-day screen
+ * (NEAR, DOGE, APT) plus RENDERUSDT, the live successor of the delisted
+ * RNDRUSDT perp. This is a 180-day deep-water run, so the universe is kept
+ * deliberately small: each pair costs a full 1m history download (~260k
+ * candles) plus a 259,200-candle simulation.
+ *
+ * `SYMBOLS` in `.env` MUST list the same four pairs — `parseSymbolOverrides()`
+ * only builds the per-symbol calibration map for symbols present in `SYMBOLS`,
+ * so a mismatch silently drops `MIN_NET_RR_NEARUSDT` / `MIN_VOLATILITY_FEE_RATIO_NEARUSDT`.
+ */
 const DEFAULT_SYMBOLS: readonly string[] = Object.freeze([
-  'SOLUSDT',
   'NEARUSDT',
-  'AVAXUSDT',
-  'APTUSDT',
-  'SUIUSDT',
-  'WLDUSDT',
-  'OPUSDT',
-  'ARBUSDT',
-  'LINKUSDT',
   'DOGEUSDT',
-  'MATICUSDT',
-  'INJUSDT',
+  'APTUSDT',
+  'RENDERUSDT',
 ]);
 
 /** Screening gate requested by the Lead Architect. Strict inequalities. */
@@ -229,7 +230,7 @@ Horizontal Alpha Scaling — batch backtest matrix
 Usage: npm run matrix:test -- [options] [SYMBOL ...]
 
 Options:
-  --symbols=A,B,C     Symbol universe (default: the 12-pair S12 matrix)
+  --symbols=A,B,C     Symbol universe (default: the 15-pair S12 alt matrix)
   --out=<path>        Markdown report (default ${DEFAULT_OUT_PATH})
   --state=<path>      Resume state (default ${DEFAULT_STATE_PATH})
   --data-dir=<path>   Where Backtest_Report_<SYMBOL>.txt lives (default ${DEFAULT_DATA_DIR})
