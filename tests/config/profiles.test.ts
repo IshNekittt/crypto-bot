@@ -64,7 +64,7 @@ const S12_ONLY_KEY_PATTERNS: RegExp[] = [
   /^SMC_SWEEP_MIN_WICK_RATIO/,
 ];
 
-describe('Preset .env.subaru.example — V4 Classic Tank', () => {
+describe('Preset .env.subaru.example — V4 Classic (S14 + S15, BTCUSDT)', () => {
   let config: BotConfig;
 
   beforeAll(() => {
@@ -77,35 +77,28 @@ describe('Preset .env.subaru.example — V4 Classic Tank', () => {
     expect(config.htfTimeframe).toBe('240');
   });
 
-  it('trades the four Tank symbols', () => {
-    expect(config.symbols).toEqual([
-      'BTCUSDT',
-      'ETHUSDT',
-      'SOLUSDT',
-      'DOGEUSDT',
-    ]);
+  it('trades BTCUSDT only', () => {
+    expect(config.symbols).toEqual(['BTCUSDT']);
   });
 
-  it('defaults to S14 globally and narrows each symbol explicitly', () => {
-    expect(config.activeScenarios).toEqual([14]);
-
-    // Sorted + de-duplicated at parse time; the written order in the file is
-    // cosmetic.
-    expect(config.symbolScenarios.get('BTCUSDT')).toEqual([5, 14, 15]);
-    expect(config.symbolScenarios.get('ETHUSDT')).toEqual([14]);
-    expect(config.symbolScenarios.get('SOLUSDT')).toEqual([5, 14]);
-    expect(config.symbolScenarios.get('DOGEUSDT')).toEqual([15]);
+  it('runs the validated S14 + S15 pair with no per-symbol narrowing', () => {
+    expect(config.activeScenarios).toEqual([14, 15]);
+    // One symbol, one global list — a per-symbol override would NARROW the
+    // symbol rather than extend the global list (AGENTS.md §1.3 invariant 1).
+    expect(config.symbolScenarios.size).toBe(0);
   });
 
   it('keeps the verified SMC geometry', () => {
     expect(config.smcSlAtrOffset).toBe('0.5');
+    // SMC_SWEEP_VOLUME_MULTIPLIER is S5-only and S5 is not active, so the file
+    // omits it and the code default applies.
     expect(config.sweepVolumeMultiplier.toString()).toBe('1.3');
     expect(config.smcDisplacementMultiplier).toBe('1.5');
   });
 
-  it('resolves structural targets between 2R and 6R', () => {
+  it('resolves structural targets between 1.5R and 6R', () => {
     expect(config.enableDynamicTp).toBe(true);
-    expect(config.dynamicTpMinRr.toString()).toBe('2');
+    expect(config.dynamicTpMinRr.toString()).toBe('1.5');
     expect(config.dynamicTpMaxRr.toString()).toBe('6');
   });
 
@@ -119,8 +112,13 @@ describe('Preset .env.subaru.example — V4 Classic Tank', () => {
     expect(resolveLimitExpirationCandles(config)).toBe(6);
   });
 
-  it('runs 24/7 entry filters', () => {
-    expect(config.enforceKillzones).toBe(false);
+  it('arms the 4H ADX regime gate measured on this profile', () => {
+    expect(config.enableRegimeFilter).toBe(true);
+    expect(config.regimeAdxThreshold?.toString()).toBe('25');
+  });
+
+  it('keeps killzones enforced across all seven weekdays', () => {
+    expect(config.enforceKillzones).toBe(true);
     expect(config.allowedDaysOfWeek).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
@@ -131,6 +129,7 @@ describe('Preset .env.subaru.example — V4 Classic Tank', () => {
     expect(config.leverage).toBe('10');
     expect(config.maxWorkingCapital).toBe(3000);
     expect(config.enableHealthcheckServer).toBe(true);
+    expect(config.backtestDays).toBe(365);
   });
 
   it('carries no Scenario-12-only key', () => {
@@ -149,7 +148,7 @@ describe('Preset .env.subaru.example — V4 Classic Tank', () => {
   });
 });
 
-describe('Preset .env.emilia.example — V5 Sniper', () => {
+describe('Preset .env.emilia.example — V5 Sniper (S12, NEARUSDT)', () => {
   let config: BotConfig;
 
   beforeAll(() => {
@@ -163,8 +162,8 @@ describe('Preset .env.emilia.example — V5 Sniper', () => {
     expect(config.symbolScenarios.size).toBe(0);
   });
 
-  it('trades the Sniper symbols', () => {
-    expect(config.symbols).toEqual(['NEARUSDT', 'APTUSDT']);
+  it('trades NEARUSDT only', () => {
+    expect(config.symbols).toEqual(['NEARUSDT']);
   });
 
   it('arms both opt-in sweep sources', () => {
@@ -194,14 +193,16 @@ describe('Preset .env.emilia.example — V5 Sniper', () => {
     expect(near.smcSweepMinWickRatio.toString()).toBe('0.25');
   });
 
-  it('calibrates APTUSDT without leaking into NEARUSDT', () => {
-    const apt = resolveSymbolConfig(config, 'APTUSDT');
-    expect(apt.smcSlAtrOffset).toBe('0.60');
-    expect(resolveLimitExpirationCandles(apt)).toBe(25);
+  it('keeps the APTUSDT calibration out of the active roster', () => {
+    // APTUSDT is not in SYMBOLS, so its grid-search cell survives only as a
+    // commented future-pair note — no override can leak into an unconfigured
+    // pair (resolveSymbolConfig returns the same object identity).
+    expect(config.symbols).not.toContain('APTUSDT');
+    expect(resolveSymbolConfig(config, 'APTUSDT')).toBe(config);
 
-    const near = resolveSymbolConfig(config, 'NEARUSDT');
-    expect(near.smcSlAtrOffset).toBe('0.5');
-    expect(resolveLimitExpirationCandles(near)).toBe(15);
+    const { raw } = bootProfile(EMILIA);
+    expect(raw.SMC_SL_ATR_OFFSET_APTUSDT).toBeUndefined();
+    expect(raw.SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT).toBeUndefined();
   });
 
   it('resolves structural targets between 1.5R and 6R', () => {
@@ -210,8 +211,13 @@ describe('Preset .env.emilia.example — V5 Sniper', () => {
     expect(config.dynamicTpMaxRr.toString()).toBe('6');
   });
 
-  it('runs 24/7 entry filters', () => {
-    expect(config.enforceKillzones).toBe(false);
+  it('keeps the regime gate off — S12 is the only producer', () => {
+    expect(config.enableRegimeFilter).toBe(false);
+    expect(config.regimeAdxThreshold?.toString()).toBe('25');
+  });
+
+  it('keeps killzones enforced across all seven weekdays', () => {
+    expect(config.enforceKillzones).toBe(true);
     expect(config.allowedDaysOfWeek).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
@@ -221,6 +227,7 @@ describe('Preset .env.emilia.example — V5 Sniper', () => {
     expect(config.leverage).toBe('10');
     expect(config.maxWorkingCapital).toBe(3000);
     expect(config.enableHealthcheckServer).toBe(true);
+    expect(config.backtestDays).toBe(60);
   });
 
   it('carries no Classic-only S5 knob', () => {

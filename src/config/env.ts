@@ -181,6 +181,27 @@ export interface BotConfig {
   readonly allowedDaysOfWeek: number[];
   readonly enforceKillzones: boolean;
   readonly enableTradeNotifications: boolean;
+  /**
+   * Regime filter — 4H ADX gate (see `src/engine/quant/adx.ts`).
+   *
+   * When `true`, `ScenarioRouter` classifies the 4H tape once per evaluation and
+   * blocks scenario/regime mismatches before they are evaluated:
+   *   - TREND (ADX >= threshold): counter-trend sweeps (S5, S12) are blocked.
+   *   - RANGE (ADX <  threshold): trend breakouts (S14) are blocked.
+   * Scenarios 1 and 15 carry their own macro conditions and are never gated.
+   *
+   * Optional so hand-built `BotConfig` literals (tests, tooling) keep compiling;
+   * an absent value means `false` — the filter is opt-in, and a run without it
+   * must stay byte-identical to the pre-filter baseline.
+   */
+  readonly enableRegimeFilter?: boolean;
+  /**
+   * ADX level separating TREND from RANGE. ADX is bounded 0..100, so the parser
+   * rejects values above 100 instead of silently disabling the filter.
+   * Optional for the same reason as `enableRegimeFilter`; the router falls back
+   * to 25 when absent.
+   */
+  readonly regimeAdxThreshold?: Decimal;
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
@@ -878,6 +899,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
   const enforceKillzones =
     (optionalEnv(env, "ENFORCE_KILLZONES") ?? "true").toLowerCase() === "true";
 
+  // === Regime Filter (4H ADX) ===
+  // Opt-in gate that blocks scenario/regime mismatches at the router level. Off
+  // by default: a run without ENABLE_REGIME_FILTER must reproduce the baseline
+  // exactly, so this can never be enabled by an absent variable.
+  const enableRegimeFilter =
+    (optionalEnv(env, "ENABLE_REGIME_FILTER") ?? "false").toLowerCase() === "true";
+
+  const regimeAdxThreshold = parsePositiveDecimalOrDefault(
+    optionalEnv(env, "REGIME_ADX_THRESHOLD"),
+    "25",
+    "REGIME_ADX_THRESHOLD",
+  );
+
+  // ADX is an index bounded 0..100. A larger threshold would classify every tape
+  // as RANGE forever — the filter would read as protection while in practice
+  // only blocking trend breakouts. Fail at boot instead of trading a silent
+  // off-switch.
+  if (regimeAdxThreshold.gt(100)) {
+    throw new Error(
+      `REGIME_ADX_THRESHOLD must be <= 100 (ADX is bounded 0..100), got: ${regimeAdxThreshold.toString()}`,
+    );
+  }
+
   // Routine trade notifications (Setup Found / Order Opened / Position Closed).
   // Default true — set ENABLE_TRADE_NOTIFICATIONS=false to mute trade spam while
   // keeping all logger.error alerts flowing through the global Telegram hook.
@@ -989,5 +1033,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     allowedDaysOfWeek,
     enforceKillzones,
     enableTradeNotifications,
+    enableRegimeFilter,
+    regimeAdxThreshold,
   };
 }

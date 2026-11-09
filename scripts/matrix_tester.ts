@@ -51,21 +51,25 @@ import { dirname, resolve } from 'path';
 // ---------------------------------------------------------------------------
 
 /**
- * Requested matrix universe — the four finalists selected by the 60-day screen
- * (NEAR, DOGE, APT) plus RENDERUSDT, the live successor of the delisted
- * RNDRUSDT perp. This is a 180-day deep-water run, so the universe is kept
- * deliberately small: each pair costs a full 1m history download (~260k
- * candles) plus a 259,200-candle simulation.
+ * Requested matrix universe — a deliberate mix of majors and high-beta alts:
+ * BTC / ETH / SOL (deep liquidity, trend anchors) plus NEAR / AVAX / LINK /
+ * DOGE (the alt cohort that carried the S12 and S17 screens). This is a
+ * 365-day Classic run, so the universe is sized for regime breadth rather than
+ * for per-pair depth: each symbol costs a full 15m + 4H history download and a
+ * ~35,000-candle simulation.
  *
- * `SYMBOLS` in `.env` MUST list the same four pairs — `parseSymbolOverrides()`
- * only builds the per-symbol calibration map for symbols present in `SYMBOLS`,
- * so a mismatch silently drops `MIN_NET_RR_NEARUSDT` / `MIN_VOLATILITY_FEE_RATIO_NEARUSDT`.
+ * `SYMBOLS` in `.env` MUST list the same pairs — `parseSymbolOverrides()` only
+ * builds the per-symbol calibration map for symbols present in `SYMBOLS`, so a
+ * mismatch silently drops every `<PARAM>_<SYMBOL>` override.
  */
 const DEFAULT_SYMBOLS: readonly string[] = Object.freeze([
+  'BTCUSDT',
+  'ETHUSDT',
+  'SOLUSDT',
   'NEARUSDT',
+  'AVAXUSDT',
+  'LINKUSDT',
   'DOGEUSDT',
-  'APTUSDT',
-  'RENDERUSDT',
 ]);
 
 /** Screening gate requested by the Lead Architect. Strict inequalities. */
@@ -162,6 +166,15 @@ interface SymbolFailure {
   message: string;
 }
 
+/** One month parsed from a report's `📅 MONTHLY BREAKDOWN` section. */
+interface MonthlyEntry {
+  /** `YYYY-MM` (UTC). */
+  month: string;
+  netUsd: Decimal;
+  trades: number;
+  winRatePct: Decimal;
+}
+
 /** Presentation-only metrics parsed from the text report. */
 interface Metrics {
   initialBalance: Decimal;
@@ -181,6 +194,8 @@ interface Metrics {
   periodDays: number | null;
   scenarioIds: number[];
   scenarioNames: string[];
+  /** Empty when the report predates the monthly section. */
+  monthly: MonthlyEntry[];
 }
 
 type Verdict = 'PASS' | 'NEAR' | 'FAIL' | 'NO_TRADES';
@@ -230,7 +245,7 @@ Horizontal Alpha Scaling — batch backtest matrix
 Usage: npm run matrix:test -- [options] [SYMBOL ...]
 
 Options:
-  --symbols=A,B,C     Symbol universe (default: the 15-pair S12 alt matrix)
+  --symbols=A,B,C     Symbol universe (default: the 7-pair majors+alts regime pool)
   --out=<path>        Markdown report (default ${DEFAULT_OUT_PATH})
   --state=<path>      Resume state (default ${DEFAULT_STATE_PATH})
   --data-dir=<path>   Where Backtest_Report_<SYMBOL>.txt lives (default ${DEFAULT_DATA_DIR})
@@ -387,6 +402,55 @@ function intFromMatch(block: string, pattern: RegExp): number | null {
 }
 
 /**
+ * Parses the `📅 MONTHLY BREAKDOWN` table emitted by `generateReport()`.
+ *
+ * Line shape (report uses box-drawing separators):
+ *   `   2026-05  │     +123.45 │     10 │  60.00%`
+ *
+ * The section is bounded by the next emoji header (`🗓️ TRADE TIMELINE`) so a
+ * future table added below can never leak rows into the monthly aggregation.
+ * Returns `[]` for reports written before the section existed — the matrix then
+ * renders `—` instead of failing the whole row.
+ */
+export function parseMonthlyBreakdown(block: string): MonthlyEntry[] {
+  const marker = '📅 MONTHLY BREAKDOWN';
+  const markerIndex = block.indexOf(marker);
+  if (markerIndex < 0) return [];
+
+  const section = block
+    .slice(markerIndex + marker.length)
+    .split('🗓️')[0]
+    .split('📋')[0];
+
+  const rowPattern =
+    /^\s*(\d{4}-\d{2})\s*[│|]\s*([+-]?\d+(?:\.\d+)?)\s*[│|]\s*(\d+)\s*[│|]\s*(-?\d+(?:\.\d+)?)%/;
+
+  const months: MonthlyEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const line of section.split('\n')) {
+    const match = line.match(rowPattern);
+    if (!match) continue;
+
+    const month = match[1];
+    if (seen.has(month)) continue;
+
+    try {
+      const netUsd = new Decimal(match[2]);
+      const winRatePct = new Decimal(match[4]);
+      if (!netUsd.isFinite() || !winRatePct.isFinite()) continue;
+      months.push({ month, netUsd, trades: Number(match[3]), winRatePct });
+      seen.add(month);
+    } catch {
+      // A malformed month row is skipped, never allowed to poison the matrix.
+      continue;
+    }
+  }
+
+  return months.sort((left, right) => left.month.localeCompare(right.month));
+}
+
+/**
  * Parses the text artifact produced by `generateReport()`. Returns null when the
  * block is absent or incomplete — a half-parsed row is worse than a failure,
  * because it would silently corrupt the screening table.
@@ -471,6 +535,7 @@ export function parseReportMetrics(text: string, symbol: string): Metrics | null
     periodDays: period ? Number(period[3]) : null,
     scenarioIds,
     scenarioNames,
+    monthly: parseMonthlyBreakdown(block),
   };
 }
 
@@ -868,6 +933,50 @@ function formatRecovery(metrics: Metrics): string {
   return value.toFixed(2);
 }
 
+/**
+ * Monthly return as a percentage of the symbol's STARTING balance.
+ *
+ * Deliberately NOT compounded: every month stays directly comparable to the
+ * report's `Net PnL %` column and to every other symbol, and a late winning
+ * month is never flattered by an earlier drawdown. Documented in the report's
+ * Method section so the number cannot be misread as a compounded return.
+ */
+function monthlyReturnPct(entry: MonthlyEntry, metrics: Metrics): Decimal {
+  if (metrics.initialBalance.lte(0)) return new Decimal(0);
+  return entry.netUsd.div(metrics.initialBalance).mul(100);
+}
+
+/** Months that actually traded — a flat month is never "best" or "worst". */
+function activeMonths(metrics: Metrics): MonthlyEntry[] {
+  return metrics.monthly.filter((entry) => entry.trades > 0);
+}
+
+function bestMonth(metrics: Metrics): MonthlyEntry | null {
+  return activeMonths(metrics).reduce<MonthlyEntry | null>((best, entry) => {
+    if (best === null) return entry;
+    return monthlyReturnPct(entry, metrics).gt(monthlyReturnPct(best, metrics)) ? entry : best;
+  }, null);
+}
+
+function worstMonth(metrics: Metrics): MonthlyEntry | null {
+  return activeMonths(metrics).reduce<MonthlyEntry | null>((worst, entry) => {
+    if (worst === null) return entry;
+    return monthlyReturnPct(entry, metrics).lt(monthlyReturnPct(worst, metrics)) ? entry : worst;
+  }, null);
+}
+
+function formatMonthCell(entry: MonthlyEntry | null, metrics: Metrics): string {
+  if (entry === null) return '—';
+  return `${signedPct(monthlyReturnPct(entry, metrics))} (${entry.month})`;
+}
+
+/** `profitable / months in window`. Flat (zero-trade) months count as not profitable. */
+function formatMonthsInProfit(metrics: Metrics): string {
+  if (metrics.monthly.length === 0) return '—';
+  const profitable = metrics.monthly.filter((entry) => entry.netUsd.gt(0)).length;
+  return `${profitable}/${metrics.monthly.length}`;
+}
+
 export function classifyVerdict(metrics: Metrics): Verdict {
   if (metrics.trades === 0) return 'NO_TRADES';
 
@@ -913,6 +1022,9 @@ function tableHeader(): string[] {
     'Max DD %',
     'Fees $',
     'Net/DD',
+    'Best Month',
+    'Worst Month',
+    'Months in Profit',
     'Scenarios',
     'Verdict',
   ];
@@ -934,6 +1046,9 @@ function tableRow(index: number, result: SymbolResult): string {
     `${metrics.maxDrawdownPct.toFixed(2)}%`,
     `$${metrics.feesUsd.toFixed(2)}`,
     formatRecovery(metrics),
+    formatMonthCell(bestMonth(metrics), metrics),
+    formatMonthCell(worstMonth(metrics), metrics),
+    formatMonthsInProfit(metrics),
     metrics.scenarioIds.length > 0 ? metrics.scenarioIds.join(', ') : '—',
     verdictLabel(classifyVerdict(metrics)),
   ].join(' | ');
@@ -951,6 +1066,49 @@ function okResults(results: SymbolResult[]): Array<SymbolResult & { metrics: Met
   return results
     .filter((result): result is SymbolResult & { metrics: Metrics } => result.status === 'ok' && result.metrics !== null)
     .sort((left, right) => right.metrics.netPct.comparedTo(left.metrics.netPct));
+}
+
+/**
+ * Cross-symbol month-by-month return grid — the regime heatmap.
+ *
+ * Each cell is that month's net PnL as a percentage of the symbol's $1,000
+ * starting balance. A month with no trades is rendered as `· 0` (flat) instead
+ * of `+0.00%`, so a drought is visually distinct from a breakeven month that
+ * actually traded. The final column is the equal-weight portfolio for that
+ * month: total net PnL ÷ total starting balance.
+ */
+function monthlyRegimeMap(ok: Array<SymbolResult & { metrics: Metrics }>): string[] {
+  const months = [
+    ...new Set(ok.flatMap((result) => result.metrics.monthly.map((entry) => entry.month))),
+  ].sort();
+  if (months.length === 0) return [];
+
+  const totalInitial = ok.reduce((sum, result) => sum.plus(result.metrics.initialBalance), new Decimal(0));
+  const header = ['Month', ...ok.map((result) => result.symbol), 'Portfolio'];
+
+  const rows = months.map((month) => {
+    const cells = ok.map((result) => {
+      const entry = result.metrics.monthly.find((candidate) => candidate.month === month);
+      if (!entry) return '—';
+      if (entry.trades === 0) return '· 0';
+      return signedPct(monthlyReturnPct(entry, result.metrics));
+    });
+
+    const monthNet = ok.reduce((sum, result) => {
+      const entry = result.metrics.monthly.find((candidate) => candidate.month === month);
+      return entry ? sum.plus(entry.netUsd) : sum;
+    }, new Decimal(0));
+    const portfolioPct = totalInitial.gt(0) ? monthNet.div(totalInitial).mul(100) : new Decimal(0);
+    cells.push(signedPct(portfolioPct));
+
+    return [month, ...cells].join(' | ');
+  });
+
+  return [
+    `| ${header.join(' | ')} |`,
+    `| ${header.map(() => '---').join(' | ')} |`,
+    ...rows.map((row) => `| ${row} |`),
+  ];
 }
 
 function buildMarkdown(context: ReportContext): string {
@@ -1028,6 +1186,41 @@ function buildMarkdown(context: ReportContext): string {
   }
   lines.push('');
 
+  lines.push('## 🗓️ Monthly Regime Map');
+  lines.push('');
+  const regimeMap = monthlyRegimeMap(ok);
+  if (regimeMap.length === 0) {
+    lines.push(
+      '_No `📅 MONTHLY BREAKDOWN` section was found in the reports — re-run the matrix to regenerate them._',
+    );
+  } else {
+    lines.push(
+      'Each cell is that month\'s net PnL as a percentage of the symbol\'s $1,000 starting balance. ' +
+        '`· 0` marks a month with **no trades** (a drought), which is different from a breakeven month that did trade. ' +
+        '`Portfolio` is the equal-weight monthly result across every evaluated symbol.',
+    );
+    lines.push('');
+    lines.push(...regimeMap);
+    lines.push('');
+    const flatSummary = ok
+      .map((result) => ({
+        symbol: result.symbol,
+        months: result.metrics.monthly
+          .filter((entry) => entry.trades === 0)
+          .map((entry) => entry.month),
+      }))
+      .filter((entry) => entry.months.length > 0);
+    if (flatSummary.length > 0) {
+      lines.push('**Flat months (zero trades — the drought map):**');
+      lines.push('');
+      for (const entry of flatSummary) {
+        lines.push(`- **${entry.symbol}**: ${entry.months.join(', ')}`);
+      }
+      lines.push('');
+    }
+  }
+  lines.push('');
+
   lines.push('## ❌ Failed / Skipped');
   lines.push('');
   if (failed.length === 0) {
@@ -1098,6 +1291,9 @@ function buildMarkdown(context: ReportContext): string {
   );
   lines.push(
     '- `PASS` requires **all three** gates. `NEAR` requires two of three and a positive return. `NO TRADES` is reported separately — a flat strategy is not a passing one.',
+  );
+  lines.push(
+    '- `Best Month` / `Worst Month` are the strongest and weakest months **that actually traded**, expressed as that month\'s net PnL ÷ the symbol\'s $1,000 starting balance (not compounded). `Months in Profit` counts profitable months over every month in the window, so a zero-trade month counts as not profitable. The first and last calendar months can be partial — the window is anchored to `Date.now()`, not to month boundaries.',
   );
   lines.push(
     '- Fees are the simulator\'s round-trip taker fees (0.055% per leg), already netted out of every PnL figure above.',

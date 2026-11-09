@@ -1,4 +1,4 @@
-import { IScenario, StructureDetails, MitigatedZone, MitigatedStructure } from '../types';
+import { IScenario, StructureDetails, MitigatedZone, MitigatedStructure, Candle } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
 import { DateTime } from 'luxon';
@@ -10,6 +10,7 @@ import { Scenario5_HTFLiquiditySweep } from './scenarios/Scenario5_HTFLiquidityS
 import { Scenario12_SniperTouch } from './scenarios/Scenario12_SniperTouch';
 import { Scenario14_QuantAlpha } from './scenarios/Scenario14_QuantAlpha';
 import { Scenario15_VolatilitySqueeze } from './scenarios/Scenario15_VolatilitySqueeze';
+import { ADX_DEFAULT_PERIOD, calculateADX } from './quant/adx';
 import {
   ARCHIVED_SCENARIO_IDS_LABEL,
   REGISTERED_SCENARIO_IDS,
@@ -50,11 +51,78 @@ export interface RouterResult {
   structureDetails: StructureDetails | null;
 }
 
+/**
+ * Router-level funnel for the 4H ADX regime gate.
+ *
+ * Counters are process-wide statics, exactly like the per-scenario
+ * `getRejectionStats()` blocks: the matrix tester spawns one process per symbol,
+ * so the reporter reads the tally of the symbol it just simulated. `regimeFilter`
+ * is the total number of scenario passes blocked (the sum of the two buckets) —
+ * it is the key surfaced in the report funnel.
+ */
+export interface RegimeFilterStats {
+  /** `ENABLE_REGIME_FILTER` was true for the router that produced these numbers. */
+  enabled: boolean;
+  /** Threshold the ADX was compared against, as configured (`null` until enabled). */
+  threshold: string | null;
+  /** Passes where the filter was armed and a classification was attempted. */
+  evaluations: number;
+  /** Passes classified as TREND (ADX >= threshold). */
+  trend: number;
+  /** Passes classified as RANGE (ADX < threshold). */
+  range: number;
+  /** Passes where 4H history was shorter than 2 × period — no classification. */
+  insufficientHistory: number;
+  /** Scenario passes blocked because a counter-trend sweep (S5/S12) fired in a TREND. */
+  blockedCounterTrend: number;
+  /** Scenario passes blocked because a trend breakout (S14) fired in a RANGE. */
+  blockedTrendBreakout: number;
+  /** Total blocked scenario passes (`blockedCounterTrend + blockedTrendBreakout`). */
+  regimeFilter: number;
+}
+
+const EMPTY_REGIME_STATS: RegimeFilterStats = {
+  enabled: false,
+  threshold: null,
+  evaluations: 0,
+  trend: 0,
+  range: 0,
+  insufficientHistory: 0,
+  blockedCounterTrend: 0,
+  blockedTrendBreakout: 0,
+  regimeFilter: 0,
+};
+
+/** Scenario ids that bet on a reversal of the prevailing move. */
+const COUNTER_TREND_SCENARIO_IDS: readonly number[] = [5, 12];
+/** Scenario ids that bet on continuation of the prevailing move. */
+const TREND_BREAKOUT_SCENARIO_IDS: readonly number[] = [14];
+/** ADX(14) needs 2 × period candles; below that the gate stays open. */
+const REGIME_MIN_CANDLES = ADX_DEFAULT_PERIOD * 2;
+const DEFAULT_REGIME_ADX_THRESHOLD = new Decimal(25);
+
+
 export class ScenarioRouter {
   private readonly symbol: string;
   private readonly patternRecognizer: any;
   private readonly config: BotConfig;
   private readonly scenarios: IScenario[];
+  private readonly regimeFilterEnabled: boolean;
+  private readonly regimeAdxThreshold: Decimal;
+  /** Single-slot ADX memo — see `resolveRegimeAdx()`. */
+  private regimeAdxCache: { key: string; value: Decimal } | null = null;
+
+  private static regimeFilterStats: RegimeFilterStats = { ...EMPTY_REGIME_STATS };
+
+  /** Snapshot of the process-wide regime funnel (see `RegimeFilterStats`). */
+  static getRegimeFilterStats(): Readonly<RegimeFilterStats> {
+    return { ...ScenarioRouter.regimeFilterStats };
+  }
+
+  /** Test helper: clear the funnel between independent runs. */
+  static resetRegimeFilterStats(): void {
+    ScenarioRouter.regimeFilterStats = { ...EMPTY_REGIME_STATS };
+  }
 
   constructor(deps: ScenarioRouterDeps) {
     this.symbol = deps.symbol;
@@ -64,6 +132,17 @@ export class ScenarioRouter {
     // owns — Scenario 12 included — and the `tpResolver` inputs it feeds are
     // already symbol-correct. An uncalibrated symbol returns the same object.
     this.config = resolveSymbolConfig(deps.config, deps.symbol);
+
+    // Optional in `BotConfig` so hand-built literals keep compiling; absent
+    // means disabled, which keeps every pre-filter run reproducible.
+    this.regimeFilterEnabled = this.config.enableRegimeFilter === true;
+    this.regimeAdxThreshold =
+      this.config.regimeAdxThreshold ?? DEFAULT_REGIME_ADX_THRESHOLD;
+
+    if (this.regimeFilterEnabled) {
+      ScenarioRouter.regimeFilterStats.enabled = true;
+      ScenarioRouter.regimeFilterStats.threshold = this.regimeAdxThreshold.toString();
+    }
 
     const allScenarios: IScenario[] = [
       new Scenario1_HTFContinuation(this.config), // 1: HTF Continuation (15m Classic)
@@ -133,6 +212,36 @@ export class ScenarioRouter {
     });
   }
 
+  /**
+   * 4H ADX for the current pass, memoised on the identity of the last closed 4H
+   * bar.
+   *
+   * The backtester rebuilds `PatternData` on every 15m close (~35,000 times a
+   * year) while the 4H window only advances once per 4H bar. Recomputing a
+   * multi-thousand-candle Wilder recursion on every 15m pass would add ~10^9
+   * Decimal operations per symbol; the memo reduces that to one computation per
+   * 4H bar without changing the value. The key includes the last close, so a
+   * feed that updates the forming bar can never serve a stale reading.
+   *
+   * Returns `null` when the window is too short or the data is unusable — the
+   * gate then stays open (fail-open) and the funnel records why.
+   */
+  private resolveRegimeAdx(candles4h: readonly Candle[]): Decimal | null {
+    if (candles4h.length < REGIME_MIN_CANDLES) return null;
+
+    const last = candles4h[candles4h.length - 1];
+    const key = `${candles4h.length}:${last.timestamp}:${last.close}`;
+    if (this.regimeAdxCache && this.regimeAdxCache.key === key) {
+      return this.regimeAdxCache.value;
+    }
+
+    const value = calculateADX(candles4h, ADX_DEFAULT_PERIOD);
+    if (value) {
+      this.regimeAdxCache = { key, value };
+    }
+    return value;
+  }
+
 async evaluate(
     candles15m: any[],
     candles4h: any[],
@@ -189,7 +298,73 @@ async evaluate(
         mitigatedStructures,
       };
 
+      // === Regime Filter (4H ADX) ===
+      // One classification per router pass, before any scenario runs. A trending
+      // 4H tape (ADX >= threshold) is hostile to counter-trend sweeps (S5/S12); a
+      // ranging tape (ADX < threshold) is hostile to breakout continuation (S14).
+      // Scenarios 1 and 15 carry their own macro conditions and are never gated.
+      // The gate is ENTRY-only: open positions keep being managed by Adaptive
+      // Fractioning, which never consults the router.
+      let currentAdx: Decimal | null = null;
+
+      if (this.regimeFilterEnabled) {
+        const regimeCandles: readonly Candle[] = Array.isArray(basePd.candles4h)
+          ? basePd.candles4h
+          : [];
+
+        ScenarioRouter.regimeFilterStats.evaluations++;
+
+        try {
+          currentAdx = this.resolveRegimeAdx(regimeCandles);
+        } catch (err) {
+          // A malformed 4H window must not abort the pass: log once and let the
+          // gate stay open, which is exactly the pre-filter behaviour.
+          logger.warn(
+            `[${this.symbol}] Regime filter: ADX unavailable — ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+
+        if (currentAdx) {
+          if (currentAdx.gte(this.regimeAdxThreshold)) {
+            ScenarioRouter.regimeFilterStats.trend++;
+          } else {
+            ScenarioRouter.regimeFilterStats.range++;
+          }
+        } else {
+          ScenarioRouter.regimeFilterStats.insufficientHistory++;
+        }
+      }
+
+      const isTrendRegime =
+        currentAdx !== null && currentAdx.gte(this.regimeAdxThreshold);
+      let regimeBlockedThisPass = 0;
+
       for (const scenario of this.scenarios) {
+        if (currentAdx) {
+          const isCounterTrend = COUNTER_TREND_SCENARIO_IDS.includes(scenario.id);
+          const isTrendBreakout = TREND_BREAKOUT_SCENARIO_IDS.includes(scenario.id);
+          const blocked =
+            (isTrendRegime && isCounterTrend) || (!isTrendRegime && isTrendBreakout);
+
+          if (blocked) {
+            ScenarioRouter.regimeFilterStats.regimeFilter++;
+            if (isTrendRegime) {
+              ScenarioRouter.regimeFilterStats.blockedCounterTrend++;
+            } else {
+              ScenarioRouter.regimeFilterStats.blockedTrendBreakout++;
+            }
+            regimeBlockedThisPass++;
+            logger.debug(
+              `[${this.symbol}] Scenario ${scenario.id} skipped by regime filter: ` +
+                `4H ADX ${currentAdx.toFixed(2)} ${isTrendRegime ? '>=' : '<'} ` +
+                `${this.regimeAdxThreshold.toString()}`,
+            );
+            continue;
+          }
+        }
+
         try {
           const matches = scenario.evaluate(evaluationData);
           
@@ -228,7 +403,15 @@ async evaluate(
         }
       }
 
-      return { triggered: false, scenario: null, levels: null, reason: 'No scenario matched', zoneDetails: null, structureDetails: null };
+      // When every scenario was skipped by the regime gate, the reason must name
+      // that gate — "No scenario matched" would read as a geometry miss and hide
+      // a filter that is silently starving the run.
+      const blockedReason =
+        regimeBlockedThisPass > 0
+          ? `Regime filter (4H ADX ${isTrendRegime ? '>=' : '<'} ${this.regimeAdxThreshold.toString()})`
+          : 'No scenario matched';
+
+      return { triggered: false, scenario: null, levels: null, reason: blockedReason, zoneDetails: null, structureDetails: null };
     } catch (err) {
       logger.error('Pattern recognition failed', {
         symbol: this.symbol,

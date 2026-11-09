@@ -433,3 +433,44 @@ describe('resolveSymbolConfig', () => {
     expect(resolveLimitExpirationCandles(resolveSymbolConfig(config, 'APTUSDT'))).toBe(25);
   });
 });
+
+describe('loadConfig — Regime Filter (4H ADX)', () => {
+  it('defaults to disabled with a threshold of 25', () => {
+    const config = loadConfig(env());
+
+    expect(config.enableRegimeFilter).toBe(false);
+    expect(config.regimeAdxThreshold?.toString()).toBe('25');
+  });
+
+  it('parses explicit overrides', () => {
+    const config = loadConfig(
+      env({ ENABLE_REGIME_FILTER: 'true', REGIME_ADX_THRESHOLD: '18.5' }),
+    );
+
+    expect(config.enableRegimeFilter).toBe(true);
+    expect(config.regimeAdxThreshold?.toString()).toBe('18.5');
+  });
+
+  it('treats any non-"true" value as false', () => {
+    expect(
+      loadConfig(env({ ENABLE_REGIME_FILTER: 'yes' })).enableRegimeFilter,
+    ).toBe(false);
+    expect(
+      loadConfig(env({ ENABLE_REGIME_FILTER: 'TRUE' })).enableRegimeFilter,
+    ).toBe(true);
+  });
+
+  it('rejects a threshold above the ADX ceiling of 100', () => {
+    // ADX is bounded 0..100: a larger threshold would classify every tape as
+    // RANGE forever and silently block only trend breakouts.
+    expect(() =>
+      loadConfig(env({ ENABLE_REGIME_FILTER: 'true', REGIME_ADX_THRESHOLD: '150' })),
+    ).toThrow(/REGIME_ADX_THRESHOLD must be <= 100/);
+  });
+
+  it('rejects a non-positive threshold', () => {
+    expect(() =>
+      loadConfig(env({ REGIME_ADX_THRESHOLD: '0' })),
+    ).toThrow(/REGIME_ADX_THRESHOLD/);
+  });
+});

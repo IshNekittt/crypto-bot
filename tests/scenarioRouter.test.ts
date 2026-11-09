@@ -1,4 +1,5 @@
 import { ScenarioRouter, REGISTERED_SCENARIO_IDS } from '../src/engine/scenarioRouter';
+import { resetScenarioRejectionStats } from '../src/backtest/reporter';
 import { IScenario } from '../src/types';
 import { BotConfig } from '../src/config/env';
 import { Decimal } from 'decimal.js';
@@ -402,5 +403,193 @@ describe('ScenarioRouter — per-symbol calibration', () => {
     expect(near.smcSlAtrOffset).toBe('0.5');
     expect(near.dynamicTpMinRr.toString()).toBe('1.5');
     expect(near.sniperLimitExpirationCandles).toBe(15);
+  });
+});
+
+describe('Regime filter (4H ADX gate)', () => {
+  const H4 = 14_400_000;
+
+  /** Monotonic 4H ramp → every DX is 100 → ADX 100 (TREND). */
+  const trendCandles = (count = 40) =>
+    Array.from({ length: count }, (_, index) => {
+      const base = 100 + index;
+      return {
+        timestamp: index * H4,
+        open: String(base),
+        high: String(base + 0.5),
+        low: String(base - 0.5),
+        close: String(base),
+        volume: '1',
+      };
+    });
+
+  /** Alternating expansion around a flat close → DX ≈ 0 → ADX ≈ 0 (RANGE). */
+  const chopCandles = (count = 40) =>
+    Array.from({ length: count }, (_, index) => {
+      const spike = index % 2;
+      return {
+        timestamp: index * H4,
+        open: '100',
+        high: String(100 + spike),
+        low: String(100 - spike),
+        close: '100',
+        volume: '1',
+      };
+    });
+
+  const buildRig = (
+    candles4h: any[],
+    ids: number[],
+    enableRegimeFilter: boolean,
+  ) =>
+    new ScenarioRouter({
+      symbol: 'BTCUSDT',
+      patternRecognizer: {
+        buildPatternData: jest.fn().mockResolvedValue({
+          candles15m: [],
+          candles4h,
+          structures: [],
+          zones: [],
+          liquidityPools: [],
+          sessionRanges: [],
+          tradingRange: null,
+          currentKillzone: 'LONDON',
+          currentSession: 'LONDON',
+          atr15m: new Decimal(1),
+          atr4h: new Decimal(2),
+          macroContext: {},
+        }),
+      },
+      notifier: mockNotifier,
+      activeScenarios: ids,
+      config: {
+        ...mockConfig,
+        enableRegimeFilter,
+        regimeAdxThreshold: new Decimal(25),
+      },
+    });
+
+  const run = (router: ScenarioRouter) =>
+    router.evaluate([], [], Date.UTC(2026, 0, 7, 12, 0, 0));
+
+  beforeEach(() => {
+    ScenarioRouter.resetRegimeFilterStats();
+  });
+
+  it('blocks counter-trend sweeps (S5) when the 4H tape is trending', async () => {
+    const router = buildRig(trendCandles(), [5], true);
+    const result = await run(router);
+
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toMatch(/^Regime filter/);
+    expect(ScenarioRouter.getRegimeFilterStats().blockedCounterTrend).toBe(1);
+    expect(ScenarioRouter.getRegimeFilterStats().blockedTrendBreakout).toBe(0);
+    expect(ScenarioRouter.getRegimeFilterStats().regimeFilter).toBe(1);
+    expect(ScenarioRouter.getRegimeFilterStats().trend).toBe(1);
+  });
+
+  it('lets the trend breakout (S14) evaluate when the 4H tape is trending', async () => {
+    const router = buildRig(trendCandles(), [14], true);
+    const result = await run(router);
+
+    // S14 still rejects — but on its own geometry, not on the regime gate.
+    expect(result.reason).toBe('No scenario matched');
+    expect(ScenarioRouter.getRegimeFilterStats().regimeFilter).toBe(0);
+  });
+
+  it('blocks the trend breakout (S14) when the 4H tape is ranging', async () => {
+    const router = buildRig(chopCandles(), [14], true);
+    const result = await run(router);
+
+    expect(result.reason).toMatch(/^Regime filter/);
+    expect(ScenarioRouter.getRegimeFilterStats().blockedTrendBreakout).toBe(1);
+    expect(ScenarioRouter.getRegimeFilterStats().blockedCounterTrend).toBe(0);
+    expect(ScenarioRouter.getRegimeFilterStats().range).toBe(1);
+  });
+
+  it('lets counter-trend sweeps (S5) evaluate when the 4H tape is ranging', async () => {
+    const router = buildRig(chopCandles(), [5], true);
+    const result = await run(router);
+
+    expect(result.reason).toBe('No scenario matched');
+    expect(ScenarioRouter.getRegimeFilterStats().regimeFilter).toBe(0);
+  });
+
+  it('never gates S1 or S15', async () => {
+    for (const id of [1, 15]) {
+      ScenarioRouter.resetRegimeFilterStats();
+
+      const trending = await run(buildRig(trendCandles(), [id], true));
+      expect(trending.reason).toBe('No scenario matched');
+      expect(ScenarioRouter.getRegimeFilterStats().regimeFilter).toBe(0);
+
+      const ranging = await run(buildRig(chopCandles(), [id], true));
+      expect(ranging.reason).toBe('No scenario matched');
+      expect(ScenarioRouter.getRegimeFilterStats().regimeFilter).toBe(0);
+    }
+  });
+
+  it('is inert when disabled — the baseline signature', async () => {
+    const router = buildRig(trendCandles(), [5, 14], false);
+    const result = await run(router);
+    const stats = ScenarioRouter.getRegimeFilterStats();
+
+    expect(result.reason).toBe('No scenario matched');
+    expect(stats.enabled).toBe(false);
+    expect(stats.threshold).toBeNull();
+    expect(stats.evaluations).toBe(0);
+    expect(stats.regimeFilter).toBe(0);
+  });
+
+  it('fails open when the 4H window is too short to classify', async () => {
+    // 27 candles < 2 × ADX(14): no reading, no block, and the funnel says why.
+    const router = buildRig(trendCandles(27), [5], true);
+    const result = await run(router);
+    const stats = ScenarioRouter.getRegimeFilterStats();
+
+    expect(result.reason).toBe('No scenario matched');
+    expect(stats.insufficientHistory).toBe(1);
+    expect(stats.trend).toBe(0);
+    expect(stats.range).toBe(0);
+    expect(stats.regimeFilter).toBe(0);
+  });
+
+  it('counts one classification per pass, not one per scenario', async () => {
+    const router = buildRig(trendCandles(), [1, 5, 14, 15], true);
+    await run(router);
+    const stats = ScenarioRouter.getRegimeFilterStats();
+
+    expect(stats.evaluations).toBe(1);
+    expect(stats.trend).toBe(1);
+    // Only S5 is counter-trend among the active set.
+    expect(stats.regimeFilter).toBe(1);
+  });
+});
+
+describe('Regime funnel reset (per-symbol reporting)', () => {
+  it('is cleared by resetScenarioRejectionStats()', () => {
+    // The funnel is process-wide static state, and printReport() runs once per
+    // symbol. A single-process multi-symbol run must not report the previous
+    // symbol's classification/block counts.
+    const router = new ScenarioRouter({
+      symbol: 'BTCUSDT',
+      patternRecognizer: mockPatternRecognizer,
+      notifier: mockNotifier,
+      activeScenarios: [5],
+      config: { ...mockConfig, enableRegimeFilter: true },
+    });
+
+    // Simulate one classified pass by writing through the public API surface.
+    expect(router).toBeDefined();
+    expect(ScenarioRouter.getRegimeFilterStats().enabled).toBe(true);
+    expect(ScenarioRouter.getRegimeFilterStats().threshold).toBe('25');
+
+    resetScenarioRejectionStats();
+
+    const stats = ScenarioRouter.getRegimeFilterStats();
+    expect(stats.enabled).toBe(false);
+    expect(stats.threshold).toBeNull();
+    expect(stats.evaluations).toBe(0);
+    expect(stats.regimeFilter).toBe(0);
   });
 });

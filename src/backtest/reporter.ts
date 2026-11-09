@@ -7,6 +7,7 @@ import { Scenario5_HTFLiquiditySweep } from '../engine/scenarios/Scenario5_HTFLi
 import { Scenario12_SniperTouch } from '../engine/scenarios/Scenario12_SniperTouch';
 import { Scenario14_QuantAlpha } from '../engine/scenarios/Scenario14_QuantAlpha';
 import { Scenario15_VolatilitySqueeze } from '../engine/scenarios/Scenario15_VolatilitySqueeze';
+import { ScenarioRouter } from '../engine/scenarioRouter';
 
 export interface ScenarioStats {
   name: string;
@@ -18,10 +19,108 @@ export interface ScenarioStats {
   profitContribution: Decimal;
 }
 
+/** One calendar month of the backtest window, aggregated by trade EXIT time. */
+export interface MonthlyBreakdownEntry {
+  /** `YYYY-MM` in UTC. */
+  month: string;
+  netPnl: Decimal;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRatePct: Decimal;
+}
+
 /** `count / base` as a one-decimal percentage. Zero/undefined base renders as 0.0%. */
 function sharePct(count: number, base: number): string {
   if (!base || base <= 0) return '0.0%';
   return `${((count / base) * 100).toFixed(1)}%`;
+}
+
+/** UTC `YYYY-MM` key for a millisecond timestamp. */
+function monthKeyUtc(timestampMs: number): string {
+  const date = new Date(timestampMs);
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+/**
+ * Every calendar month touched by `[periodStart, periodEnd]`, inclusive.
+ *
+ * Zero-trade months are deliberately included: a regime audit needs to see the
+ * droughts, not only the months that happened to print a trade. The list is
+ * lexicographically sortable because the key is fixed-width `YYYY-MM`.
+ */
+function enumerateMonths(periodStart: Date, periodEnd: Date): string[] {
+  const startMs = periodStart.getTime();
+  const endMs = periodEnd.getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return [];
+
+  const months: string[] = [];
+  let year = periodStart.getUTCFullYear();
+  let monthIndex = periodStart.getUTCMonth(); // 0-based
+  const endYear = periodEnd.getUTCFullYear();
+  const endMonthIndex = periodEnd.getUTCMonth();
+
+  // Hard stop guards against a malformed Date producing an endless loop.
+  while ((year < endYear || (year === endYear && monthIndex <= endMonthIndex)) && months.length < 600) {
+    months.push(`${year}-${String(monthIndex + 1).padStart(2, '0')}`);
+    monthIndex += 1;
+    if (monthIndex > 11) {
+      monthIndex = 0;
+      year += 1;
+    }
+  }
+
+  return months;
+}
+
+/**
+ * Groups closed trades by their EXIT month (UTC) — the month the PnL was
+ * actually realised. Trades are attributed to `exitTime`, not `entryTime`, so a
+ * position opened on the last day of a month and closed in the next one is
+ * booked where its result landed.
+ */
+export function buildMonthlyBreakdown(
+  trades: TradeResult[],
+  periodStart: Date,
+  periodEnd: Date
+): MonthlyBreakdownEntry[] {
+  const buckets = new Map<string, TradeResult[]>();
+
+  for (const trade of trades) {
+    if (!Number.isFinite(trade.exitTime)) continue;
+    const key = monthKeyUtc(trade.exitTime);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.push(trade);
+    } else {
+      buckets.set(key, [trade]);
+    }
+  }
+
+  const keys = new Set(enumerateMonths(periodStart, periodEnd));
+  // Defensive: a trade that closed just outside the nominal window must never be
+  // silently dropped from the monthly accounting.
+  for (const key of buckets.keys()) keys.add(key);
+
+  return [...keys].sort().map((month) => {
+    const monthTrades = buckets.get(month) ?? [];
+    const wins = monthTrades.filter((trade) => trade.pnl.gt(0)).length;
+    const losses = monthTrades.filter((trade) => trade.pnl.lte(0)).length;
+    const netPnl = monthTrades.reduce((sum, trade) => sum.plus(trade.pnl), new Decimal('0'));
+    const winRatePct =
+      monthTrades.length > 0
+        ? new Decimal(wins).div(monthTrades.length).mul(100)
+        : new Decimal('0');
+
+    return {
+      month,
+      netPnl,
+      trades: monthTrades.length,
+      wins,
+      losses,
+      winRatePct,
+    };
+  });
 }
 
 /**
@@ -39,6 +138,11 @@ export function resetScenarioRejectionStats(): void {
   Scenario12_SniperTouch.resetStats();
   Scenario14_QuantAlpha.resetStats();
   Scenario15_VolatilitySqueeze.resetStats();
+  // Router-level regime gate lives outside every scenario, so it needs its own
+  // reset: without it a single-process multi-symbol run (`npm run backtest`
+  // with no symbol filter) would report cumulative classification/block counts
+  // for every symbol after the first.
+  ScenarioRouter.resetRegimeFilterStats();
 }
 
 export function generateReport(
@@ -142,6 +246,44 @@ export function generateReport(
     lines.push(`   Periods > 3 days without trades: ${drySpellsGt3} times`);
     lines.push(`   Periods > 5 days without trades: ${drySpellsGt5} times`);
     lines.push(`   Periods > 7 days without trades: ${drySpellsGt7} times`);
+    lines.push('');
+  }
+
+  // ─── Monthly Breakdown (regime dependence audit) ───
+  // Zero-trade months are printed on purpose: a flat month is a real regime
+  // outcome (a drought), not an absent row. Grouping is by EXIT month (UTC) —
+  // the month in which the PnL was realised.
+  const monthlyBreakdown = buildMonthlyBreakdown(trades, periodStart, periodEnd);
+  if (monthlyBreakdown.length > 0) {
+    lines.push('📅 MONTHLY BREAKDOWN (grouped by exit month, UTC)');
+    lines.push('   Month    | Net PnL ($) | Trades | Win Rate');
+    lines.push('   ─────────┼─────────────┼────────┼─────────');
+    for (const entry of monthlyBreakdown) {
+      const month = entry.month.padEnd(8);
+      const pnlSign = entry.netPnl.gte(0) ? '+' : '';
+      const pnl = `${pnlSign}${entry.netPnl.toFixed(2)}`.padStart(11);
+      const tradesStr = entry.trades.toString().padStart(6);
+      const winRateStr = `${entry.winRatePct.toFixed(2)}%`.padStart(8);
+      lines.push(`   ${month} │ ${pnl} │ ${tradesStr} │ ${winRateStr}`);
+    }
+    const monthlyNet = monthlyBreakdown.reduce((sum, entry) => sum.plus(entry.netPnl), new Decimal('0'));
+    const monthlyTrades = monthlyBreakdown.reduce((sum, entry) => sum + entry.trades, 0);
+    const monthlyWins = monthlyBreakdown.reduce((sum, entry) => sum + entry.wins, 0);
+    const monthlyWinRate = monthlyTrades > 0
+      ? new Decimal(monthlyWins).div(monthlyTrades).mul(100)
+      : new Decimal('0');
+    const totalSign = monthlyNet.gte(0) ? '+' : '';
+    lines.push('   ─────────┼─────────────┼────────┼─────────');
+    lines.push(
+      `   ${'TOTAL'.padEnd(8)} │ ${`${totalSign}${monthlyNet.toFixed(2)}`.padStart(11)} │ ` +
+        `${monthlyTrades.toString().padStart(6)} │ ${`${monthlyWinRate.toFixed(2)}%`.padStart(8)}`
+    );
+    const activeMonths = monthlyBreakdown.filter((entry) => entry.trades > 0).length;
+    const profitableMonths = monthlyBreakdown.filter((entry) => entry.netPnl.gt(0)).length;
+    lines.push(
+      `   Profitable months: ${profitableMonths}/${monthlyBreakdown.length} ` +
+        `(${activeMonths} with trades, ${monthlyBreakdown.length - activeMonths} flat)`
+    );
     lines.push('');
   }
 
@@ -258,6 +400,23 @@ export function generateReport(
   const scenario15Stats = Scenario15_VolatilitySqueeze.getRejectionStats();
   lines.push('   Scenario 15 (Volatility Squeeze):');
   lines.push(`     Total: ${scenario15Stats.totalEvals} | Triggered: ${scenario15Stats.triggered} | WrongMode: ${scenario15Stats.wrongMode} | InsufficientCandles: ${scenario15Stats.insufficientCandles} | NoSqueezeFiring: ${scenario15Stats.noSqueezeFiring} | NeutralMomentum: ${scenario15Stats.neutralMomentum} | InvalidAtr: ${scenario15Stats.invalidAtr} | TpInvalid: ${scenario15Stats.tpInvalid}`);
+
+  // Router-level regime gate. Printed even when disabled so a report can never
+  // be mistaken for a filtered run: `Enabled: NO` is the baseline signature.
+  const regimeStats = ScenarioRouter.getRegimeFilterStats();
+  lines.push('   Regime Filter (4H ADX gate):');
+  if (!regimeStats.enabled) {
+    lines.push('     Disabled (ENABLE_REGIME_FILTER=false) — no scenario was gated');
+  } else {
+    lines.push(
+      `     Threshold: ${regimeStats.threshold ?? '25'} | Classified passes: ${regimeStats.evaluations} ` +
+        `(Trend: ${regimeStats.trend} | Range: ${regimeStats.range} | NoHistory: ${regimeStats.insufficientHistory})`,
+    );
+    lines.push(
+      `     Blocked: ${regimeStats.regimeFilter} ` +
+        `(CounterTrend S5/S12: ${regimeStats.blockedCounterTrend} | TrendBreakout S14: ${regimeStats.blockedTrendBreakout})`,
+    );
+  }
   lines.push('');
 
   return lines.join('\n');

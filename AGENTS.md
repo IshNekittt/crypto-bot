@@ -1,4 +1,4 @@
-# CRYPTO BOT SMC — ARCHITECTURAL SPECIFICATION (v2026-10-21)
+# CRYPTO BOT SMC — ARCHITECTURAL SPECIFICATION (v2026-11-09)
 
 > **Single source of truth for any agent or engineer working on this codebase.**
 > Every architectural decision, invariant, and convention is documented here.
@@ -43,7 +43,7 @@ The codebase now supports **two distinct operational modes** running from the sa
 |--------|-------------------------------------------|-----------------------------------------|
 | **Timeframes** | 15m LTF / 4H HTF | 1m entry / 15m + 4H macro context |
 | **Entry Logic** | Close of 15m signal candle | 1m CHoCH after a macro sweep, near its OB midpoint |
-| **Scenarios** | **15** (Volatility Squeeze; 15m Classic) | **12** (Sniper Touch) |
+| **Scenarios** | **1, 5, 14, 15** (Classic; production BTC profile = **14 + 15** with the 4H ADX gate) | **12** (Sniper Touch) |
 | **State Machine** | SCANNING → ENTRY_STAGED → IN_TRADE | SCANNING → ENTRY_STAGED → IN_TRADE (Scenario 12 on 1m closes) |
 | **WS Subscription** | 15m, 240m | 1m, 15m, 240m |
 | **Killzone** | London/NY only | London/NY only (enforced in Scenario 12) |
@@ -51,7 +51,7 @@ The codebase now supports **two distinct operational modes** running from the sa
 
 **Critical Invariant**: V4 and V5 **MUST NOT** run on the same process/instance. The `IN_TRADE` state machine is per-symbol and mutually exclusive. Running both modes simultaneously would cause state conflicts, double position risk, and `IN_TRADE` blocking.
 
-> **Scenario 13 is ARCHIVED** (v2026-10-23): the Top-Down Order Flow implementation moved to `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` and is no longer registered in the router. Scenario 13 remains invalid in global and per-symbol scenario lists; Scenario 15 is registered as a separate 15m Classic strategy. The archived module still compiles and its test suite still runs (`tests/scenarios/archive/`), so the design remains available for future revival.
+> **Scenario 13 is ARCHIVED** (v2026-10-23): the Top-Down Order Flow implementation moved to `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` and is no longer registered in the router. Scenario 13 remains invalid in global and per-symbol scenario lists; Scenario 15 is registered as a separate 15m Classic strategy. **Scenarios 16 (ATR Exhaustion) and 17 (Judas Swing) were archived on v2026-11-03 / v2026-11-04** and live under `src/engine/scenarios/archive/legacy_smc/` — both fail boot validation. The archived modules still compile and their test suites still run (`tests/scenarios/archive/`), so the designs remain available for future revival.
 
 ### 1.3 Deployment Strategy (Sub-accounts)
 
@@ -72,13 +72,13 @@ To run V4 Classic and V5 Sniper simultaneously, **complete infrastructure separa
 - State corruption from shared `StrategyEngine` instances
 - DB conflicts from concurrent `trades` table writes
 
-**Deployment Pattern**: Two services from the same Docker image, each with its own frozen profile file. Both profiles are **secret-free**: credentials are injected by the platform (Render dashboard, Docker `env_file` chain, systemd `EnvironmentFile`) and `loadConfig()` hard-fails when any of the six is missing.
+**Deployment Pattern**: Two services from the same Docker image, each with its own frozen profile file. Both profiles are **secret-free**: credentials are injected by the platform (Render dashboard, Docker `env_file` chain, systemd `EnvironmentFile`) and `loadConfig()` hard-fails when any of the six is missing. The tracked templates are `.env.subaru.example` and `.env.emilia.example`; the local `.env.subaru` / `.env.emilia` are gitignored copies kept byte-identical.
 
 ```bash
-# V4 Classic Tank (.env.subaru) — Scenarios 1 + 5 + 14 + 15
-SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+# V4 Classic Subaru (.env.subaru) — BTCUSDT, Scenarios 14 + 15, 4H ADX gate ON
+SYMBOLS=BTCUSDT
 ENABLE_SNIPER_MODE=false
-ACTIVE_SCENARIOS=1,5,14,15
+ACTIVE_SCENARIOS=14,15
 LTF_TIMEFRAME=15
 HTF_TIMEFRAME=240
 HISTORY_CANDLES=200
@@ -92,15 +92,29 @@ SMC_SL_ATR_OFFSET=0.5
 SMC_DISPLACEMENT_MULTIPLIER=1.5
 SMART_ENTRY_THRESHOLD_PCT=0.15
 PREFLIGHT_BUFFER_PCT=0.05
+ENFORCE_KILLZONES=true
+ALLOWED_DAYS_OF_WEEK=1,2,3,4,5,6,7
+ENABLE_REGIME_FILTER=true
+REGIME_ADX_THRESHOLD=25
+MAX_WORKING_CAPITAL=3000
+BACKTEST_DAYS=365
+USE_LOCAL_CACHE_ONLY=true
 ENABLE_FUNDING_MONITOR=true
-# No SCENARIOS_<SYMBOL>: ACTIVE_SCENARIOS=1,5,14,15 applies to all three symbols, and an
-# override would NARROW a symbol rather than extend the global list.
+# No SCENARIOS_<SYMBOL>: one symbol, one global list. An override would NARROW
+# a symbol rather than extend the global list.
 # No MIN_NET_RR / MIN_VOLATILITY_FEE_RATIO / MIN_TP_DISTANCE_PCT: S12-only gates.
+# S5 is not active, so SMC_SWEEP_VOLUME_MULTIPLIER is dead configuration here.
 
-# V5 Sniper (.env.emilia) — Scenario 12 only
-SYMBOLS=NEARUSDT,APTUSDT
+# V5 Sniper Emilia (.env.emilia) — NEARUSDT, Scenario 12 only
+SYMBOLS=NEARUSDT
 ENABLE_SNIPER_MODE=true
 ACTIVE_SCENARIOS=12
+LTF_TIMEFRAME=15
+HTF_TIMEFRAME=240
+HISTORY_CANDLES=200
+MACRO_CANDLES=1000
+COOLDOWN_CANDLES=16
+LIMIT_EXPIRATION_CANDLES=6
 ENABLE_DYNAMIC_TP=true
 DYNAMIC_TP_MIN_RR=1.5
 DYNAMIC_TP_MAX_RR=6.0
@@ -112,18 +126,28 @@ SMC_SWEEP_MIN_WICK_RATIO=0.25
 SMC_SL_ATR_OFFSET=0.5
 MIN_TP_DISTANCE_PCT=0.0035
 SNIPER_LIMIT_EXPIRATION_CANDLES=15
-SMC_SL_ATR_OFFSET_APTUSDT=0.60
-SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
+SNIPER_DISPLACEMENT_MULTIPLIER=1.5
 MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0
 MIN_NET_RR_NEARUSDT=1.0
+ENFORCE_KILLZONES=true
+ALLOWED_DAYS_OF_WEEK=1,2,3,4,5,6,7
+ENABLE_REGIME_FILTER=false
+REGIME_ADX_THRESHOLD=25
+MAX_WORKING_CAPITAL=3000
+BACKTEST_DAYS=60
+USE_LOCAL_CACHE_ONLY=true
 ENABLE_FUNDING_MONITOR=false
 ```
 
+The local `.env` mirrors `.env.emilia` for every non-secret strategy value; only the credentials block differs.
+
 **Profile invariants**:
-1. Never copy a secret into `.env.subaru` / `.env.emilia` — they are templates, and the repo convention is that only `.env.example` is tracked (`.env` and `.env.*` are gitignored).
-2. Never let a Classic deployment carry S12-only knobs (`MIN_NET_RR`, `MIN_VOLATILITY_FEE_RATIO`, `MIN_TP_DISTANCE_PCT`, `S12_*`, `SNIPER_*`). They are evaluated **only** inside Scenario 12, so listing them in a Tank profile is dead configuration that reads as protection (§7.13.5).
+1. Never copy a secret into `.env.subaru` / `.env.emilia` — they are templates, and the repo convention is that only the `.example` copies are tracked (`.env` and `.env.*` are gitignored). Keep each local profile byte-identical to its tracked `.example` twin.
+2. Never let a Classic deployment carry S12-only knobs (`MIN_NET_RR`, `MIN_VOLATILITY_FEE_RATIO`, `MIN_TP_DISTANCE_PCT`, `S12_*`, `SNIPER_*`). They are evaluated **only** inside Scenario 12, so listing them in a Classic profile is dead configuration that reads as protection (§7.13.5).
 3. `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>` is resolved through `resolveLimitExpirationCandles()`; confirm the resolved minutes in the run log rather than trusting the file (§7.13.3).
-4. `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` + `MIN_NET_RR_NEARUSDT=1.0` is the **audited** NEAR calibration (§7.23). **Both** knobs are required: the volatility gate alone measures +14.87%, the pair together +22.40%. They exist so the global `1.5` shields keep covering APTUSDT while NEAR trades at the settings the 180-day endurance run actually validated. A per-symbol override is the only sanctioned way to relax a P0 shield for one pair — never lower the global. The same keys live in the local `.env`, where they are inert for the live Classic profile but **are** consumed by `npm run backtest -- NEARUSDT`.
+4. `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` + `MIN_NET_RR_NEARUSDT=1.0` is the **audited** NEAR calibration (§7.23). **Both** knobs are required: the volatility gate alone measures +14.87%, the pair together +22.40%. They exist so the global `1.5` shields keep covering any future pair while NEAR trades at the settings the 180-day endurance run actually validated. A per-symbol override is the only sanctioned way to relax a P0 shield for one pair — never lower the global.
+5. The 4H ADX gate is enabled **only** in `.env.subaru`, where it was measured (BTCUSDT, S14 + S15). It is `false` in the Sniper profile because S12 is the only producer and the gate is never consulted (§7.24, Invariant 62).
+6. APTUSDT is **not** in `SYMBOLS` in either profile. Its grid-search cell (`SMC_SL_ATR_OFFSET_APTUSDT=0.60`, `SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25`) survives only as a commented future-pair note in `.env.emilia.example` and `.env.example`.
 
 ---
 
@@ -148,14 +172,14 @@ src/
 │   └── database.ts        # pg.Pool, NUMERIC(24,8), connection leak proof
 ├── engine/           # Strategy orchestration
 │   ├── strategyEngine.ts  # State machine per symbol
-│   ├── scenarioRouter.ts  # Evaluates 12 scenarios, filters mitigatedZones/Structures
+│   ├── scenarioRouter.ts  # Evaluates 5 registered scenarios, 4H ADX gate, mitigation filters
 │   ├── pendingTradeManager.ts  # Manual approval queue + Slippage Guard
 │   ├── baseScenario.ts    # Shared calculateLevels() — single SL source of truth
 │   ├── tpResolver.ts      # Brain Module 3: structural TP resolution (major/minor)
 │   ├── brain/
 │   │   ├── htfRoadmap.ts      # Brain Module 1: 4H range, bias, primary target
 │   │   └── volumeExhaustion.ts # Brain Module 2: 15m pullback exhaustion + reaction
-│   └── scenarios/         # 12 scenario implementations (S1–S12) + archive/ (S13)
+│   └── scenarios/         # S1, S5, S12, S14, S15 + archive/ (legacy SMC, S13, S16, S17)
 ├── execution/
 │   └── executionEngine.ts # Market order + TP/SL placement
 ├── feed/
@@ -1877,6 +1901,30 @@ The same artifact also renders a second panel under the equity curve: an interac
 
 **Invariant**: A marker time MUST exist in the candle series and markers MUST be sorted ascending, otherwise Lightweight Charts rejects the whole marker set. Never pass raw trade timestamps (they usually fall between two candles).
 
+#### 7.18.2 Monthly Breakdown & Regime Heatmap — **NEW v2026-11-08**
+
+**Problem**: aggregate Net PnL / PF / DD hides regime dependence. A strategy that earns +40% in three trending months and gives back −25% across the other nine looks identical to one that compounds steadily — until the next drought. Monthly attribution makes the regime bet visible.
+
+**Report section** (`src/backtest/reporter.ts`): `generateReport()` appends `📅 MONTHLY BREAKDOWN (grouped by exit month, UTC)` immediately after the dry-spell block.
+
+| Piece | Detail |
+| --- | --- |
+| **Grouping** | `buildMonthlyBreakdown(trades, periodStart, periodEnd)` buckets by `exitTime` — the month the PnL was actually realised, never `entryTime`. |
+| **Window coverage** | `enumerateMonths()` emits every calendar month the backtest touches, so a zero-trade month appears as `+0.00` / `0` trades. The drought is data, not an absent row. |
+| **Row contract** | `   YYYY-MM  │  ±NNN.NN │  N │  NN.NN%`, parsed by `parseMonthlyBreakdown()` in `scripts/matrix_tester.ts`. The section is bounded by the next emoji header, so a later table can never leak rows into the monthly aggregation. |
+| **TOTAL row** | Sums net PnL / trades and recomputes the aggregate win rate, plus `Profitable months: P/M (A with trades, M−A flat)`. |
+
+**Matrix columns** (`Matrix_Report.md`): `Best Month`, `Worst Month`, `Months in Profit`.
+
+- Monthly % = that month's net PnL ÷ the symbol's **$1,000 starting balance**, deliberately **not compounded** — every month stays comparable to `Net PnL %` and to every other symbol.
+- Best/Worst consider **only months that traded**; a flat month can never "win" a negative year.
+- `Months in Profit` = profitable months ÷ **every month in the window** (flat months count as not profitable). The first/last months may be partial because the window is anchored to `Date.now()`, not to month boundaries.
+- `## 🗓️ Monthly Regime Map` renders the cross-symbol grid (rows = months, columns = symbols + equal-weight portfolio) and lists each symbol's flat months.
+
+**Invariant**: the monthly table is a **reporting** artifact. It never feeds back into sizing, gating or simulation — it is computed after the loop from closed `TradeResult`s.
+
+**Test**: `tests/monthlyBreakdown.test.ts` locks exit-month attribution, zero-trade month inclusion, the row-format round-trip (`generateReport` → `parseMonthlyBreakdown` → `parseReportMetrics`) and the pre-section backward-compat path (`[]`).
+
 ---
 
 ### 7.19 Backtester Critical Fixes (Ghost Signal & Data Integrity) — **NEW v2026-09-26**
@@ -2063,7 +2111,7 @@ Development was frozen on the premise that both live engines had a real edge. Th
 
 Both windows ran to completion with **no data truncation**: 35,040 × 15m candles and 259,200 × 1m candles.
 
-> **Scope**: Run 1 validated **Scenario 14 (Donchian)**, forced with an inline `ACTIVE_SCENARIOS=14`. The local `.env` ships `ACTIVE_SCENARIOS=15` (Volatility Squeeze) and the frozen `.env.subaru` Tank preset runs **S1 + S5 + S14 + S15** — S1, S5 and S15 have not been through a 365-day window, so their annual behaviour is unmeasured (only S14 was measured in that run). Never transfer the +19.94% figure between presets: "Tank" is a nickname, not an engine identity.
+> **Scope**: Run 1 validated **Scenario 14 (Donchian)**, forced with an inline `ACTIVE_SCENARIOS=14`. The frozen `.env.subaru` profile now runs **S14 + S15** on BTCUSDT with the 4H ADX gate enabled; the combined pair was measured separately in the 365-day regime matrix (§7.24.1: +28.40%, 123 trades, PF 1.20, Max DD 28.25%). S15 alone has not been through an isolated annual window. Never transfer the +19.94% figure between presets: "Tank" is a nickname, not an engine identity.
 
 #### 7.23.1 S14 / BTC — the annual truth is +20%, not +38%
 
@@ -2119,6 +2167,51 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 | **`MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` + `MIN_NET_RR_NEARUSDT=1.0`** | Added to `.env`, `.env.emilia` and `.env.example`. Relaxes both P0 shields **for one pair only**; the global `1.5` keeps covering APTUSDT. Per-symbol resolution via `resolveSymbolConfig()` (§7.13.5) guarantees no cross-symbol leakage. |
 
 **Rule**: a per-symbol override that relaxes a P0 shield is legal only when (a) a ≥180-day run at the override documents the improvement, (b) the rejection funnel identifies the shield as the binding constraint, and (c) the global value is left untouched. All three hold here. A corollary learned the hard way: **measure the full ladder before writing a performance claim** — the volatility knob alone yields +14.87%, and committing "+22.40%" on the strength of one knob would have shipped a number the code cannot reproduce.
+
+---
+
+### 7.24 Regime Filter — 4H ADX Gate (opt-in) — **NEW v2026-11-08**
+
+**Premise**: the annual audit (§7.23) showed the Classic engine's result is dominated by *when* a trend existed, not by entry geometry. A 15m sweep (S5) fades the prevailing move, a Donchian breakout (S14) follows it; each is structurally wrong in the other regime. The filter blocks that mismatch **before** a scenario is evaluated.
+
+| Piece | Detail |
+| --- | --- |
+| **Module** | `src/engine/quant/adx.ts` — `calculateADX(candles, period = 14): Decimal \| null`, Wilder smoothing (RMA seed = SMA(period), then `prev − prev/period + current`), DX, ADX seed = SMA of the first `period` DX values, then Wilder. |
+| **Minimum history** | `2 × period` candles. Shorter → `null` and the gate **fails open** (the run degrades to the unfiltered baseline, never to a blocked process). |
+| **Classification** | One reading per router pass, on `patternData.candles4h` (closed 4H bars only). `ADX >= REGIME_ADX_THRESHOLD` → **TREND**; otherwise **RANGE**. |
+| **Gate** | TREND blocks counter-trend sweeps (**S5, S12**). RANGE blocks trend breakouts (**S14**). S1 and S15 carry their own macro conditions and are **never** gated. |
+| **Config** | `ENABLE_REGIME_FILTER` (default `false`), `REGIME_ADX_THRESHOLD` (default `25`, `Decimal`, must be `<= 100`). Both are **optional** on `BotConfig` so hand-built literals keep compiling; absent means disabled. |
+| **Observability** | `ScenarioRouter.getRegimeFilterStats()` → `RegimeFilterStats` with `evaluations`, `trend`, `range`, `insufficientHistory`, `blockedCounterTrend`, `blockedTrendBreakout` and the total `regimeFilter`. Printed in `📊 SCENARIO REJECTION STATS`; when everything is blocked the pass reason becomes `Regime filter (4H ADX …)` instead of the misleading `No scenario matched`. |
+| **Memoisation** | `resolveRegimeAdx()` caches on `length:lastTimestamp:lastClose`. The backtester rebuilds `PatternData` on every 15m close (~35,000/year) while the 4H window advances once per 4H bar; without the memo a multi-thousand-candle Decimal recursion per pass would add ~10⁹ operations per symbol. Including the last close keeps a live feed from serving a stale reading. |
+
+**Invariants**:
+1. **Entry-only.** The gate lives in the router, which is never consulted by `checkAndManagePosition()` — an open trade keeps being trailed/partially closed regardless of regime (same rule as `ALLOWED_DAYS_OF_WEEK` / `ENFORCE_KILLZONES`, §7.22).
+2. **Fail open, never closed.** A missing or too-short 4H window, or an unparseable candle, leaves the gate open and increments `insufficientHistory`. A filter that cannot measure must not stop trading.
+3. **Off means byte-identical.** With `ENABLE_REGIME_FILTER=false` the router performs no ADX call and no scenario is skipped; the stats block prints `Disabled`.
+4. **Threshold is bounded.** `REGIME_ADX_THRESHOLD > 100` aborts the boot: ADX cannot exceed 100, so such a value would classify every tape as RANGE forever and read as protection while blocking only S14.
+
+> **Report signature**: the text report always prints the `Regime Filter (4H ADX gate)` block — `Disabled (ENABLE_REGIME_FILTER=false)` is the baseline fingerprint, so a filtered report can never be mistaken for an unfiltered one.
+
+#### 7.24.1 Measured Result — 365-Day Controlled A/B
+
+Same caches, same profile, one variable: `ACTIVE_SCENARIOS=14,15`, `DYNAMIC_TP_MIN_RR=1.5`, `DYNAMIC_TP_MAX_RR=6.0`, `ENFORCE_KILLZONES=false`, `ALLOWED_DAYS_OF_WEEK=1..7`, `USE_LOCAL_CACHE_ONLY=true`, $1,000 per symbol, 2025-11-08 → 2026-11-08.
+
+| Symbol | Filter ON Net | Trades | PF | Max DD | Filter OFF Net | Trades | PF | Max DD | Δ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BTCUSDT | **+28.40%** | 123 | 1.20 | 28.25% | +15.69% | 158 | 1.09 | 28.71% | **+12.71 pp** |
+| DOGEUSDT | −22.84% | — | — | — | −41.25% | — | — | — | **+18.41 pp** |
+| ETHUSDT | −23.87% | — | — | — | −13.89% | — | — | — | −9.98 pp |
+| LINKUSDT | −27.34% | — | — | — | −7.49% | — | — | — | −19.85 pp |
+| NEARUSDT | −31.38% | — | — | — | −46.83% | — | — | — | **+15.45 pp** |
+| SOLUSDT | −35.87% | — | — | — | −50.88% | — | — | — | **+15.01 pp** |
+| AVAXUSDT | −43.15% | — | — | — | −51.17% | — | — | — | **+8.02 pp** |
+| **Portfolio** | **−$1,560.46 (−22.29%)** | **892** | — | **51.80%** | **−$1,958.31 (−27.98%)** | **1,159** | — | — | **+5.69 pp** |
+
+Filtered arm: 30.38% WR, $1,653.59 fees, **0/7 symbols cleared the alpha gate** (Net > 10%, Max DD < 10%, PF > 1.5). The gate improved **5 of 7** symbols and cut trade count 23%, but it is a **risk-shaping filter, not an alpha source**: BTC is the only profitable pair and even BTC's 28.25% drawdown fails the 10% gate.
+
+**BTC attribution** (filter → control): S14 70 → 38 trades (+$60 → +$94), S5 17 → 10 (−$196 → −$170), S15 71 → 75 (+$293 → +$360). The advantage is fewer, better-aligned S14 entries — not a higher per-trade edge. Over Jun–Sep the control arm beat the filtered arm on BTC (+$369.73 vs +$270.57); the annual advantage comes from the other months. SOL's Jun–Sep window improved with the filter (−$22.06 → −$11.88).
+
+**Disposition**: shipped **enabled only in `.env.subaru`** (BTCUSDT, S14 + S15) — the profile where it was measured. `false` in `.env` / `.env.emilia`, where S12 is the only producer and never consults the gate. Artifacts: `data/Matrix_Report.md`, `data/control_6r/`.
 
 ---
 
@@ -2553,11 +2646,13 @@ CREATE TABLE symbol_state (
 
 ## 11. ENVIRONMENT VARIABLES (`.env`)
 
+> The block below reflects the **shipped production `.env`** (V5 Sniper, NEARUSDT, Scenario 12). Code defaults are noted where they differ. The Classic profile (`.env.subaru`) is documented in §1.3.
+
 ```bash
 # Required
 BYBIT_API_KEY=...
 BYBIT_API_SECRET=...
-SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+SYMBOLS=NEARUSDT
 DATABASE_URL=postgresql://...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
@@ -2566,36 +2661,36 @@ TELEGRAM_CHAT_ID=...
 RISK_PERCENT=2                     # required, > 0
 REDUCED_RISK_PERCENT=1             # must be <= RISK_PERCENT
 LEVERAGE=10
-MAX_WORKING_CAPITAL=20000          # unset = unlimited; a literal 0 fails validation
+MAX_WORKING_CAPITAL=3000           # unset = unlimited; a literal 0 fails validation
 
 # Trading mode
-DEMO_TRADING=false                 # true = Bybit Demo (forces TESTNET=false)
-TESTNET=true                       # ignored when DEMO_TRADING=true; false = mainnet
-AUTO_TRADING=false                 # true = auto-execute, false = manual approval
-TRADE_APPROVAL_TIMEOUT_MINUTES=5
+DEMO_TRADING=true                  # true = Bybit Demo (forces TESTNET=false)
+TESTNET=false                      # ignored when DEMO_TRADING=true; false = mainnet
+AUTO_TRADING=true                  # true = auto-execute, false = manual approval
+TRADE_APPROVAL_TIMEOUT_MINUTES=10
 
 # Data
 HISTORY_CANDLES=200                # LTF/HTF history (max 1000)
 MACRO_CANDLES=1000                 # 1W/1D macro context (max 1000)
-LTF_TIMEFRAME=15
-HTF_TIMEFRAME=240
+LTF_TIMEFRAME=15                   # Sniper still reads the 15m radar feed
+HTF_TIMEFRAME=240                  # 4H macro
 DATA_DIR=data
 
 # Backtest
 BACKTEST_DAYS=60                   # Shared window for 1m/LTF/HTF loaders
-ENABLE_SNIPER_MODE=false
+ENABLE_SNIPER_MODE=true            # code default false
 SNIPER_DISPLACEMENT_MULTIPLIER=1.5
-USE_LOCAL_CACHE_ONLY=false         # true = offline backtest, cache only, zero API calls
+USE_LOCAL_CACHE_ONLY=true          # true = offline backtest, cache only, zero API calls
 BACKTEST_CSV_PATH=                 # optional local CSV source
-ENABLE_HEALTHCHECK_SERVER=false    # required true on Render
+ENABLE_HEALTHCHECK_SERVER=true     # required true on Render
 
 # Scenarios
-ACTIVE_SCENARIOS=15                # live registry: 1, 5, 12, 14, 15 only; S12 needs ENABLE_SNIPER_MODE=true
-SCENARIOS_BTCUSDT=15               # optional per-symbol override (same five IDs; archived ids abort the boot)
+ACTIVE_SCENARIOS=12                # live registry: 1, 5, 12, 14, 15 only; S12 needs ENABLE_SNIPER_MODE=true
 ENABLE_LIVE_TEST_ORDERS=false
+# SCENARIOS_<SYMBOL>=...           # optional per-symbol override (same five IDs; archived ids abort the boot)
 
 # Dynamic take-profit (structural targets instead of blind k * R)
-# Scenarios 1, 5 and 12 use these bounds when ENABLE_DYNAMIC_TP=true
+# Scenarios 1, 5, 12, 14 and 15 use these bounds when ENABLE_DYNAMIC_TP=true
 ENABLE_DYNAMIC_TP=true
 FIXED_TP_RR=3.0                    # fallback target when dynamic resolution is disabled
 DYNAMIC_TP_MIN_RR=1.5              # structural target floor (R multiples)
@@ -2609,16 +2704,16 @@ COOLDOWN_CANDLES=16
 SMC_SL_ATR_OFFSET=0.5              # ATR multiplier for SL offset
 SMC_DISPLACEMENT_MULTIPLIER=1.5    # Displacement threshold in ATR
 SMC_SWEEP_MIN_WICK_RATIO=0.25      # S12 + S9: min rejection wick share of candle range (0 < x < 1)
-SMC_SWEEP_VOLUME_MULTIPLIER=1.3   # S5 only: sweep-candle volume as a multiple of the 20-candle SMA baseline
+SMC_SWEEP_VOLUME_MULTIPLIER=1.3    # S5 only: sweep-candle volume as a multiple of the 20-candle SMA baseline
 
 # S12 sweep sources (opt-in; macro PDH/PDL/PWH/PWL is always armed)
-S12_SESSION_SWEEPS=false           # true = newest ASIAN high/low becomes a sweepable level
-S12_EQH_EQL_SWEEPS=false           # true = 15m EQH/EQL pools become sweepable levels
+S12_SESSION_SWEEPS=true            # true = newest ASIAN high/low becomes a sweepable level
+S12_EQH_EQL_SWEEPS=true            # true = 15m EQH/EQL pools become sweepable levels
 MIN_TP_DISTANCE_PCT=0.0035         # S12 fee floor: reject targets < 0.35% from the execution entry (must be > 0 and < 0.1)
 
-# S12 P0 shields (see §7.13.5). Inert for Scenarios 1-11.
-MIN_NET_RR=1.0                     # fee-inclusive R:R floor: (target - fee) / (stop + fee)
-MIN_VOLATILITY_FEE_RATIO=1.0       # require 1m ATR% >= ratio x round-trip taker fee (~0.110%)
+# S12 P0 shields (see §7.13.5). Inert for every Classic scenario.
+MIN_NET_RR=1.5                     # code default 1.0; fee-inclusive R:R floor: (target - fee) / (stop + fee)
+MIN_VOLATILITY_FEE_RATIO=1.5       # code default 1.0; require 1m ATR% >= ratio x round-trip taker fee (~0.110%)
 
 # Per-symbol calibration overrides — `<PARAM>_<SYMBOL>` twins reach every scenario,
 # tpResolver and the reconciliation sweep via resolveSymbolConfig(). Matched against
@@ -2628,14 +2723,19 @@ MIN_VOLATILITY_FEE_RATIO=1.0       # require 1m ATR% >= ratio x round-trip taker
 #   MIN_VOLATILITY_FEE_RATIO_<SYMBOL>       SMC_SWEEP_MIN_WICK_RATIO_<SYMBOL>
 #   SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>
 # DYNAMIC_TP_MAX_RR is global only; each per-symbol floor is validated against it.
-SMC_SL_ATR_OFFSET_APTUSDT=0.60       # verified V5 Sniper calibration (Emilia)
-SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
 MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0 # audited 180d NEAR calibration (§7.23); both gates
 MIN_NET_RR_NEARUSDT=1.0              # must move — volatility alone yields +14.87%, not +22.40%
+# APTUSDT (inactive — not in SYMBOLS; future-pair note only):
+# SMC_SL_ATR_OFFSET_APTUSDT=0.60
+# SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25
 
 # Entry filters (day-of-week + killzone)
-ALLOWED_DAYS_OF_WEEK=1,2,3,4,5     # ISO weekdays in UTC (1=Mon ... 7=Sun) allowed for NEW entries
+ALLOWED_DAYS_OF_WEEK=1,2,3,4,5,6,7 # ISO weekdays in UTC (1=Mon ... 7=Sun) allowed for NEW entries
 ENFORCE_KILLZONES=true             # false = bypass all killzone gates globally (backtesting)
+
+# Regime filter (4H ADX gate, router-level, entry-only — §7.24)
+ENABLE_REGIME_FILTER=false         # true = block scenario/regime mismatches (S5/S12 vs S14)
+REGIME_ADX_THRESHOLD=25            # ADX(14) split: >= TREND, < RANGE; > 100 aborts the boot
 
 # Entry physics
 SMART_ENTRY_THRESHOLD_PCT=0.15     # Market vs Limit threshold (%)
@@ -2649,7 +2749,7 @@ BACKUP_PASSWORD=...                # AES-256-CBC key for /backup
 
 # Funding monitor (delta-neutral arbitrage)
 ENABLE_FUNDING_MONITOR=false
-FUNDING_MONITOR_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+FUNDING_MONITOR_SYMBOLS=NEARUSDT
 FUNDING_ALERT_THRESHOLD_PCT=0.0    # % — alert when rate <= this value
 FUNDING_RESTORE_THRESHOLD_PCT=0.015 # % — restore alert when rate >= this value
 
@@ -2692,6 +2792,7 @@ docker compose up -d
 | **Adaptive Fractioning** | 26, 41, 53, 55 |
 | **Backtester Fidelity** | 12, 13, 14, 15, 16, 17, 20, 42, 46, 48, 50 |
 | **Infrastructure & Observability** | 8, 9, 10, 22, 32, 43, 44, 45 |
+| **Regime & Entry Filters** | 22, 59, 62 |
 
 1. **No `number` for money** — only `Decimal` + string serialization.
 2. **Single `PatternRecognizer`** instance shared across all engines.
@@ -2794,6 +2895,8 @@ docker compose up -d
 60. **A WS Close Event May Only End a Trade It Can See** — In `processClosedPosition()`, when `db.getOpenTrade(symbol)` returns `null`, the handler MUST log and `return` **without** calling `transition(...)` or `burnSetup()`. An empty DB row while the engine is `IN_TRADE` means the entry pipeline is still inside the Invariant 47 bookkeeping window (`transition(IN_TRADE)` → 500 ms → `getOpenPositions()` → `db.openTrade()`), not that the state must be reset. Forcing `SCANNING` there leaves a live trade whose Adaptive Fractioning is permanently disabled — the position rides an unmanaged full stop-loss. Any genuine instant close during that window is adopted by the 10-minute ReconciliationLoop (Invariant 27, §3.4) once the row lands as `OPEN`. Resetting on absence of evidence is strictly forbidden. See §16.3.9.
 
 61. **P0 Shields Price the Execution Entry, Not the Plan** — Scenario 12's `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` gates MUST be evaluated against the price the entry will actually be booked at. `resolveShieldEntry()` delegates the Market/Limit decision to `shouldUseMarketEntry()` (`src/config/fees.ts`): a discount or an at-entry/adverse move inside `SMART_ENTRY_THRESHOLD_PCT` is a Market fill priced at `currentPrice`; an adverse move beyond the threshold rests a Limit priced at `idealEntry`. Both gates share that single entry. Measuring a Market fill from `idealEntry` understates risk and overstates reward, so a nominal 1.5R can be a realised sub-1.0R trade with both gates "passed". Two boundaries are mandatory: the emitted `levels.entry` remains the OB midpoint (the shield re-prices the fill only), and a market price already outside `SL..TP` is left to the pre-flight DEAD-setup guard — pricing it here would move the rejection into the funnel and skip the mitigation burn. See §7.13.5.
+
+62. **Regime Gate is Entry-Only, Fail-Open and Off-By-Default** — When `ENABLE_REGIME_FILTER=true`, `ScenarioRouter` classifies the closed 4H tape once per pass via `calculateADX(candles4h, 14)` and blocks scenario/regime mismatches **before** `scenario.evaluate()`: TREND (`ADX >= REGIME_ADX_THRESHOLD`) blocks counter-trend sweeps (S5, S12); RANGE (`ADX <`) blocks trend breakouts (S14); S1 and S15 are never gated. Three boundaries are mandatory: (a) the gate is **entry-only** — it lives in the router, which `checkAndManagePosition()` never consults, so open trades keep being managed in every regime; (b) it **fails open** — fewer than `2 × period` 4H candles, or an unparseable window, yields `null`, leaves the gate open and increments `insufficientHistory`, because a filter that cannot measure must not stop trading; (c) `ENABLE_REGIME_FILTER=false` (the default, and the meaning of an absent `BotConfig` field) performs no ADX call and skips no scenario, so an unfiltered run stays byte-identical to the pre-filter baseline. `REGIME_ADX_THRESHOLD > 100` is a hard boot error: ADX is bounded 0..100, and a larger value would classify every tape as RANGE forever — protection in appearance, an S14-only off-switch in practice. Every blocked pass is counted in `RegimeFilterStats.regimeFilter`, and the report always prints the block so a filtered run can never be mistaken for a baseline. See §7.24.
 
 ---
 
@@ -3261,6 +3364,8 @@ const evaluationData: PatternData = { ...basePd, structures: safeStructures, zon
 **Rule**: New user-facing strings are English. No new Cyrillic is introduced anywhere.
 
 ---
+
+_Last updated: 2026-11-09. **V5.1 Final Code Freeze — ADX regime filter shipped, S16/S17 archived, production profiles frozen.** Two working institutional combinations were selected after the 365-day matrix: **S12 Sniper on NEARUSDT (1m)** and **S14 + S15 Classic on BTCUSDT (15m) with the 4H ADX gate enabled**. `.env` is now the primary deployment profile and mirrors `.env.emilia` for every non-secret strategy value (NEARUSDT, `ACTIVE_SCENARIOS=12`, `ENABLE_SNIPER_MODE=true`, `LTF_TIMEFRAME=15`, `HTF_TIMEFRAME=240`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=true`, `ENABLE_DYNAMIC_TP=true`, `DYNAMIC_TP_MIN_RR=1.5`, `DYNAMIC_TP_MAX_RR=6.0`, `ENABLE_REGIME_FILTER=false`, audited NEAR P0 overrides at `1.0`). `.env.subaru` is BTCUSDT / `ACTIVE_SCENARIOS=14,15` / `ENABLE_REGIME_FILTER=true` / `REGIME_ADX_THRESHOLD=25` / `BACKTEST_DAYS=365` / `MAX_WORKING_CAPITAL=3000`. APTUSDT was removed from both `SYMBOLS` lists; its calibration survives as a commented future-pair note. **§7.24.1** records the controlled 365-day A/B: BTC **+28.40% / 123 trades / PF 1.20 / Max DD 28.25%** with the gate vs **+15.69% / 158 / 1.09 / 28.71%** without (+12.71 pp); portfolio **−$1,560.46 (−22.29%)** vs **−$1,958.31 (−27.98%)**, 5 of 7 symbols improved, **0/7 cleared the alpha gate** — the filter is a risk-shaping gate, not an alpha source. `.env.example` preset-divergence table, README preset sections and §11 were rewritten to match. Toolchain: typecheck clean, **969 tests / 48 suites green**, build passing.
 
 _Last updated: 2026-11-01. **Scenario 5 rebuilt — volume-confirmed SFP.** *(Superseded the same day by the geometry unlock above: the stop is now buffered, `skipMinorObstacles` is `true`, and the volume default is 1.3.)* The Sweep → CHoCH → FVG chain is gone (§8.8): S5 now evaluates an SFP on the **last closed** 15m candle (wick pierces a ranked PDH/PDL/PWH/PWL/BSL/SSL pool, close returns inside), requires the sweep candle to print ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` (default 1.5) × the SMA volume of the 20 candles before it, enters at that close, stops just beyond the pierced wick through `calculateLevels()` with `atr = 0` (exact 0.1% floor), resolves the target with `skipMinorObstacles: false`, and rejects below a fee-inclusive net R:R (`(target − fee) / (stop + fee) ≥ DYNAMIC_TP_MIN_RR`). Macro pools are never burned; the trigger is burned as a `SWEEP` structure. New config: `SMC_SWEEP_VOLUME_MULTIPLIER`. Funnel: `noSweep` / `lowVolumeSweep` / `tpInvalid` / `insufficientCandles`. Measured 180 days (2026-05-05 → 2026-11-01, $1,000/symbol, killzones bypassed, `DYNAMIC_TP_MIN_RR=1.5`): BTC **+4.37% / 7 trades / PF 1.65**, ETH **−1.15% / 14 / 0.95**, SOL **−14.71% / 12 / 0.26**, portfolio **−3.83% / 33 trades / $204.79 fees**. At `2.0` the scenario is dormant (13 trades across the three symbols, portfolio −6.31%). The binding constraint is the target gate, not the volume gate: with a 0.1–0.3% stop, a fee-inclusive 1.5–2.0R demands a 3.5–5R structural target that the nearest-wall filter (`skipMinorObstacles: false`) rarely finds. Harness note: the S5 suite caught a sparse-array fixture whose `reduce()` silently skipped holes and averaged 11 of 20 baseline candles; the baseline is now summed with an explicit loop that fails closed. Toolchain: typecheck clean, **875 tests / 43 suites green**, build passing.
 
