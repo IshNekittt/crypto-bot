@@ -21,7 +21,7 @@ export type TradeStatus = 'OPEN' | 'CLOSED';
 export type OrderType = 'Market' | 'Limit';
 export type TimeInForce = 'IOC' | 'GTC' | 'FOK';
 
-export { BotConfig };
+export type { BotConfig };
 
 export enum Trend {
   UP = 'UP',
