@@ -1,17 +1,18 @@
 <div align="center">
 
-# 🤖 CRYPTO BOT SMC — Smart Money Concepts Trading Bot
+# 🤖 QUANT TRADING ENGINE — Multi-Strategy Algorithmic Bot & Backtester
 
 [![Node.js](https://img.shields.io/badge/Node.js-26.x-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9+-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Bybit V5](https://img.shields.io/badge/Bybit-V5%20API-FF6B35?logo=bybit&logoColor=white)](https://bybit-exchange.github.io/docs/v5/intro)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-4169E1?logo=postgresql&logoColor=white)](https://supabase.com/)
 [![Docker](https://img.shields.io/badge/Docker-Multi--stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-969%20passing-brightgreen?logo=jest)](https://jestjs.io/)
-[![Version](https://img.shields.io/badge/Version-v2026--11--09-blue)](https://github.com/)
+[![Tests](https://img.shields.io/badge/Tests-997%20passing-brightgreen?logo=jest)](https://ishnekittt.github.io/crypto-bot/)
+[![Coverage Report](https://img.shields.io/badge/Coverage-Report-blue?logo=jest)](https://ishnekittt.github.io/crypto-bot/coverage/)
+[![Version](https://img.shields.io/badge/Version-v2026--11--20-blue)](https://github.com/IshNekittt/crypto-bot)
 [![CI Pipeline](https://github.com/IshNekittt/crypto-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/IshNekittt/crypto-bot/actions)
 
-**Enterprise-grade autonomous trading bot** implementing **Smart Money Concepts (SMC)** on Bybit V5 Linear Perpetuals.
+**Event-driven multi-strategy trading engine** for Bybit V5 Linear Perpetuals — born as a **Smart Money Concepts (SMC)** bot and grown into a full research platform with a 1:1 live/backtest simulator.
 Built for **reliability**, **observability**, and **mathematical precision** — zero `number` for money, only `decimal.js`.
 
 > **Normative specification**: [`AGENTS.md`](AGENTS.md) is the single source of truth (62 critical invariants + consolidated anti-patterns). This README is the operator-facing overview — where the two disagree, `AGENTS.md` wins.
@@ -34,7 +35,7 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 
 | Category                                  | Capability                                                                                                                                                                                                                                                                                                                                                                         |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **5 Live SMC Scenarios**                  | **1** HTF Continuation, **5** HTF Liquidity Sweep, **12** Sniper Touch (1m), **14** Trend Following Alpha (Donchian), **15** Volatility Squeeze. `REGISTERED_SCENARIO_IDS` in `src/engine/scenarioRegistry.ts` is the single source of truth: any other id is a hard boot error. Archived (not tradeable): 2–4, 6–11, 13, 16, 17 — modules live in `src/engine/scenarios/archive/` |
+| **5 Live Strategies**                     | **1** HTF Continuation, **5** HTF Liquidity Sweep, **12** Sniper Touch (1m), **14** Trend Following Alpha (Donchian), **15** Volatility Squeeze. `REGISTERED_SCENARIO_IDS` in `src/engine/scenarioRegistry.ts` is the single source of truth: any other id is a hard boot error. Archived (not tradeable): 2–4, 6–11, 13, 16, 17 — modules live in `src/engine/scenarios/archive/` |
 | **🌡️ 4H ADX Regime Filter**               | **Opt-in router gate** (`ENABLE_REGIME_FILTER`, default `false`): one `calculateADX(candles4h, 14)` reading per pass. TREND (`ADX ≥ 25`) blocks counter-trend sweeps (S5, S12); RANGE blocks trend breakouts (S14); S1/S15 are never gated. Entry-only, fail-open on insufficient history, memoised per 4H bar |
 | **🎯 V5 Sniper Mode**                     | **Single-pass 1m execution**: Scenario 12 on each 1m close runs per-CHoCH sweep pairing → CHoCH → OB-midpoint proximity → Smart Pullback entry (Market/Limit). Sweep sources: macro PDH/PDL/PWH/PWL always armed, `S12_SESSION_SWEEPS` / `S12_EQH_EQL_SWEEPS` opt-in. Entry gates: persistent 4H SMA50 trend (POI exception) + fee-aware TP distance floor (`MIN_TP_DISTANCE_PCT`) |
 | **🧮 Structural Take-Profit**             | **`tpResolver.ts`**: replaces the blind `k × R` target with a structural one drawn from macro pools, swings, range boundaries and zones — bounded by `DYNAMIC_TP_MIN_RR` / `DYNAMIC_TP_MAX_RR`. Used by Scenarios 1, 5 and 12; the S13 brain modules (`htfRoadmap.ts`, `volumeExhaustion.ts`) remain in the tree with the archived scenario                                        |
@@ -48,6 +49,9 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 ---
 
 ## 📊 Legacy Backtest Benchmark (Pre-V5.1 Execution Physics)
+
+<details>
+<summary>Click to view legacy pre-V5.1 benchmark (historical only)</summary>
 
 > **⚠️ NOTE — LEGACY BENCHMARK, NOT A FORECAST.**
 > These legacy results were generated prior to the V5.1 Execution Physics overhaul. Current institutional-grade simulations (with exact Bybit Taker/Maker fees, zero-latency slippage, and limit order expiration) reflect a highly pessimistic, realistic environment used for strict quantitative tuning.
@@ -66,6 +70,8 @@ Built for **reliability**, **observability**, and **mathematical precision** —
 > **Filters Working**: S2 `NoLiqCtx: 120`, S4 `NoBOS: 1,570`, S11 strict SMS = 0 noise trades
 >
 > **Re-baselining**: run `npm run backtest -- <SYMBOL>` on the current engine and treat the fresh report as the only valid quantitative reference. See [AGENTS.md §15](AGENTS.md) for the same legacy numbers under the same caveat.
+
+</details>
 
 ---
 
@@ -146,6 +152,44 @@ Filtered arm: 30.38% win rate, $1,653.59 fees, **0/7 symbols cleared the alpha g
 **BTC attribution** (filter → control): S14 70 → 38 trades (+$60 → +$94), S5 17 → 10 (−$196 → −$170), S15 71 → 75 (+$293 → +$360). The filter's value on BTC is concentrated in fewer, better-aligned S14 entries — not in a higher per-trade edge. Over the summer regime (Jun–Sep) the control arm actually beat the filtered arm on BTC (+$369.73 vs +$270.57); the full-year advantage comes from the other months. SOL's summer window also improved with the filter (−$22.06 → −$11.88).
 
 > **Verdict**: the ADX gate is shipped **enabled only in `.env.subaru`** (BTC, S14 + S15) because that is the profile where it was measured. It stays `false` in the Sniper profile, where S12 is the only producer and the gate is never consulted. Do not describe it as portfolio protection — it does not make a losing pair profitable. Full artifacts: `data/Matrix_Report.md`, `data/control_6r/`.
+
+---
+
+## 🥇 Cross-Asset Stress Test — XAUUSD 15m — v2026-11-20
+
+Both frozen engines were fitted on Bybit crypto perpetuals. This audit asked a narrower question: **does the SMC scenario set still work on a liquid non-crypto asset?** XAUUSD 15m was chosen for the test.
+
+**Setup**: Dukascopy bid candles, 183 days (2026-05-20 → 2026-11-18), 11,996 candles; $1,000 balance, 2% risk, Classic 15m/4H, `ENFORCE_KILLZONES=true`, `ENABLE_REGIME_FILTER=false`, `DYNAMIC_TP_MIN_RR=1.5`. The 15m Classic and archived set `1–11, 14, 15, 17` was temporarily registered for one run; the registry was reverted to `1,5,12,14,15` afterwards. S12/S13 are 1m-only, and S16 was not re-run (its negative expectancy is already recorded, §8.9). **XAUUSD is not a production profile.**
+
+| Metric | Value |
+| --- | --- |
+| Net PnL | **−$380.57 (−38.06%)** |
+| Gross before fees | **−$88.00 (−8.80%)** |
+| Trades | 75 (20W / 55L) |
+| Win rate | **26.67%** |
+| Profit factor | **0.50** |
+| Max drawdown | **41.87%** |
+| Fees | **$292.57** (77% of the net loss) |
+| Final balance | **$619.43** |
+
+**Monthly**: only **1 of 7 months** was profitable (+$35.13 in July on 4 trades). June alone lost $137.27; the longest dry spell was 20 days.
+
+| Scenario | Trades | Win rate | Net |
+| --- | --- | --- | --- |
+| S14 Trend Following (Donchian) | 29 | 37.93% | −$3.84 |
+| S15 Volatility Squeeze (BB/KC) | 12 | 25.00% | −$61.02 |
+| S17 Judas Swing (archived) | 34 | 17.65% | −$315.70 |
+| S1–S11 legacy SMC | 0 | — | $0.00 |
+
+**What failed and why**
+
+- **Fees dominate**: gross was −$88.00; $292.57 of round-trip taker fees produced the −$380.57 net — **77% of the loss** and 29% of starting equity. At ≈$3.90 per trade against ≈$20 of risk, the round trip costs ≈0.2R before the market moves.
+- **S17 is the loss engine**: 45% of trades, 83% of the net loss. Even at the portfolio-average ≈$3.90/trade fee (≈$133 total), its gross would be ≈−$183 — the tight-stop geometry pays more than that, so the loss is not fee-only. The crypto S17 was gross-positive/fee-negative (§8.10); gold did not reproduce that signature.
+- **S1–S11 never filled**: killzones removed 75% of the tape, then the conjunctive SMC chains almost never completed. S1: 1,214 `noTouch` + 508 `noOb`; S6/S11: 1,855 `noSms`; S10: 1,401 `noBreak`; S8/S9: 1,639 `noTradingRange`. S4 produced one unfilled Limit; the other ten produced no signal at all.
+- **S5 target deadlock**: 254 volume-confirmed SFPs, **254 `tpInvalid`** — the fee-inclusive 1.5R floor cannot be met by structural targets against a wick/ATR stop. S14, with a wider Donchian stop, was the only near-survivor (−$3.84 / 29 trades).
+- **Caveat**: Dukascopy `--volumes` is tick volume, not centralized exchange volume. Volume-gated scenarios must be re-measured on a real volume feed before cross-asset conclusions.
+
+> **Verdict**: a negative finding for the tested configuration, not proof that SMC cannot work on gold. The session gate, the absent pattern chains and the fee-to-stop ratio each explain part of the result. Full tables, funnels and reproduction steps: `data/xauusd_stress_run/README.md`; artifacts: `data/Backtest_Report_XAUUSD.txt`, `data/Backtest_Chart_XAUUSD.html`, `data/backtest_logs/XAUUSD_stress.log`.
 
 ---
 
@@ -659,9 +703,11 @@ _Full implementation details: [AGENTS.md §7.11](AGENTS.md#711-timezone-sanity-c
 
 ---
 
-## 🎯 Scenario 11 — Mitigation Block — Full Implementation Details — v2026-09-21
+## 🎯 Scenario 11 — Mitigation Block (ARCHIVED) — Full Implementation Details — v2026-09-21
 
-**File**: `src/engine/scenarios/Scenario11_MitigationBlock.ts`
+> **⚠️ ARCHIVED — not registered, not tradeable.** The implementation moved to `src/engine/scenarios/archive/legacy_smc/Scenario11_MitigationBlock.ts` and `ScenarioRouter` no longer constructs it. `11` fails `ACTIVE_SCENARIOS` validation; the module still compiles and its Jest suite still runs (`tests/scenarios/archive/legacy_smc/`). Retained as design reference — see `AGENTS.md` §8.4.
+
+**File**: `src/engine/scenarios/archive/legacy_smc/Scenario11_MitigationBlock.ts`
 
 **Core Logic**: Mitigation Block is a reversal pattern that forms after a Failed Swing (SMS):
 
@@ -959,8 +1005,8 @@ _Full implementation details: [AGENTS.md §7.18.1](AGENTS.md#7181-html-equity-cu
 
 ```bash
 # 1. Clone & install
-git clone https://github.com/your-org/crypto-bot-smc.git
-cd crypto-bot-smc
+git clone https://github.com/IshNekittt/crypto-bot.git
+cd crypto-bot
 npm ci
 
 # 2. Configure environment
@@ -1377,7 +1423,7 @@ docker stats smc-bot                     # Resource usage
 
 ## 📊 Backup CSV Export (Updated v2026-10-01)
 
-The `/backup` command now exports **22 columns** (previously 19) including new fields:
+The `/backup` command now exports all **24 columns** of the `trades` table (previously 19) including new fields:
 
 | Column             | Description                                                                                                                                           |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1387,7 +1433,7 @@ The `/backup` command now exports **22 columns** (previously 19) including new f
 
 **CSV Export Process**:
 
-1. Bot queries `SELECT * FROM trades` (all **22 columns** including new fields)
+1. Bot queries `SELECT * FROM trades` (all **24 columns** including new fields)
 2. Converts to CSV with headers (now includes `order_type`, `limit_price`, `management_state`)
 3. `management_state` JSONB serialized via `JSON.stringify()` and CSV-escaped
 4. Gzips the CSV in memory
@@ -1733,7 +1779,7 @@ curl http://localhost:3000/health  # {"status":"healthy","timestamp":...}
 ## 🧪 Testing
 
 ```bash
-# All tests (969 across 48 suites)
+# All tests (997 across 49 suites)
 npm test
 
 # Watch mode
@@ -1772,7 +1818,7 @@ npm run build        # tsc → dist/
 npm run start        # build + node dist/index.js
 npm run backtest     # Full backtest over BACKTEST_DAYS (all symbols)
 npm run backtest -- BTCUSDT  # Single symbol
-npm test             # Jest (969 tests, 48 suites)
+npm test             # Jest (997 tests, 49 suites)
 npm run test:watch   # Watch mode
 npm run decrypt      # Decrypt an encrypted /backup archive
 ```
@@ -1787,14 +1833,25 @@ src/
 ├── api/
 │   ├── bybitClient.ts          # REST + Circuit Breaker + ClosedPnL
 │   └── wsClient.ts             # WS + 3-min Watchdog + custom logger
+├── backtest/
+│   ├── run.ts                  # CLI entry, BACKTEST_DAYS window
+│   ├── executionSimulator.ts   # SCANNING → PENDING/IN_TRADE → CLOSED
+│   ├── historyLoader.ts        # Bybit pagination + local JSON cache
+│   ├── csvLoader.ts            # Offline CSV loader (Dukascopy / non-Bybit assets)
+│   ├── offlineInstruments.ts   # tickSize/qtyStep specs for CSV-only symbols
+│   └── reporter.ts             # PnL report + HTML artifacts
 ├── engine/
 │   ├── strategyEngine.ts       # State machine per symbol
+│   ├── scenarioRegistry.ts     # Single source of truth for registered scenario ids
 │   ├── scenarioRouter.ts       # 5 registered scenarios + regime gate + mitigation filter
 │   ├── pendingTradeManager.ts  # Approval queue + Slippage Guard
 │   ├── tpResolver.ts           # Module 3: structural TP resolution (major/minor obstacles)
 │   ├── brain/
 │   │   ├── htfRoadmap.ts       # Module 1: 4H dealing range, bias, primary liquidity draw
 │   │   └── volumeExhaustion.ts # Module 2: 15m pullback exhaustion + reaction surge
+│   ├── quant/
+│   │   ├── adx.ts              # Wilder ADX(14) — 4H regime gate
+│   │   └── volatilitySqueeze.ts # BB/KC compression detector (Scenario 15)
 │   └── scenarios/              # S1, S5, S12, S14, S15 + archive/ (legacy SMC, S13, S16, S17)
 ├── smc/
 │   └── patternRecognizer.ts    # Core SMC: swings, OB, FVG, SMS, ranges, macro
@@ -1811,6 +1868,12 @@ src/
 └── utils/
     ├── logger.ts               # Winston wrapper (LOG_LEVEL aware)
     └── precision.ts            # tickSize/qtyStep rounding
+
+scripts/
+├── matrix_tester.ts            # Multi-symbol backtest matrix → Markdown report
+├── funding_history_analyzer.ts # Funding-rate history export / analysis
+├── screener.ts                 # Symbol screener
+└── decrypt_backup.ts           # /backup archive decryption helper
 ```
 
 ---

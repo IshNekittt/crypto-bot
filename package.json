@@ -2,7 +2,7 @@
   "name": "crypto-bot-smc",
   "version": "0.1.0",
   "private": true,
-  "description": "Bybit V5 Smart Money Concepts (SMC) autonomous trading bot",
+  "description": "Bybit V5 multi-strategy quantitative trading engine & backtester",
   "main": "dist/index.js",
   "engines": {
     "node": ">=20"
@@ -12,9 +12,11 @@
     "start": "npm run build && node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "jest",
+    "test:ci": "jest --config jest.config.ci.js --runInBand --coverage",
     "backtest": "tsc && node dist/backtest/run.js",
     "matrix:test": "ts-node scripts/matrix_tester.ts",
     "dn:backtest": "tsc && node dist/dn_arbitrage/backtest/run.js",
+    "funding:analyze": "ts-node scripts/funding_history_analyzer.ts",
     "decrypt": "ts-node scripts/decrypt_backup.ts"
   },
   "dependencies": {
@@ -34,6 +36,7 @@
     "@types/node": "^26.2.0",
     "@types/pg": "^8.23.1",
     "jest": "^30.4.2",
+    "jest-html-reporters": "^3.1.7",
     "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"

@@ -12,6 +12,12 @@ import { formatPrice } from "../utils/precision";
 import { shouldUseMarketEntry } from "../config/fees";
 import { loadCachedOrFetch, getTimeRangeForDays } from "./historyLoader";
 import {
+  loadCandlesFromCSV,
+  detectCsvIntervalMinutes,
+  aggregateCandles,
+} from "./csvLoader";
+import { resolveOfflineInstrument } from "./offlineInstruments";
+import {
   openTrade,
   checkAndCloseTrade,
   getInitialState,
@@ -644,6 +650,189 @@ async function runBacktestForSymbol(
   return { trades: results, maxDrawdown: state.maxDrawdown };
 }
 
+/**
+ * Offline `BybitClient` guard for CSV mode.
+ *
+ * `PatternRecognizer` only needs a client for `initializeMacroContext()`, which
+ * the dynamic backtester never calls (macro context is rebuilt causally from
+ * the candle stream). Any accidental network call therefore hits this proxy
+ * and fails loudly instead of silently reaching Bybit.
+ */
+function createOfflineBybitClient(): BybitClient {
+  return new Proxy({} as BybitClient, {
+    get: (_target, property) => {
+      throw new Error(
+        `Network access is disabled in CSV backtest mode (BybitClient.${String(property)} was requested).`,
+      );
+    },
+  });
+}
+
+/**
+ * Full CSV backtest branch.
+ *
+ * Contract:
+ *  - exactly one symbol per file (a warning is emitted when more are queued);
+ *  - Sniper Mode requires a raw 1m file and derives LTF/HTF by aggregation;
+ *  - Classic mode requires the file interval to match `LTF_TIMEFRAME`;
+ *  - zero network calls: instrument specs come from `resolveOfflineInstrument`.
+ */
+async function runCsvBacktest(
+  config: ReturnType<typeof loadConfig>,
+): Promise<void> {
+  const csvPath = config.backtestCsvPath;
+  if (!csvPath) {
+    throw new Error("CSV backtest requested without BACKTEST_CSV_PATH");
+  }
+
+  const requestedSymbols = parseArgs(config);
+  const symbol = requestedSymbols[0];
+  if (!symbol) {
+    throw new Error("CSV backtest requires at least one symbol in SYMBOLS");
+  }
+  if (requestedSymbols.length > 1) {
+    logger.warn(
+      `[CSV MODE] ${requestedSymbols.length} symbols configured (${requestedSymbols.join(", ")}); ` +
+        `CSV mode supports one file per run — using ${symbol}.`,
+    );
+  }
+
+  logger.info(`[CSV MODE] Loading candles from ${csvPath} ...`);
+  const rawCandles = loadCandlesFromCSV(csvPath);
+  if (rawCandles.length < 2) {
+    throw new Error(`[CSV MODE] ${csvPath} must contain at least 2 candles`);
+  }
+
+  const intervalMinutes = detectCsvIntervalMinutes(rawCandles);
+  const ltfMinutes = Number(config.ltfTimeframe);
+  const htfMinutes = Number(config.htfTimeframe);
+  const sniperMode = config.enableSniperMode === true;
+
+  if (sniperMode && intervalMinutes !== 1) {
+    throw new Error(
+      "Sniper Mode requires 1m CSV data. Please provide 1m CSV or set ENABLE_SNIPER_MODE=false",
+    );
+  }
+
+  if (!sniperMode && intervalMinutes !== ltfMinutes) {
+    throw new Error(
+      `[CSV MODE] CSV interval is ${intervalMinutes}m but LTF_TIMEFRAME=${ltfMinutes}m. ` +
+        `Provide ${ltfMinutes}m candles or set LTF_TIMEFRAME=${intervalMinutes}.`,
+    );
+  }
+
+  logger.info(
+    `[CSV MODE] ${rawCandles.length} candles loaded (${new Date(rawCandles[0].timestamp).toISOString()} → ` +
+      `${new Date(rawCandles[rawCandles.length - 1].timestamp).toISOString()}, detected interval: ${intervalMinutes}m).`,
+  );
+
+  const candles1m = sniperMode ? rawCandles : [];
+  const candlesLtf = sniperMode
+    ? aggregateCandles(rawCandles, ltfMinutes)
+    : rawCandles;
+  const candlesHtf = aggregateCandles(candlesLtf, htfMinutes);
+
+  // Weekly macro levels need a full 7-day window; the extra candle absorbs a
+  // file that starts mid-bucket. 673 is the 15m baseline (672 + 1), and the
+  // larger of the two keeps smaller LTF intervals equally warm.
+  const candlesPerWeek = Math.floor((1440 * 7) / ltfMinutes);
+  const requiredLtfWarmup = Math.max(673, candlesPerWeek + 1);
+  if (candlesLtf.length < requiredLtfWarmup) {
+    throw new Error(
+      `[CSV MODE] Insufficient warmup: ${candlesLtf.length} ${ltfMinutes}m candles, ` +
+        `but at least ${requiredLtfWarmup} are required (one week of history for PDH/PDL/PWH/PWL and the 4H SMA50 window).`,
+    );
+  }
+
+  if (candlesHtf.length < MIN_PATTERN_CANDLES) {
+    throw new Error(
+      `[CSV MODE] Insufficient ${htfMinutes}m candles: ${candlesHtf.length}, ` +
+        `at least ${MIN_PATTERN_CANDLES} are required.`,
+    );
+  }
+
+  const instrument = resolveOfflineInstrument(symbol);
+  const recognizer = new PatternRecognizer(createOfflineBybitClient(), {
+    displacementMultiplier: new Decimal(
+      config.smcDisplacementMultiplier || 1.5,
+    ),
+  });
+
+  logger.warn(
+    `[CSV MODE] Offline instrument for ${symbol}: tickSize=${instrument.tickSize}, qtyStep=${instrument.qtyStep}, ` +
+      `minOrderQty=${instrument.minOrderQty}, maxOrderQty=${instrument.maxOrderQty}`,
+  );
+  logger.warn(
+    `[CSV MODE] Network access is disabled — all market data comes from ${csvPath}.`,
+  );
+
+  // Rejection counters are static (class-level); reset before this run so the
+  // report reflects only this CSV.
+  resetScenarioRejectionStats();
+
+  const result = await runBacktestForSymbol(
+    symbol,
+    instrument,
+    recognizer,
+    candlesLtf,
+    candlesHtf,
+    candles1m,
+    ltfMinutes,
+    config,
+    0,
+  );
+
+  const trades = result.trades;
+  const initialBalance = new Decimal("1000");
+  const finalBalance = trades.reduce(
+    (bal, t) => bal.plus(t.pnl),
+    initialBalance,
+  );
+  const periodStart = new Date(candlesLtf[0].timestamp);
+  const periodEnd = new Date(candlesLtf[candlesLtf.length - 1].timestamp);
+  const periodDays = Math.max(
+    1,
+    Math.round(
+      (periodEnd.getTime() - periodStart.getTime()) / (24 * 60 * 60 * 1000),
+    ),
+  );
+
+  printReport(
+    symbol,
+    initialBalance,
+    finalBalance,
+    trades,
+    periodStart,
+    periodEnd,
+    periodDays,
+    result.maxDrawdown,
+    candlesLtf,
+  );
+
+  try {
+    const artifacts = writeBacktestArtifacts(
+      symbol,
+      initialBalance,
+      finalBalance,
+      trades,
+      periodStart,
+      periodEnd,
+      periodDays,
+      result.maxDrawdown,
+      config.dataDir,
+      candlesLtf,
+    );
+    logger.warn(`[${symbol}] Report saved: ${artifacts.reportPath}`);
+    logger.warn(`[${symbol}] Equity curve saved: ${artifacts.chartPath}`);
+  } catch (err) {
+    logger.warn(
+      `[${symbol}] Failed to write backtest artifacts: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (global.gc) global.gc();
+}
+
 async function main(): Promise<void> {
   logger.info("Starting SMC Backtester (V5 Capable)...");
 
@@ -656,10 +845,9 @@ async function main(): Promise<void> {
   let symbolsToTest = parseArgs(config);
 
   if (useCsvMode) {
-    logger.info(
-      `CSV MODE is not fully supported for Sniper Mode data yet. Please use Online Mode for 1m testing.`,
-    );
-    process.exit(1);
+    await runCsvBacktest(config);
+    logger.info("\nBacktest completed!");
+    process.exit(0);
   } else {
     client = BybitClient.create(config as any);
     recognizer = new PatternRecognizer(client, {

@@ -1,4 +1,6 @@
-# CRYPTO BOT SMC — ARCHITECTURAL SPECIFICATION (v2026-11-09)
+# QUANT TRADING ENGINE — ARCHITECTURAL SPECIFICATION (v2026-11-20)
+
+> **Multi-strategy engine evolved from SMC** — originally a Smart Money Concepts trading bot, now a general-purpose quantitative trading engine and backtester.
 
 > **Single source of truth for any agent or engineer working on this codebase.**
 > Every architectural decision, invariant, and convention is documented here.
@@ -161,7 +163,10 @@ src/
 ├── backtest/         # Historical simulation engine
 │   ├── run.ts             # CLI entry, multi-symbol, BACKTEST_DAYS window
 │   ├── executionSimulator.ts  # State machine: SCANNING→IN_TRADE→CLOSED
-│   └── reporter.ts        # PnL report generation
+│   ├── historyLoader.ts   # Bybit pagination + local JSON cache
+│   ├── csvLoader.ts       # Offline CSV loader (Dukascopy/non-Bybit assets)
+│   ├── offlineInstruments.ts  # tickSize/qtyStep specs for CSV-only symbols
+│   └── reporter.ts        # PnL report generation + HTML artifacts
 ├── bootstrap/        # Startup & recovery
 │   ├── preflight.ts       # Symbol validation, leverage, margin mode
 │   ├── healthcheck.ts     # Express /health for Render
@@ -172,6 +177,7 @@ src/
 │   └── database.ts        # pg.Pool, NUMERIC(24,8), connection leak proof
 ├── engine/           # Strategy orchestration
 │   ├── strategyEngine.ts  # State machine per symbol
+│   ├── scenarioRegistry.ts # Single source of truth for registered scenario ids
 │   ├── scenarioRouter.ts  # Evaluates 5 registered scenarios, 4H ADX gate, mitigation filters
 │   ├── pendingTradeManager.ts  # Manual approval queue + Slippage Guard
 │   ├── baseScenario.ts    # Shared calculateLevels() — single SL source of truth
@@ -179,6 +185,9 @@ src/
 │   ├── brain/
 │   │   ├── htfRoadmap.ts      # Brain Module 1: 4H range, bias, primary target
 │   │   └── volumeExhaustion.ts # Brain Module 2: 15m pullback exhaustion + reaction
+│   ├── quant/
+│   │   ├── adx.ts             # Wilder ADX(14) for the 4H regime gate
+│   │   └── volatilitySqueeze.ts # BB/KC compression detector (Scenario 15)
 │   └── scenarios/         # S1, S5, S12, S14, S15 + archive/ (legacy SMC, S13, S16, S17)
 ├── execution/
 │   └── executionEngine.ts # Market order + TP/SL placement
@@ -200,6 +209,12 @@ src/
 │   └── precision.ts       # tickSize/qtyStep rounding
 ├── types.ts               # All domain types, StrategyState enum
 └── index.ts               # Bootstrap: DI, WS, Reconciliation, Macro refresher
+
+scripts/
+├── matrix_tester.ts       # Multi-symbol backtest matrix → Markdown report
+├── funding_history_analyzer.ts  # Funding-rate history export / analysis
+├── screener.ts            # Symbol screener
+└── decrypt_backup.ts      # /backup archive decryption helper
 ```
 
 ---
@@ -453,7 +468,7 @@ this.bot.use(async (ctx, next) => {
 | Command            | Description                                                                                                   | Auth |
 | ------------------ | ------------------------------------------------------------------------------------------------------------- | ---- |
 | `/status`          | **X-Ray** per engine: Live Price, Last Candle, 4H Trend, Zones in Memory, Nearest Macro %dist, State          | ✅   |
-| `/backup`          | Manual DB dump (full 19 cols) → gzip → Telegram via `fetch`+Blob (no disk)                                    | ✅   |
+| `/backup`          | Manual DB dump (full 24 cols) → gzip → Telegram via `fetch`+Blob (no disk)                                    | ✅   |
 | `/test_signal`     | Dry-run fake setup → Approve/Reject buttons → logs `✅ Test trade approved (DRY RUN)`                         | ✅   |
 | `/test_live_order` | **E2E live demo** (requires `ENABLE_LIVE_TEST_ORDERS=true`) → real Bybit Demo order, full API response logged | ✅   |
 | `/test_db`         | Integration test: INSERT/SELECT/DELETE with Decimal zoneDetails                                               | ✅   |
@@ -2215,6 +2230,110 @@ Filtered arm: 30.38% WR, $1,653.59 fees, **0/7 symbols cleared the alpha gate** 
 
 ---
 
+### 7.25 Cross-Asset Stress Audit — XAUUSD 15m (183 days) — **NEW v2026-11-20**
+
+**Premise**: every frozen result in §7.23–§7.24 comes from Bybit crypto perpetuals. The open question was whether the SMC vocabulary (liquidity sweeps, order blocks, displacement) revives on a non-crypto institutional asset, or whether the measured edge is venue-specific. XAUUSD was chosen because it is liquid, trades 24/5, and has a very different volatility and cost profile from altcoin perps.
+
+**Method**: Dukascopy 15m bid candles, 2026-05-20 → 2026-11-18 (**183 days**, 11,996 candles, 667 KB), downloaded with:
+
+```bash
+npx dukascopy-node -i xauusd -from 2026-05-20 -to 2026-11-19 -t m15 -f csv \
+  --volumes --volume-units units -dir ./data
+```
+
+The run used the offline CSV harness (`src/backtest/csvLoader.ts`, `src/backtest/offlineInstruments.ts`) with a synthetic instrument: `tickSize=0.01`, `qtyStep=0.01`, `minOrderQty=0.01`, `maxOrderQty=1000`. $1,000 starting balance, `RISK_PERCENT=2`, Classic `ENABLE_SNIPER_MODE=false`, `LTF_TIMEFRAME=15`, `HTF_TIMEFRAME=240`, `ENFORCE_KILLZONES=true`, `ENABLE_REGIME_FILTER=false`, `DYNAMIC_TP_MIN_RR=1.5`, `DYNAMIC_TP_MAX_RR=6.0`.
+
+**Test-only registry expansion (reverted)**: the temporary registry covered `1,2,3,4,5,6,7,8,9,10,11,14,15,17` — every 15m Classic design wired into the router for this audit. S12 and S13 are 1m producers and cannot run in a 15m Classic pass; S16 was not re-run (its negative expectancy is already recorded in §8.9). The router constructed the archived modules and the reporter printed their funnels. The repository was returned to `1,5,12,14,15` immediately after the run. **This section records an audit, not a supported configuration**: XAUUSD is not in any profile and `17` is still a hard boot error.
+
+#### 7.25.1 Headline result
+
+| Metric | Value |
+| --- | --- |
+| Net PnL | **−$380.57 (−38.06%)** |
+| Gross before fees | **−$88.00 (−8.80%)** |
+| Final balance | **$619.43** |
+| Trades | **75** (76 signals, 1 unfilled Limit) |
+| Wins / Losses | 20 / 55 |
+| Win rate | **26.67%** |
+| Profit factor | **0.50** |
+| Max drawdown | **41.87%** |
+| Fees | **$292.57** |
+| Max dry spell | **20 days** (13 pauses > 3d, 6 > 5d, 4 > 7d) |
+
+Fees are **77% of the net loss** and **29% of starting equity**. Average net result per trade is −$5.07; average fee per trade is ≈$3.90 against ≈$20 of initial risk, i.e. **≈0.2R of cost before the market does anything**.
+
+#### 7.25.2 Monthly shape — one profitable month out of seven
+
+| Month (exit, UTC) | Net | Trades | Win rate |
+| --- | --- | --- | --- |
+| 2026-05 | −$74.34 | 7 | 14.29% |
+| 2026-06 | **−$137.27** | 19 | 26.32% |
+| 2026-07 | **+$35.13** | 4 | 75.00% |
+| 2026-08 | −$48.89 | 14 | 14.29% |
+| 2026-09 | −$49.86 | 9 | 33.33% |
+| 2026-10 | −$99.70 | 13 | 15.38% |
+| 2026-11 | −$5.64 | 9 | 44.44% |
+| **TOTAL** | **−$380.57** | **75** | **26.67%** |
+
+There are **no flat months** and no recovery cluster. The only positive month (+$35.13 on 4 trades) is too small to offset June alone.
+
+#### 7.25.3 Scenario attribution
+
+| Scenario | Registry | Trades | W/L | Win rate | Net | Share of net loss |
+| --- | --- | --- | --- | --- | --- | --- |
+| **S14** Trend Following (Donchian) | live | 29 | 11/18 | 37.93% | **−$3.84** | 1% |
+| **S15** Volatility Squeeze (BB/KC) | live | 12 | 3/9 | 25.00% | **−$61.02** | 16% |
+| **S17** Killzone Session Sweep (Judas Swing) | archived | 34 | 6/28 | 17.65% | **−$315.70** | **83%** |
+| **S1–S11** legacy SMC | mixed | **0** | — | — | $0.00 | 0% |
+| **Total** | — | **75** | **20/55** | **26.67%** | **−$380.57** | **100%** |
+
+S14 is the only near-survivor: 29 trades at essentially break-even (−$3.84), consistent with §7.24.1 where S14 carries the Classic edge. S17 is the loss engine: 45% of the trades produce 83% of the net loss.
+
+**S4 anomaly**: the archived Mitigation Chain produced exactly **one** signal — 2026-07-21 06:00 UTC, Limit entry `4064.155`, SL `4056.800845`, TP `4080.935`, live `4071.025` — and it was **never filled** (the live price was 0.17% above the entry, beyond the 0.15% Smart Entry threshold). That is correct Hybrid Smart Entry behaviour, but it is the only archived signal that even reached staging.
+
+#### 7.25.4 Why the legacy set was silent
+
+| Scenario group | Binding gates after the killzone (counts) | Reading |
+| --- | --- | --- |
+| **S1** | `noTouch` 1,214; `noOb` 508; `wrongSide` 335; `noChoch` 170; `noFvg` 2; `tpInvalid` 5 | A 4H OB touch is rare; after a touch the 15m CHoCH → FVG chain rarely completes |
+| **S2–S4** | S2 `noFvgTouch` 2,249; S3 `noSweep` 2,701; S4 `noBos` 1,727 | Wider ASIAN-inclusive killzone (5,106 rejections, not 6,777) and still zero fills |
+| **S5** | `noSweep` 1,681; `lowVolumeSweep` 298; `tpInvalid` **254** | **Every** volume-confirmed SFP died at the target gate (254/254) |
+| **S6 / S11** | `noSms` 1,855 | Failure-swing sequences are absent |
+| **S7** | `noSweep` 1,430; `noChoch` 797 | AMD sweep → CHoCH chain is absent |
+| **S8 / S9** | `noTradingRange` 1,639 | No qualifying range for deviation or Turtle Soup |
+| **S10** | `noBreak` 1,401 | No BOS break to build a breaker block |
+| **S14** | `insideChannel` 7,960; `lowVolumeBreakout` 766; `tpInvalid` 211 | 29 breakouts, near-flat outcome |
+| **S15** | `noSqueezeFiring` 8,823; `tpInvalid` 146 | 12 triggers |
+| **S17** | `noSweep` 2,026; `lowVolume` 48; `tpInvalid` 111 | 34 triggers, worst PnL |
+
+**Killzones remove three quarters of the tape before any pattern logic runs**: 6,777 of 9,010 evaluations (75.2%) for S1/S5/S6–S11, and 6,750 of 8,969 (75.3%) for S17. That is structural — London + NY are 6 hours of a 24-hour day. The S2–S4 helper accepts ASIAN as well (5,106/9,011 = 56.7%) and is the only wider window tested; it still produced zero fills.
+
+#### 7.25.5 What the losses actually say
+
+1. **At portfolio level, fees are the primary loss.** Gross was −$88.00; the $292.57 of round-trip taker fees turned that into −$380.57. The sample was roughly flat before costs, and every additional trade made the outcome worse.
+2. **S17 is the loss engine, and fees do not fully explain it.** S17 produced 34 trades (45% of the sample) and −$315.70 (83% of the net loss) at 17.65% WR. Even if it paid only the portfolio-average ≈$3.90/trade in fees (≈$133), its gross would be ≈−$183; its stops are the tightest in the set, so the realised gross is likely worse. The crypto S17 was gross-positive/fee-negative (§8.10) — gold does not reproduce that signature.
+3. **The target gate, not signal frequency, starves S5 and S15.** S5's 254/254 `tpInvalid` is the exact deadlock of §16.5.8: a wick + ATR stop is small relative to the fee-inclusive 1.5R floor, so no structural target clears it. S15 shows the same shape (12 triggers vs 146 `tpInvalid`). S14, whose Donchian stop is wider than S5's wick-anchored geometry, is the only engine that reaches break-even.
+4. **The legacy set is not merely gated — it is structurally absent.** Even where the killzone was widened (S2–S4), the conjunctive chains (touch → CHoCH → FVG/OB, SMS → CHoCH, BOS → breaker) almost never complete on 15m gold. Zero fills across the eleven legacy SMC scenarios (S1–S11) is a statement about the pattern vocabulary on this asset, not about the entry filters alone.
+
+#### 7.25.6 Limits of this evidence
+
+- **Dukascopy `--volumes` is tick volume**, not centralized exchange volume. S5/S14/S15/S17 volume gates were calibrated on Bybit perpetual volume; the funnels are internally consistent, but the volume-dependent counts are not directly comparable to the crypto runs. A COMEX-backed series would be a different test.
+- **Bid-only candles**, one asset, one 183-day window, 75 trades. No spread model beyond the taker fee and no slippage model.
+- **Archived behaviour is archived.** The temporary registry ran the archived classes as-is; this audit does not claim they were production-ready.
+- **S16 was not re-run.** Its 60-day negative expectancy stands (§8.9); this audit neither overturns nor extends it.
+- The test was run with `ENFORCE_KILLZONES=true`. It proves that the **London/NY-gated 15m configuration** has no edge on this data — not that SMC cannot work on gold under a different session model.
+
+#### 7.25.7 Follow-up hypotheses (not implemented)
+
+1. **S17 revival condition** (now with gold evidence): widen the stop **distance** — a minimum stop as a percentage of price and/or higher-timeframe invalidation — add a fee-aware target floor, then re-measure on ≥180 days. Do not re-register on a 60-day window.
+2. **S5/S15 target geometry**: measure the fee-inclusive R:R from the execution entry (§7.13.5), then test a wider stop (larger 1R) and resolver behaviour. 254/254 `tpInvalid` is a geometry failure, not a signal failure.
+3. **Killzone-off A/B**: rerun the same cache with `ENFORCE_KILLZONES=false` to separate "the session gate starves the sample" from "the pattern has no edge". Until that exists, the only defensible claim is the gated one.
+4. **Data source**: repeat with a volume-bearing centralized XAUUSD series (or drop volume-gated scenarios) before generalizing across assets. Do not add XAUUSD to `SYMBOLS` on this evidence.
+
+> **Disposition**: no production change. The registry, router, reporter and `.env` were restored immediately after the run; the XAUUSD profile is not deployed and `ACTIVE_SCENARIOS` remains `1,5,12,14,15`. Evidence: `data/Backtest_Report_XAUUSD.txt`, `data/Backtest_Chart_XAUUSD.html`, `data/backtest_logs/XAUUSD_stress.log`, reproduction note in `data/xauusd_stress_run/README.md`.
+
+---
+
 ## 8. THE SCENARIOS (1, 5, 12, 14, 15 REGISTERED) — `src/engine/scenarios/`
 
 **Live registry.** These five IDs are the only scenarios the router can construct and the only IDs accepted by `ACTIVE_SCENARIOS` / `SCENARIOS_<SYMBOL>`. `REGISTERED_SCENARIO_IDS` in `src/engine/scenarioRegistry.ts` is the single source of truth (imported by both the router and `src/config/env.ts`); any other id is a **hard boot error**, never a silent drop. `loadConfig()` additionally aborts when Scenario 12 is requested with `ENABLE_SNIPER_MODE=false`.
@@ -2615,20 +2734,20 @@ CREATE TABLE symbol_state (
 
 | Operation | SQL / Code | Status |
 |-----------|------------|--------|
-| **CREATE TABLE** | All 22 columns present: `scenario_id`, `reason`, `zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp`, `order_type`, `limit_price`, `management_state` | ✅ |
-| **INSERT (openTrade)** | 19 fields passed incl. all zoneDetails fields, `order_type`, `limit_price`, `management_state` with `?? null` fallback | ✅ **FIXED v2026-10-05: column/value count aligned** |
+| **CREATE TABLE** | All 24 columns present: `scenario_id`, `reason`, `zone_type`, `zone_top`, `zone_bottom`, `zone_timeframe`, `zone_direction`, `zone_timestamp`, `order_type`, `limit_price`, `management_state` | ✅ |
+| **INSERT (openTrade)** | 20 bound fields passed incl. all zoneDetails fields, `order_type`, `limit_price`, `management_state`, `order_id` with `?? null` fallback | ✅ **FIXED v2026-10-05: column/value count aligned** |
 | **UPDATE (closeTrade)** | `reason` column now updated: `SET ..., reason = $4` | ✅ **FIXED v2026-09-26** |
 | **SELECT (mapRowToTradeRecord)** | `zone_top/bottom` → `new Decimal(row.zone_top)`, `scenario_id` as `number \| null`, `reason` passed through, `management_state` parsed | ✅ |
-| **BACKUP (tradesToCsv)** | All 22 columns exported including new fields | ✅ |
+| **BACKUP (tradesToCsv)** | All 24 columns exported including new fields | ✅ |
 
 **DB Fix Applied**: `closeTrade(tradeId, pnl, exitPrice, closedAt, reason)` — callers in `strategyEngine.ts`:
 - Line 348: `closeReason = PnL < 0 ? 'SL' : 'TP'`
 - Line 572: `'RECONCILIATION'`
 - Line 684: `closeReason = PnL < 0 ? 'SL' : 'TP'`
 
-**Fix Applied v2026-10-05**: `openTrade` INSERT column/value count mismatch fixed — column list and VALUES clause now both have 20 items (19 columns + status='OPEN' literal).
+**Fix Applied v2026-10-05**: `openTrade` INSERT column/value count mismatch fixed — column list and VALUES clause now both have 21 items (20 bound columns + the `status='OPEN'` literal). The `trades` table holds **24 columns** (including `pnl`, `exit_price`, `closed_at`, which the INSERT leaves to their defaults).
 
-**Critical Note — `order_id` (v2026-10-07)**: The `order_id` column (VARCHAR(255)) stores the Bybit exchange order ID (UUID). It is **critical** for linking DB records to exchange orders and is passed as the 20th parameter in `openTrade()`. Ensure `order_id` is always passed (even if null initially) to maintain DB-exchange linkage.
+**Critical Note — `order_id` (v2026-10-07)**: The `order_id` column (VARCHAR(255)) stores the Bybit exchange order ID (UUID). It is **critical** for linking DB records to exchange orders and is passed as the final bind parameter (`$20`) in `openTrade()`. Ensure `order_id` is always passed (even if null initially) to maintain DB-exchange linkage.
 
 ## 10. BACKTEST ENGINE — `src/backtest/`
 
@@ -2763,7 +2882,7 @@ LOG_LEVEL=info                     # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (911 tests / 45 suites, all green)
+npm test             # jest (997 tests / 49 suites, all green)
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -3365,7 +3484,13 @@ const evaluationData: PatternData = { ...basePd, structures: safeStructures, zon
 
 ---
 
+_Last updated: 2026-11-20. **XAUUSD cross-asset stress audit.** The frozen Classic set was measured on 183 days of Dukascopy 15m gold with every archived scenario temporarily registered (`1-11, 14, 15, 17`; reverted immediately afterwards). Result: **−$380.57 (−38.06%)**, 75 trades, 20W/55L, PF 0.50, Max DD 41.87%, $292.57 fees — **gross was only −$88.00, so fees are 77% of the loss**. S14 was the only near-survivor (−$3.84 / 29 trades); S15 −$61.02 / 12; S17 carried the loss (−$315.70 / 34, 17.65% WR); S1–S11 filled **zero** trades (S4 produced one unfilled Limit). The binding gates were killzones (75% of the tape) and, for S5, the fee-inclusive target floor (254/254 volume-confirmed SFPs died at `tpInvalid`). XAUUSD was **not** added to `SYMBOLS` and the production registry is unchanged. Recorded in §7.25; artifacts in `data/xauusd_stress_run/`, `data/Backtest_Report_XAUUSD.txt`, `data/backtest_logs/XAUUSD_stress.log`. Toolchain: typecheck clean, **997 tests / 49 suites green**.
+
 _Last updated: 2026-11-09. **V5.1 Final Code Freeze — ADX regime filter shipped, S16/S17 archived, production profiles frozen.** Two working institutional combinations were selected after the 365-day matrix: **S12 Sniper on NEARUSDT (1m)** and **S14 + S15 Classic on BTCUSDT (15m) with the 4H ADX gate enabled**. `.env` is now the primary deployment profile and mirrors `.env.emilia` for every non-secret strategy value (NEARUSDT, `ACTIVE_SCENARIOS=12`, `ENABLE_SNIPER_MODE=true`, `LTF_TIMEFRAME=15`, `HTF_TIMEFRAME=240`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=true`, `ENABLE_DYNAMIC_TP=true`, `DYNAMIC_TP_MIN_RR=1.5`, `DYNAMIC_TP_MAX_RR=6.0`, `ENABLE_REGIME_FILTER=false`, audited NEAR P0 overrides at `1.0`). `.env.subaru` is BTCUSDT / `ACTIVE_SCENARIOS=14,15` / `ENABLE_REGIME_FILTER=true` / `REGIME_ADX_THRESHOLD=25` / `BACKTEST_DAYS=365` / `MAX_WORKING_CAPITAL=3000`. APTUSDT was removed from both `SYMBOLS` lists; its calibration survives as a commented future-pair note. **§7.24.1** records the controlled 365-day A/B: BTC **+28.40% / 123 trades / PF 1.20 / Max DD 28.25%** with the gate vs **+15.69% / 158 / 1.09 / 28.71%** without (+12.71 pp); portfolio **−$1,560.46 (−22.29%)** vs **−$1,958.31 (−27.98%)**, 5 of 7 symbols improved, **0/7 cleared the alpha gate** — the filter is a risk-shaping gate, not an alpha source. `.env.example` preset-divergence table, README preset sections and §11 were rewritten to match. Toolchain: typecheck clean, **969 tests / 48 suites green**, build passing.
+
+_Last updated: 2026-11-04. **Scenario 17 archived — positive gross edge, fee-negative net.** S17 (Killzone Session Sweep / Judas Swing) was implemented, registered, and retired the same day. The 60-day / 11-symbol matrix (`ACTIVE_SCENARIOS=17`, `ENABLE_SNIPER_MODE=false`, `LTF_TIMEFRAME=15`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=true`, $1,000/symbol, 2026-09-05 → 2026-11-04) produced 229 trades at 33.62% WR: **+$392.89 gross before fees**, **−$317.81 net** after **$710.70** of round-trip taker fees ($1.72 gross per trade vs $3.10 of cost). Five of eleven symbols were profitable; APTUSDT was the only NEAR (+8.79%, PF 1.56, DD 5.56%) and **0 cleared the alpha gate** (Net > 10%, DD < 10%, PF > 1.5). The rejection funnel is dominated by `notInKillzone` (45,523 / 59,721 = 76.2%, structural for a 6h-of-24h session gate) and `noSweep` (13,038 = 91.8% of the 14,198 in-killzone evaluations); `lowVolume` 524, `tpInvalid` 406, `triggered` 230. **Diagnosis: directional alpha exists, unit economics do not** — the wick-anchored stop is too tight to pay its own round-trip cost. Module moved to `src/engine/scenarios/archive/legacy_smc/Scenario17_JudasSwing.ts` with its suite at `tests/scenarios/archive/legacy_smc/scenario17_judas_swing.test.ts`; `REGISTERED_SCENARIO_IDS` / `CLASSIC_ONLY_SCENARIO_IDS` are back to `1, 5, 12, 14, 15`, `ScenarioId` mirrors that union, `ARCHIVED_SCENARIO_IDS_LABEL` is now `2-4, 6-11, 13, 16, 17`, and `17` is a hard boot error. Design record kept in §8.10. `.env` was returned to the V5 Sniper profile (`ACTIVE_SCENARIOS=12`, `ENABLE_SNIPER_MODE=true`, `LTF_TIMEFRAME=15`, `HTF_TIMEFRAME=240`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=false`) for the next symbol-search matrix. Revival condition: widen the stop **distance** (minimum stop as a % of price and/or higher-timeframe invalidation — the `0.5 × atr15m` buffer already exists and was not sufficient), then re-measure on ≥180 days before any sizing decision.
+
+_Last updated: 2026-11-03. **Scenario 16 archived — negative expectancy confirmed.** S16 was registered, stress-tested, then retired: `REGISTERED_SCENARIO_IDS` / `CLASSIC_ONLY_SCENARIO_IDS` are back to `1, 5, 12, 14, 15`, `ScenarioId` (`src/types.ts`) mirrors that union, and the module moved to `src/engine/scenarios/archive/legacy_smc/Scenario16_AtrExhaustionReversal.ts` with its suite beside it (both still compile and still run, but no runtime path can schedule them; `16` is a hard boot error). S16 was a 15m Classic fade — 20-candle swing ≥ N × ATR4H, first BB/KC expansion after a compression run, trigger volume ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` × the preceding SMA20 — and the premise was the problem: trading counter-trend volatility flags has negative mathematical expectancy. The initial 60-day screen (`1.5 × ATR4H`, ≥3 squeeze candles) produced 15 trades across NEAR/BTC/SOL and **−$170.41 (−5.68%)**; relaxing both gates to `1.0 × ATR4H` and ≥1 squeeze candle raised frequency 4.3× (64 trades) but worsened the portfolio to **−$387.57 (−12.92%)**, 31.25% WR, Max DD 14.25% / 25.71% / 17.85%, fees $354.77 — only NEARUSDT positive (+$18.11, 44.00% WR, PF 1.06). Design record kept in §8.9; do not tune it further on this window. Harness correction retained: `tests/config/profiles.test.ts` asserts the Classic profile resolves `6 × 15m`, matching `resolveLimitExpirationCandles()` and §7.20.2. Toolchain: typecheck clean, **911 tests / 45 suites green**, build passing.
 
 _Last updated: 2026-11-01. **Scenario 5 rebuilt — volume-confirmed SFP.** *(Superseded the same day by the geometry unlock above: the stop is now buffered, `skipMinorObstacles` is `true`, and the volume default is 1.3.)* The Sweep → CHoCH → FVG chain is gone (§8.8): S5 now evaluates an SFP on the **last closed** 15m candle (wick pierces a ranked PDH/PDL/PWH/PWL/BSL/SSL pool, close returns inside), requires the sweep candle to print ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` (default 1.5) × the SMA volume of the 20 candles before it, enters at that close, stops just beyond the pierced wick through `calculateLevels()` with `atr = 0` (exact 0.1% floor), resolves the target with `skipMinorObstacles: false`, and rejects below a fee-inclusive net R:R (`(target − fee) / (stop + fee) ≥ DYNAMIC_TP_MIN_RR`). Macro pools are never burned; the trigger is burned as a `SWEEP` structure. New config: `SMC_SWEEP_VOLUME_MULTIPLIER`. Funnel: `noSweep` / `lowVolumeSweep` / `tpInvalid` / `insufficientCandles`. Measured 180 days (2026-05-05 → 2026-11-01, $1,000/symbol, killzones bypassed, `DYNAMIC_TP_MIN_RR=1.5`): BTC **+4.37% / 7 trades / PF 1.65**, ETH **−1.15% / 14 / 0.95**, SOL **−14.71% / 12 / 0.26**, portfolio **−3.83% / 33 trades / $204.79 fees**. At `2.0` the scenario is dormant (13 trades across the three symbols, portfolio −6.31%). The binding constraint is the target gate, not the volume gate: with a 0.1–0.3% stop, a fee-inclusive 1.5–2.0R demands a 3.5–5R structural target that the nearest-wall filter (`skipMinorObstacles: false`) rarely finds. Harness note: the S5 suite caught a sparse-array fixture whose `reduce()` silently skipped holes and averaged 11 of 20 baseline candles; the baseline is now summed with an explicit loop that fails closed. Toolchain: typecheck clean, **875 tests / 43 suites green**, build passing.
 
@@ -3375,6 +3500,3 @@ _Last updated: 2026-11-01. **S12 shield execution-price fix.** `MIN_NET_RR` and 
 
 _Last updated: 2026-10-28. **Endurance freeze release.** Two long-horizon audits are now recorded in §7.23: S14 Tank on BTCUSDT over **365 days** (+19.94%, PF 1.20, Max DD 19.82%, MAR 1.01 — 160.4 days underwater, fees eating 49.7% of gross) and S12 Sniper on NEARUSDT over **180 days** (+22.40%, PF 3.24, Max DD 4.74% at the audited calibration; the global `1.5` volatility shield starved the same window to +3.46%). The audit produced exactly one configuration change — `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` in `.env` and `.env.emilia`, with the global shield left untouched for every other pair. Harness fix: `src/backtest/run.ts` appends the 1m history in a loop instead of `push(...fetched1m)`, which had thrown `Maximum call stack size exceeded` on any Sniper window beyond ~100k candles (§16.6.8). Also carried over from v2026-10-26: the V4 Classic scenario refactor (batches 1–4), Invariants 1–60, anti-patterns consolidated into §16.1–§16.8, and the live hotfix that stopped `processClosedPosition()` from resetting the state machine during the entry-bookkeeping window (§16.3.9, Invariant 60). Toolchain: typecheck clean, **853 tests / 43 suites green**, build passing.
 
-_Last updated: 2026-11-03. **Scenario 16 archived — negative expectancy confirmed.** S16 was registered, stress-tested, then retired: `REGISTERED_SCENARIO_IDS` / `CLASSIC_ONLY_SCENARIO_IDS` are back to `1, 5, 12, 14, 15`, `ScenarioId` (`src/types.ts`) mirrors that union, and the module moved to `src/engine/scenarios/archive/legacy_smc/Scenario16_AtrExhaustionReversal.ts` with its suite beside it (both still compile and still run, but no runtime path can schedule them; `16` is a hard boot error). S16 was a 15m Classic fade — 20-candle swing ≥ N × ATR4H, first BB/KC expansion after a compression run, trigger volume ≥ `SMC_SWEEP_VOLUME_MULTIPLIER` × the preceding SMA20 — and the premise was the problem: trading counter-trend volatility flags has negative mathematical expectancy. The initial 60-day screen (`1.5 × ATR4H`, ≥3 squeeze candles) produced 15 trades across NEAR/BTC/SOL and **−$170.41 (−5.68%)**; relaxing both gates to `1.0 × ATR4H` and ≥1 squeeze candle raised frequency 4.3× (64 trades) but worsened the portfolio to **−$387.57 (−12.92%)**, 31.25% WR, Max DD 14.25% / 25.71% / 17.85%, fees $354.77 — only NEARUSDT positive (+$18.11, 44.00% WR, PF 1.06). Design record kept in §8.9; do not tune it further on this window. Harness correction retained: `tests/config/profiles.test.ts` asserts the Classic profile resolves `6 × 15m`, matching `resolveLimitExpirationCandles()` and §7.20.2. Toolchain: typecheck clean, **911 tests / 45 suites green**, build passing.
-
-_Last updated: 2026-11-04. **Scenario 17 archived — positive gross edge, fee-negative net.** S17 (Killzone Session Sweep / Judas Swing) was implemented, registered, and retired the same day. The 60-day / 11-symbol matrix (`ACTIVE_SCENARIOS=17`, `ENABLE_SNIPER_MODE=false`, `LTF_TIMEFRAME=15`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=true`, $1,000/symbol, 2026-09-05 → 2026-11-04) produced 229 trades at 33.62% WR: **+$392.89 gross before fees**, **−$317.81 net** after **$710.70** of round-trip taker fees ($1.72 gross per trade vs $3.10 of cost). Five of eleven symbols were profitable; APTUSDT was the only NEAR (+8.79%, PF 1.56, DD 5.56%) and **0 cleared the alpha gate** (Net > 10%, DD < 10%, PF > 1.5). The rejection funnel is dominated by `notInKillzone` (45,523 / 59,721 = 76.2%, structural for a 6h-of-24h session gate) and `noSweep` (13,038 = 91.8% of the 14,198 in-killzone evaluations); `lowVolume` 524, `tpInvalid` 406, `triggered` 230. **Diagnosis: directional alpha exists, unit economics do not** — the wick-anchored stop is too tight to pay its own round-trip cost. Module moved to `src/engine/scenarios/archive/legacy_smc/Scenario17_JudasSwing.ts` with its suite at `tests/scenarios/archive/legacy_smc/scenario17_judas_swing.test.ts`; `REGISTERED_SCENARIO_IDS` / `CLASSIC_ONLY_SCENARIO_IDS` are back to `1, 5, 12, 14, 15`, `ScenarioId` mirrors that union, `ARCHIVED_SCENARIO_IDS_LABEL` is now `2-4, 6-11, 13, 16, 17`, and `17` is a hard boot error. Design record kept in §8.10. `.env` was returned to the V5 Sniper profile (`ACTIVE_SCENARIOS=12`, `ENABLE_SNIPER_MODE=true`, `LTF_TIMEFRAME=15`, `HTF_TIMEFRAME=240`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=false`) for the next symbol-search matrix. Revival condition: widen the stop **distance** (minimum stop as a % of price and/or higher-timeframe invalidation — the `0.5 × atr15m` buffer already exists and was not sufficient), then re-measure on ≥180 days before any sizing decision.

@@ -8,3 +8,7 @@ data/*.db-wal
 .env.subaru
 .DS_Store
 data/*
+# CI report artifacts (published to gh-pages, never committed)
+coverage/
+gh-pages-report/
+gh-pages-dist/
