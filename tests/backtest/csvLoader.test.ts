@@ -338,6 +338,29 @@ describe('aggregateCandles', () => {
     expect(result[0].low).toBe('99');
   });
 
+  it('aggregates 4H candles to daily buckets at UTC midnight', () => {
+    const day = Date.UTC(2026, 10, 23);
+    const seed = fifteenMinuteCandles()[0];
+    const bars = [
+      { ...seed, timestamp: day - 4 * 3600_000, high: '120' },
+      { ...seed, timestamp: day, open: '105', high: '110' },
+      { ...seed, timestamp: day + 4 * 3600_000, high: '108' },
+    ];
+    const result = aggregateCandles(bars, 'D');
+    expect(result.map(c => c.timestamp)).toEqual([day - 86_400_000, day]);
+    expect(result[1]).toMatchObject({ open: '105', high: '110', volume: '20' });
+  });
+
+  it('aligns weekly and monthly CSV buckets to the calendar', () => {
+    const seed = fifteenMinuteCandles()[0];
+    const bars = [Date.UTC(2026, 0, 31), Date.UTC(2026, 1, 1), Date.UTC(2026, 1, 2)]
+      .map(timestamp => ({ ...seed, timestamp }));
+    expect(aggregateCandles(bars, 'W').map(c => c.timestamp))
+      .toEqual([Date.UTC(2026, 0, 26), Date.UTC(2026, 1, 2)]);
+    expect(aggregateCandles(bars, 'M').map(c => c.timestamp))
+      .toEqual([Date.UTC(2026, 0, 1), Date.UTC(2026, 1, 1)]);
+  });
+
   it('handles multiple source candles missing from the middle of a bucket', () => {
     const candles = fifteenMinuteCandles().filter((_, i) => i % 2 === 0);
 

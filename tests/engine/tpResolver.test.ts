@@ -191,6 +191,15 @@ describe('resolveTakeProfit — dynamic TP disabled', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveTakeProfit — liquidity pools', () => {
+  it('does not restore a taken pool via macro fallback or the swept price via another source', () => {
+    const result = expectOk(resolveTakeProfit(input({
+      liquidityPools: [pool('PDH', '101', true), pool('BSL', '101.25'), pool('PWH', '104')],
+      macroContext: macro({ dailyLevels: { pdh: new Decimal(101), pdl: new Decimal(90), do: new Decimal(100) } }),
+      sessionRanges: [session('ASIAN', '101.25', '95')],
+      sweptLevelPrice: new Decimal('101.25'),
+    })));
+    expect(result.takeProfit.eq(104)).toBe(true);
+  });
   it('snaps a long to the nearest pool above entry', () => {
     const result = expectOk(
       resolveTakeProfit(input({ liquidityPools: [pool('PDH', '104')] })),
@@ -274,6 +283,17 @@ describe('resolveTakeProfit — liquidity pools', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveTakeProfit — zones', () => {
+  it('classifies zones against the configured HTF rather than against 4H', () => {
+    const zones = [
+      zone({ top: '102', bottom: '101', direction: 'BEARISH', timeframe: '240' }),
+      zone({ top: '105', bottom: '104', direction: 'BEARISH', timeframe: 'D' }),
+    ];
+    const common = { zones, skipMinorObstacles: true };
+    expect(expectReject(resolveTakeProfit(input(common))).nearest?.major).toBe(true);
+    expect(expectOk(resolveTakeProfit(input({ ...common, htfTimeframe: 'D' }))).takeProfit.toString()).toBe('104');
+    const hourly = zone({ top: '104', bottom: '103', direction: 'BEARISH', timeframe: '60' });
+    expect(expectOk(resolveTakeProfit(input({ zones: [hourly], htfTimeframe: '60' }))).source).toBe('HTF_ZONE');
+  });
   it('targets the near (lower) edge of a bearish zone above a long', () => {
     const result = expectOk(
       resolveTakeProfit(

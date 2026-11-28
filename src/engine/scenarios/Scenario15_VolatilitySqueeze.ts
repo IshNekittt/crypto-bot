@@ -10,6 +10,7 @@ export interface Scenario15RejectionStats {
   wrongMode: number;
   insufficientCandles: number;
   noSqueezeFiring: number;
+  noBreakout: number;
   neutralMomentum: number;
   invalidAtr: number;
   tpInvalid: number;
@@ -21,6 +22,7 @@ const EMPTY_STATS: Scenario15RejectionStats = {
   wrongMode: 0,
   insufficientCandles: 0,
   noSqueezeFiring: 0,
+  noBreakout: 0,
   neutralMomentum: 0,
   invalidAtr: 0,
   tpInvalid: 0,
@@ -33,7 +35,7 @@ const ATR_MULTIPLIER = new Decimal('1.5');
 const MIN_SQUEEZE_CANDLES = 5;
 const STOP_ATR_MULTIPLIER = new Decimal('1.5');
 
-/** 15m Bollinger/Keltner volatility compression and breakout. */
+/** LTF Bollinger/Keltner volatility compression and breakout. */
 export class Scenario15_VolatilitySqueeze extends BaseScenario {
   private static stats: Scenario15RejectionStats = { ...EMPTY_STATS };
 
@@ -53,15 +55,15 @@ export class Scenario15_VolatilitySqueeze extends BaseScenario {
     const stats = Scenario15_VolatilitySqueeze.stats;
     stats.totalEvals++;
 
-    if (this.config.enableSniperMode || this.config.ltfTimeframe !== '15') {
-      return this.reject('wrongMode', 'Scenario 15 requires Classic Mode on 15m candles');
+    if (!this.isClassicMode()) {
+      return this.reject('wrongMode', 'Scenario 15 requires Classic mode with LTF of at least 5 minutes');
     }
 
     const candles = patternData.candles15m ?? [];
     if (candles.length < PERIOD + MIN_SQUEEZE_CANDLES) {
       return this.reject(
         'insufficientCandles',
-        `Requires at least ${PERIOD + MIN_SQUEEZE_CANDLES} closed 15m candles`,
+        `Requires at least ${PERIOD + MIN_SQUEEZE_CANDLES} closed LTF candles`,
       );
     }
 
@@ -95,6 +97,10 @@ export class Scenario15_VolatilitySqueeze extends BaseScenario {
       return this.reject('invalidAtr', 'Invalid breakout price or True Range ATR');
     }
 
+    if (direction === 'BULLISH' ? entry.lte(current.bollingerUpper) : entry.gte(current.bollingerLower)) {
+      return this.reject('noBreakout', 'Close did not break the directional Bollinger band');
+    }
+
     // Stop sits beyond the Keltner midline by 1.5 × True Range ATR. The shared
     // geometry helper enforces correct-side placement and the minimum offset.
     const stopGeometry = this.calculateLevels(
@@ -108,6 +114,7 @@ export class Scenario15_VolatilitySqueeze extends BaseScenario {
     );
 
     const resolution = resolveTakeProfit({
+      htfTimeframe: this.config.htfTimeframe,
       direction,
       entry,
       stopLoss: stopGeometry.stopLoss,

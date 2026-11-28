@@ -1,4 +1,6 @@
 import { Decimal } from 'decimal.js';
+import { timeframeLabel } from '../../utils/timeframe';
+import type { Timeframe } from '../../types';
 import type { Candle } from '../../types';
 import type { MacroContext, Structure, Zone } from '../../smc/patternRecognizer';
 
@@ -49,6 +51,7 @@ export interface HtfRoadmap {
 }
 
 export interface HtfRoadmapInput {
+  readonly htfTimeframe?: Timeframe;
   readonly candles4h: readonly Candle[];
   readonly structures4h: readonly Structure[];
   readonly zones4h: readonly Zone[];
@@ -145,9 +148,9 @@ function invalidRoadmap(reason: string): HtfRoadmap {
   };
 }
 
-function isConfirmed4hStructure(structure: Structure): boolean {
+function isConfirmedHtfStructure(structure: Structure, htfTimeframe: string): boolean {
   if (!structure) return false;
-  if (structure.timeframe !== '240') return false;
+  if (structure.timeframe !== htfTimeframe) return false;
   if (structure.isValidated === false) return false;
   if (!Number.isFinite(structure.timestamp)) return false;
   return structure.type === 'BOS' || structure.type === 'CHOCH';
@@ -314,8 +317,10 @@ function collectPrimaryTarget(
   zones: readonly Zone[],
   macroContext: MacroContext | undefined,
   candles: readonly ParsedCandle[],
+  htfTimeframe: Timeframe,
 ): HtfRoadmap['primaryTarget'] {
   const isLong = bias === 'BULLISH';
+  const htf = timeframeLabel(htfTimeframe);
   const raw: RawTarget[] = [];
 
   const addTarget = (
@@ -346,9 +351,9 @@ function collectPrimaryTarget(
   for (const pool of macroContext?.liquidityPools ?? []) {
     if (pool.isTaken) continue;
     if (isLong && pool.type === 'EQH') {
-      addLiquidity(pool.priceLevel, '4H EQH');
+      addLiquidity(pool.priceLevel, `${htf} EQH`);
     } else if (!isLong && pool.type === 'EQL') {
-      addLiquidity(pool.priceLevel, '4H EQL');
+      addLiquidity(pool.priceLevel, `${htf} EQL`);
     }
   }
 
@@ -361,18 +366,18 @@ function collectPrimaryTarget(
 
   if (isLong) {
     for (const level of findEqualHighs(swings.highs)) {
-      addLiquidity(level, '4H EQH');
+      addLiquidity(level, `${htf} EQH`);
     }
   } else {
     for (const level of findEqualLows(swings.lows)) {
-      addLiquidity(level, '4H EQL');
+      addLiquidity(level, `${htf} EQL`);
     }
   }
 
   const opposingDirection = isLong ? 'BEARISH' : 'BULLISH';
 
   for (const zone of zones) {
-    if (zone.timeframe !== '240') continue;
+    if (zone.timeframe !== htfTimeframe) continue;
     if (zone.mitigated) continue;
     if (zone.direction !== opposingDirection) continue;
     if (zone.type !== 'OB' && zone.type !== 'FVG') continue;
@@ -385,7 +390,7 @@ function collectPrimaryTarget(
 
     addTarget(
       nearEdge,
-      `4H ${zone.type}`,
+      `${htf} ${zone.type}`,
       'HTF_ZONE',
       zone.type === 'OB' ? 1 : 2,
     );
@@ -433,30 +438,32 @@ function collectPrimaryTarget(
  * it is an entry-timing gate for the 15m pullback, not a trend filter.
  */
 export function buildHtfRoadmap(input: HtfRoadmapInput): HtfRoadmap {
+  const htfTimeframe = input?.htfTimeframe ?? '240';
+  const htf = timeframeLabel(htfTimeframe);
   const rawCandles = input?.candles4h ?? [];
 
   if (rawCandles.length === 0) {
-    return invalidRoadmap('No 4H candles provided');
+    return invalidRoadmap(`No ${htf} candles provided`);
   }
 
   const candles: ParsedCandle[] = [];
   for (const candle of rawCandles) {
     const parsed = parseCandle(candle);
     if (!parsed) {
-      return invalidRoadmap('Malformed 4H candle data');
+      return invalidRoadmap(`Malformed ${htf} candle data`);
     }
     candles.push(parsed);
   }
 
   if (candles.length < 2) {
-    return invalidRoadmap('Insufficient 4H candles for a dealing range');
+    return invalidRoadmap(`Insufficient ${htf} candles for a dealing range`);
   }
 
   // Never sort the caller's array.
   candles.sort((first, second) => first.timestamp - second.timestamp);
 
   const structures = (input?.structures4h ?? [])
-    .filter(isConfirmed4hStructure)
+    .filter(structure => isConfirmedHtfStructure(structure, htfTimeframe))
     .sort((first, second) => first.timestamp - second.timestamp);
 
   let latestChoch: Structure | undefined;
@@ -481,7 +488,7 @@ export function buildHtfRoadmap(input: HtfRoadmapInput): HtfRoadmap {
   const range = buildDealingRange(rangeWindow);
 
   if (!range) {
-    return invalidRoadmap('Degenerate 4H dealing range (high equals low)');
+    return invalidRoadmap(`Degenerate ${htf} dealing range (high equals low)`);
   }
 
   const lastCandle = candles[candles.length - 1];
@@ -497,7 +504,7 @@ export function buildHtfRoadmap(input: HtfRoadmapInput): HtfRoadmap {
       primaryTarget: null,
       targetDistancePct: ZERO,
       isValid: false,
-      reason: biasResult.reason ?? 'No directional 4H bias',
+      reason: biasResult.reason ?? `No directional ${htf} bias`,
     };
   }
 
@@ -507,6 +514,7 @@ export function buildHtfRoadmap(input: HtfRoadmapInput): HtfRoadmap {
     input?.zones4h ?? [],
     input?.macroContext,
     candles,
+    htfTimeframe,
   );
 
   if (!target) {
@@ -517,7 +525,7 @@ export function buildHtfRoadmap(input: HtfRoadmapInput): HtfRoadmap {
       primaryTarget: null,
       targetDistancePct: ZERO,
       isValid: false,
-      reason: `No 4H liquidity pool or unmitigated zone ${
+      reason: `No ${htf} liquidity pool or unmitigated zone ${
         biasResult.bias === 'BULLISH' ? 'above' : 'below'
       } current price`,
     };
@@ -533,7 +541,7 @@ export function buildHtfRoadmap(input: HtfRoadmapInput): HtfRoadmap {
       primaryTarget: null,
       targetDistancePct: ZERO,
       isValid: false,
-      reason: 'Primary target is at the current 4H close',
+      reason: `Primary target is at the current ${htf} close`,
     };
   }
 

@@ -1,4 +1,4 @@
-# QUANT TRADING ENGINE — ARCHITECTURAL SPECIFICATION (v2026-11-20)
+# QUANT TRADING ENGINE — ARCHITECTURAL SPECIFICATION (v2026-11-28)
 
 > **Multi-strategy engine evolved from SMC** — originally a Smart Money Concepts trading bot, now a general-purpose quantitative trading engine and backtester.
 
@@ -13,9 +13,9 @@
 
 | Layer           | Technology            | Version / Config                     | Hard Constraints                                                  |
 | --------------- | --------------------- | ------------------------------------ | ----------------------------------------------------------------- |
-| Runtime         | Node.js               | **26.x** (LTS)                       | `--experimental-strip-types` NOT used; pure TS compiled           |
-| Language        | TypeScript            | **5.9+**, `strict: true`             | `noImplicitAny`, `strictNullChecks`, `exactOptionalPropertyTypes` |
-| Exchange        | Bybit V5              | REST + WebSocket (Linear Perpetuals) | `demoTrading` or `testnet` only for CI; `mainnet` prod            |
+| Runtime         | Node.js               | **26.x** in CI and Docker            | TypeScript compiled to JavaScript for execution                   |
+| Language        | TypeScript            | **5.9+**, `strict: true`             | `noImplicitAny`, `strictNullChecks`, `isolatedModules: true`      |
+| Exchange        | Bybit V5              | REST + WebSocket (Linear Perpetuals) | CI uses test doubles. Live instances select Demo, Testnet, or Mainnet explicitly. |
 | Database        | Supabase (PostgreSQL) | **Direct Connection**, pool=5        | `NUMERIC(24,8)` for ALL money; `pg` returns strings               |
 | Math            | `decimal.js`          | **10.6+**                            | **ZERO** `number` for prices/qty/PnL — only `Decimal`             |
 | Logging         | `winston`             | JSON + console                       | `LOG_LEVEL=info` default; `debug` only in tests                   |
@@ -29,7 +29,7 @@
 
 | Layer | Technology | Description |
 |-------|------------|-------------|
-| **Radar (LTF)** | 15m/4H candles | Builds macro context (PDH/PDL/PWH/PWL, HTF sweeps) consumed by Scenario 12 |
+| **Radar (LTF/HTF)** | Configured feeds; 15m/4H in Emilia | Supplies ATR, trend, POIs and intraday sweep candidates; cached macro anchors supply PDH/PDL/PWH/PWL |
 | **Sniper (1m)** | 1m candles | Every 1m close re-evaluates Scenario 12 (Sniper Touch): per-CHoCH sweep pairing → 1m CHoCH → OB proximity |
 | **Execution** | Smart Pullback | On a valid 1m CHoCH: `idealEntry = OB midpoint`; SL under the 1m extreme; standard Market/Limit logic |
 
@@ -43,17 +43,17 @@ The codebase now supports **two distinct operational modes** running from the sa
 
 | Aspect | **V4 Classic (ENABLE_SNIPER_MODE=false)** | **V5 Sniper (ENABLE_SNIPER_MODE=true)** |
 |--------|-------------------------------------------|-----------------------------------------|
-| **Timeframes** | 15m LTF / 4H HTF | 1m entry / 15m + 4H macro context |
-| **Entry Logic** | Close of 15m signal candle | 1m CHoCH after a macro sweep, near its OB midpoint |
+| **Timeframes** | Configured LTF/HTF, LTF ≥ 5m; verified at 15m/4H, 1H/4H, 4H/1D | 1m entry plus configured LTF/HTF context |
+| **Entry Logic** | Confirmed LTF signal candle | 1m CHoCH after a macro or opt-in intraday sweep, near its OB midpoint |
 | **Scenarios** | **1, 5, 14, 15** (Classic; production BTC profile = **14 + 15** with the 4H ADX gate) | **12** (Sniper Touch) |
 | **State Machine** | SCANNING → ENTRY_STAGED → IN_TRADE | SCANNING → ENTRY_STAGED → IN_TRADE (Scenario 12 on 1m closes) |
-| **WS Subscription** | 15m, 240m | 1m, 15m, 240m |
-| **Killzone** | London/NY only | London/NY only (enforced in Scenario 12) |
-| **Cooldown** | After SL only (loss) | After SL only (loss) |
+| **WS Subscription** | Unique configured LTF and HTF | Same set plus `1` |
+| **Killzone** | S1/S5: London/NY when enabled; S14/S15 do not consult the flag | S12: London/NY when enabled |
+| **Cooldown** | After a net loss, in LTF bars | After a net loss, in 1m bars |
 
 **Critical Invariant**: V4 and V5 **MUST NOT** run on the same process/instance. The `IN_TRADE` state machine is per-symbol and mutually exclusive. Running both modes simultaneously would cause state conflicts, double position risk, and `IN_TRADE` blocking.
 
-> **Scenario 13 is ARCHIVED** (v2026-10-23): the Top-Down Order Flow implementation moved to `src/engine/scenarios/archive/Scenario13_TopDownOrderFlow.ts` and is no longer registered in the router. Scenario 13 remains invalid in global and per-symbol scenario lists; Scenario 15 is registered as a separate 15m Classic strategy. **Scenarios 16 (ATR Exhaustion) and 17 (Judas Swing) were archived on v2026-11-03 / v2026-11-04** and live under `src/engine/scenarios/archive/legacy_smc/` — both fail boot validation. The archived modules still compile and their test suites still run (`tests/scenarios/archive/`), so the designs remain available for future revival.
+> **Scenario 13 is ARCHIVED** (v2026-10-23) under `src/engine/scenarios/archive/`. S15 is a separate Classic strategy. **Scenarios 16 (ATR Exhaustion) and 17 (Judas Swing)** were archived on 2026-11-03 and 2026-11-04 under `archive/legacy_smc/`. Archived IDs fail boot validation in both global and per-symbol lists; their modules and tests remain available.
 
 ### 1.3 Deployment Strategy (Sub-accounts)
 
@@ -74,7 +74,7 @@ To run V4 Classic and V5 Sniper simultaneously, **complete infrastructure separa
 - State corruption from shared `StrategyEngine` instances
 - DB conflicts from concurrent `trades` table writes
 
-**Deployment Pattern**: Two services from the same Docker image, each with its own frozen profile file. Both profiles are **secret-free**: credentials are injected by the platform (Render dashboard, Docker `env_file` chain, systemd `EnvironmentFile`) and `loadConfig()` hard-fails when any of the six is missing. The tracked templates are `.env.subaru.example` and `.env.emilia.example`; the local `.env.subaru` / `.env.emilia` are gitignored copies kept byte-identical.
+**Deployment Pattern**: Two services from the same Docker image, each with its own frozen profile file. The tracked templates `.env.subaru.example` and `.env.emilia.example` and their gitignored twins are secret-free. Inject live credentials separately through the deployment platform. `loadConfig()` requires the Bybit key pair; provide `DATABASE_URL` for PostgreSQL persistence, the Telegram token and chat ID for operator messaging, and `BACKUP_PASSWORD` for encrypted backups.
 
 ```bash
 # V4 Classic Subaru (.env.subaru) — BTCUSDT, Scenarios 14 + 15, 4H ADX gate ON
@@ -141,14 +141,14 @@ USE_LOCAL_CACHE_ONLY=true
 ENABLE_FUNDING_MONITOR=false
 ```
 
-The local `.env` mirrors `.env.emilia` for every non-secret strategy value; only the credentials block differs.
+The checked-in `.env.emilia.example` and `.env.subaru.example` are the reference deployment profiles. The ignored `.env` is local configuration and can differ for experiments.
 
 **Profile invariants**:
 1. Never copy a secret into `.env.subaru` / `.env.emilia` — they are templates, and the repo convention is that only the `.example` copies are tracked (`.env` and `.env.*` are gitignored). Keep each local profile byte-identical to its tracked `.example` twin.
 2. Never let a Classic deployment carry S12-only knobs (`MIN_NET_RR`, `MIN_VOLATILITY_FEE_RATIO`, `MIN_TP_DISTANCE_PCT`, `S12_*`, `SNIPER_*`). They are evaluated **only** inside Scenario 12, so listing them in a Classic profile is dead configuration that reads as protection (§7.13.5).
 3. `SNIPER_LIMIT_EXPIRATION_CANDLES_<SYMBOL>` is resolved through `resolveLimitExpirationCandles()`; confirm the resolved minutes in the run log rather than trusting the file (§7.13.3).
 4. `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` + `MIN_NET_RR_NEARUSDT=1.0` is the **audited** NEAR calibration (§7.23). **Both** knobs are required: the volatility gate alone measures +14.87%, the pair together +22.40%. They exist so the global `1.5` shields keep covering any future pair while NEAR trades at the settings the 180-day endurance run actually validated. A per-symbol override is the only sanctioned way to relax a P0 shield for one pair — never lower the global.
-5. The 4H ADX gate is enabled **only** in `.env.subaru`, where it was measured (BTCUSDT, S14 + S15). It is `false` in the Sniper profile because S12 is the only producer and the gate is never consulted (§7.24, Invariant 62).
+5. The ADX gate is enabled **only** in the Subaru profile, where it was measured on BTCUSDT at 15m/4H. It is `false` in Emilia; explicitly enabling it would gate S12 in TREND (§7.24, Invariant 62).
 6. APTUSDT is **not** in `SYMBOLS` in either profile. Its grid-search cell (`SMC_SL_ATR_OFFSET_APTUSDT=0.60`, `SNIPER_LIMIT_EXPIRATION_CANDLES_APTUSDT=25`) survives only as a commented future-pair note in `.env.emilia.example` and `.env.example`.
 
 ---
@@ -164,6 +164,7 @@ src/
 │   ├── run.ts             # CLI entry, multi-symbol, BACKTEST_DAYS window
 │   ├── executionSimulator.ts  # State machine: SCANNING→IN_TRADE→CLOSED
 │   ├── historyLoader.ts   # Bybit pagination + local JSON cache
+│   ├── calendarMacro.ts   # Closed LTF trading-day and ISO-week aggregation
 │   ├── csvLoader.ts       # Offline CSV loader (Dukascopy/non-Bybit assets)
 │   ├── offlineInstruments.ts  # tickSize/qtyStep specs for CSV-only symbols
 │   └── reporter.ts        # PnL report generation + HTML artifacts
@@ -172,27 +173,45 @@ src/
 │   ├── healthcheck.ts     # Express /health for Render
 │   └── reconciliation.ts  # 10-min audit loop + hourly clock sync
 ├── config/
-│   └── env.ts             # Zod-like validation, all .env parsed here
+│   ├── env.ts             # Environment parsing, validation and interval normalization
+│   └── fees.ts            # Fee constants and shared Market/Limit decision
 ├── db/
 │   └── database.ts        # pg.Pool, NUMERIC(24,8), connection leak proof
+├── dn_arbitrage/          # Separate delta-neutral funding research
+│   ├── backtest/
+│   │   ├── fundingSimulator.ts
+│   │   └── run.ts
+│   ├── data/
+│   │   └── fundingFetcher.ts
+│   ├── config.ts
+│   └── types.ts
 ├── engine/           # Strategy orchestration
 │   ├── strategyEngine.ts  # State machine per symbol
 │   ├── scenarioRegistry.ts # Single source of truth for registered scenario ids
-│   ├── scenarioRouter.ts  # Evaluates 5 registered scenarios, 4H ADX gate, mitigation filters
+│   ├── scenarioRouter.ts  # Registered scenarios, configured-HTF ADX gate, mitigation filters
 │   ├── pendingTradeManager.ts  # Manual approval queue + Slippage Guard
 │   ├── baseScenario.ts    # Shared calculateLevels() — single SL source of truth
 │   ├── tpResolver.ts      # Brain Module 3: structural TP resolution (major/minor)
 │   ├── brain/
-│   │   ├── htfRoadmap.ts      # Brain Module 1: 4H range, bias, primary target
+│   │   ├── htfRoadmap.ts      # Configured-HTF range, bias and primary target
 │   │   └── volumeExhaustion.ts # Brain Module 2: 15m pullback exhaustion + reaction
 │   ├── quant/
-│   │   ├── adx.ts             # Wilder ADX(14) for the 4H regime gate
-│   │   └── volatilitySqueeze.ts # BB/KC compression detector (Scenario 15)
-│   └── scenarios/         # S1, S5, S12, S14, S15 + archive/ (legacy SMC, S13, S16, S17)
+│   │   ├── adx.ts
+│   │   ├── regimeClassifier.ts
+│   │   ├── volatilitySqueeze.ts
+│   │   ├── volumeProfile.ts
+│   │   └── vwap.ts
+│   └── scenarios/
+│       ├── Scenario1_HTFContinuation.ts
+│       ├── Scenario5_HTFLiquiditySweep.ts
+│       ├── Scenario12_SniperTouch.ts
+│       ├── Scenario14_QuantAlpha.ts
+│       ├── Scenario15_VolatilitySqueeze.ts
+│       └── archive/       # S13 and legacy SMC designs (see §8 for IDs and locations)
 ├── execution/
 │   └── executionEngine.ts # Market order + TP/SL placement
 ├── feed/
-│   └── candleFeed.ts      # 15m/4H buffers, live price from forming candle
+│   └── candleFeed.ts      # Configured buffers; preloads only closed candles
 ├── risk/
 │   ├── riskManager.ts     # Position sizing, Drawdown Guard, minOrderQty
 │   └── tradeManager.ts    # Adaptive Fractioning logic (partial close, SL trailing)
@@ -201,18 +220,21 @@ src/
 │   ├── newsService.ts     # News Embargo filter (FXMacroData API)
 │   └── fundingMonitorService.ts  # Delta-neutral funding rate monitor
 ├── smc/
-│   └── patternRecognizer.ts  # SMC core: swings, OB, FVG, SMS, ranges, macro
+│   ├── patternRecognizer.ts # Swings, OB, FVG, SMS, ranges, macro
+│   └── smc.ts               # Standalone SMC primitives
 ├── telegram/
 │   └── notifier.ts        # Security middleware, commands, DI
 ├── utils/
 │   ├── logger.ts          # winston wrapper, LOG_LEVEL aware
-│   └── precision.ts       # tickSize/qtyStep rounding
+│   ├── precision.ts       # tickSize/qtyStep rounding
+│   └── timeframe.ts       # Canonical interval lengths, close times and HTF classification
 ├── types.ts               # All domain types, StrategyState enum
 └── index.ts               # Bootstrap: DI, WS, Reconciliation, Macro refresher
 
 scripts/
 ├── matrix_tester.ts       # Multi-symbol backtest matrix → Markdown report
 ├── funding_history_analyzer.ts  # Funding-rate history export / analysis
+├── oracle-keepalive.sh    # Legacy Oracle host utility, outside the worker runtime
 ├── screener.ts            # Symbol screener
 └── decrypt_backup.ts      # /backup archive decryption helper
 ```
@@ -1240,28 +1262,14 @@ public calculateLevels(
 
 | Component | Detail |
 |-----------|--------|
-| **LTF/HTF Timeframes** | Read from `config.ltfTimeframe` / `config.htfTimeframe` (strings like '5', '15', '60') |
-| **History Window** | `getTimeRangeForDays(config.backtestDays)` (`BACKTEST_DAYS`, default 60) — single source of truth for 1m, LTF and HTF loaders. **No hardcoded 180 / "six months".** |
+| **LTF/HTF Timeframes** | Read from `config.ltfTimeframe` / `config.htfTimeframe` (e.g. `15`, `60`, `240`, `D`) |
+| **History Window** | `getTimeRangeForDays(config.backtestDays)` (`BACKTEST_DAYS`, default 60) defines the requested Bybit trading window; LTF/HTF loads can begin earlier for context-only warmup. CSV runs use the file's period. |
 | **Cache Filenames** | Dynamic: `BTCUSDT_5.json`, `BTCUSDT_15.json` (includes timeframe) |
-| **Dynamic Timeframes in API** | `config.ltfTimeframe as Timeframe` / `config.htfTimeframe as Timeframe` |
+| **Dynamic Timeframes in API** | Load canonical Bybit intervals from config; use `timeframeToMinutes()` and `candleCloseTime()` for arithmetic. |
 | **Cache Key** | `getCachePath(symbol, timeframe)` uses timeframe in filename |
 | **ScenarioRouter** | Receives LTF/HTF candle arrays + candleTimestamp; no hardcoded '15'/'240' |
 
-**Removed Hardcoded Values:**
-- ❌ `'15'` / `'240'` strings everywhere
-- ❌ `17280` fixed candle count (180 days × 96 candles/day for 15m)
-- ❌ `SIX_MONTHS_MS = 6 * 30 * 24 * 60 * 60 * 1000` / `getTimeRangeForSixMonths()` — replaced by `getTimeRangeForDays(config.backtestDays)`
-- ❌ `'15'` in cache filenames (`BTCUSDT_15.json`)
-- ❌ Hardcoded '15m' / '4H' strings in log messages
-
-**Added Dynamic Calculations:**
-- ✅ `getTimeRangeForDays(days)` (`historyLoader.ts`) — validates `days > 0` and returns `{ fromMs, toMs }`
-- ✅ `run.ts` logs `[Backtest Range] BACKTEST_DAYS=N → <from> - <to>` before loading
-- ✅ All loaders (`candles1m`, `candlesLtf`, `candlesHtf`) receive the same `fromMs`/`toMs` window
-- ✅ Cache filename: `getCachePath(symbol, timeframe)` → `BTCUSDT_5.json` / `BTCUSDT_60.json`
-- ✅ Dynamic log: `[SYMBOL] Starting backtest loop over 51840 5m candles...`
-- ✅ Progress: `candle ${i}/${candlesLtf.length} (${((i / candlesLtf.length) * 100).toFixed(1)}%)`
-- ✅ `runBacktestForSymbol` receives `ltfMinutes` parameter for dynamic calculations
+`run.ts` logs the requested range before loading. Actual coverage depends on available closed candles; see §7.26 for warmup and §7.27 for measured coverage.
 
 ### 7.7.1 Offline Cache Mode (`USE_LOCAL_CACHE_ONLY`) — **NEW v2026-10-07**
 
@@ -1294,7 +1302,7 @@ loadCachedOrFetch(client, symbol, timeframe, fromMs, toMs, config.useLocalCacheO
 
 **Behavior**:
 - **`USE_LOCAL_CACHE_ONLY=false` (default)**: Normal operation — fetch from Bybit if cache miss, update cache
-- **`USE_LOCAL_CACHE_ONLY=true`**: **Zero network calls** — loads strictly from local `.json` cache files; throws if cache missing
+- **`USE_LOCAL_CACHE_ONLY=true`**: Loads candles strictly from local `.json` cache files; throws if a cache is missing. The Bybit backtest still requests instrument metadata. CSV mode uses synthetic metadata and skips exchange calls.
 
 **Use Cases**:
 - CI/CD pipelines without API access
@@ -1373,74 +1381,11 @@ loadCachedOrFetch(client, symbol, timeframe, fromMs, toMs, config.useLocalCacheO
 
 ---
 
-### 7.10 Dynamic Macro Context in Backtester — **Lookahead Bias Elimination** — `src/backtest/run.ts` — **NEW v2026-09-20**
+### 7.10 Dynamic Macro Context in Backtester — Lookahead Bias Elimination
 
-**Problem**: `initializeMacroContext()` was called once before backtest loop, loading daily levels (PDH/PDL, PWH/PWL) from the **end of history** (e.g., September 2026). During simulation of March–August 2026, the bot incorrectly used future levels — causing Scenarios 5, 7, 8, 9 to miss valid sweeps.
+The original backtester seeded macro levels from the end of the history, exposing future prices to early entries. The first fix calculated levels in the loop; the current implementation, `CalendarMacro` (§7.26), groups closed LTF bars by UTC trading day and ISO week.
 
-**Solution**: Dynamic macro context updated on-the-fly during simulation, strictly using only data available up to the current candle.
-
-**Implementation in `runBacktestForSymbol()`**:
-
-```typescript
-// Dynamic macro context tracking (no lookahead bias)
-let currentDayUtc = -1;
-let currentWeekUtc = -1;
-let runningAth = new Decimal(0);
-let runningAtl = new Decimal('Infinity');
-
-for (let i = 0; i < candlesLtf.length; i++) {
-  const candle = candlesLtf[i];
-  const candleDate = new Date(candle.timestamp);
-  const candleDay = candleDate.getUTCDate();
-  const candleWeek = Math.floor(candleTime / (7 * 24 * 60 * 60 * 1000));
-
-  // Update running ATH/ATL with current candle (historical data only)
-  if (new Decimal(candle.high).gt(runningAth)) runningAth = new Decimal(candle.high);
-  if (new Decimal(candle.low).lt(runningAtl)) runningAtl = new Decimal(candle.low);
-
-  // Check for new day (00:00 UTC boundary)
-  if (candleDay !== currentDayUtc) {
-    currentDayUtc = candleDay;
-
-    // Calculate yesterday's PDH/PDL from CLOSED candles BEFORE current candle
-    const yesterdayCandles = candlesLtf.slice(Math.max(0, i - 96), i); // 96 = 24h/15m
-    if (yesterdayCandles.length > 0) {
-      const pdh = Decimal.max(...yesterdayCandles.map(c => new Decimal(c.high)));
-      const pdl = Decimal.min(...yesterdayCandles.map(c => new Decimal(c.low)));
-      const doPrice = new Decimal(candle.open);
-
-      // Calculate weekly levels if new week (Monday)
-      let pwh = runningAth, pwl = runningAtl, wo = doPrice;
-      if (candleWeek !== currentWeekUtc) {
-        currentWeekUtc = candleWeek;
-        const lastWeekCandles = candlesLtf.slice(Math.max(0, i - 96 * 7), i);
-        if (lastWeekCandles.length > 0) {
-          pwh = Decimal.max(...lastWeekCandles.map(c => new Decimal(c.high)));
-          pwl = Decimal.min(...lastWeekCandles.map(c => new Decimal(c.low)));
-        }
-      }
-
-      // Atomic update — no lookahead!
-      recognizer.setMacroContext(symbol, {
-        ath: runningAth,
-        atl: runningAtl,
-        weeklyLevels: { pwh, pwl, wo },
-        dailyLevels: { pdh, pdl, do: doPrice },
-        liquidityPools: [/* PDH, PDL, PWH, PWL as pools */],
-      });
-    }
-  }
-  // ... rest of simulation loop
-}
-```
-
-**Key points**:
-- ❌ **Removed**: All `initializeMacroContext()` calls before backtest loop (both CSV and online modes)
-- ✅ **Added**: `PatternRecognizer.setMacroContext()` / `getMacroContext()` for atomic cache updates
-- ✅ **Sliding windows**: 96 candles (15m) = 24h for daily; 96×7 = 1 week for weekly
-- ✅ **Strict causality**: Only uses `candlesLtf.slice(0, i)` — data strictly before current candle
-- ✅ **Per-symbol scenarios**: `config.symbolScenarios.get(symbol)` fallback to global `ACTIVE_SCENARIOS` now respected in backtester
-- ✅ **Full rejection stats**: All 8 scenarios (2,4,5,7,8,9,10,11) logged in both modes
+In Bybit and CSV modes, `runBacktestForSymbol()` advances LTF and HTF pointers only through bars whose close time is at or before the execution bar's close. It publishes prior-period levels at UTC day rollover and invalidates cached pattern data on LTF/HTF closes or UTC hour changes (session boundaries). DO/WO can use the known open of a forming LTF bar or the execution bar's open before the first LTF close. See Invariants 13 and 64.
 
 ---
 
@@ -1821,34 +1766,7 @@ mitigatedZones: zoneDetails ? [...state.mitigatedZones, {
 
 **Problem**: Cooldown (4h) was applied after ALL trades (wins and losses), blocking valid trend continuation. Also, the cooldown was hardcoded to 15-minute timeframe (`16 * 15 * 60 * 1000`), breaking when `LTF_TIMEFRAME` changed.
 
-**Fix**: Cooldown ONLY after LOSS (revenge trading protection). After WIN → no cooldown. Cooldown duration is now fully dynamic: `COOLDOWN_CANDLES × LTF_TIMEFRAME` minutes. **Additionally, cooldown is now triggered not only on WS position close but also when a trade is closed via ReconciliationLoop (`reconcile()` / `reconcileWithTrade()`) with a negative PnL.**
-
-```typescript
-// executionSimulator.ts (backtest)
-const ltfMinutes = Number(config.ltfTimeframe);
-const cooldownMs = config.cooldownCandles * ltfMinutes * 60 * 1000;
-cooldownUntil: netPnl.lt(0) ? candle.timestamp + cooldownMs : 0;
-
-// strategyEngine.ts (live) — on WS position close
-if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-  const ltfMinutes = Number(this.deps.config.ltfTimeframe);
-  const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
-  this.cooldownUntil = Date.now() + cooldownMs;
-  const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
-  logger.info(`[${this.symbol}] Cooldown active after stop-loss. Skipping scan for ${cooldownHours}h.`);
-}
-
-// strategyEngine.ts (live) — on ReconciliationLoop close (reconcile / reconcileWithTrade)
-if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-  const ltfMinutes = Number(this.deps.config.ltfTimeframe);
-  const cooldownMs = this.deps.config.cooldownCandles * ltfMinutes * 60 * 1000;
-  this.cooldownUntil = Date.now() + cooldownMs;
-  const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
-  logger.info(`[${this.symbol}] Cooldown activated via reconciliation for ${cooldownHours}h (until ${new Date(this.cooldownUntil).toISOString()}).`);
-}
-```
-
-**Rule**: Cooldown = `COOLDOWN_CANDLES` candles (default 16) ONLY after LOSS. WIN = no cooldown, ride the trend. Triggered by WS position close, ReconciliationLoop, or `reconcileWithTrade()`.
+**Rule**: A net loss triggers a cooldown of `COOLDOWN_CANDLES` (default 16) in the execution interval: 1m for Sniper, configured LTF for Classic. The live engine and backtester use `timeframeToMinutes()` for Classic; live cooldown applies to both WebSocket and reconciliation closes.
 
 ### 7.18 Backtest Report Enhancements — **NEW v2026-09-24**
 
@@ -2185,7 +2103,7 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 
 ---
 
-### 7.24 Regime Filter — 4H ADX Gate (opt-in) — **NEW v2026-11-08**
+### 7.24 Regime Filter — Configured-HTF ADX Gate (opt-in)
 
 **Premise**: the annual audit (§7.23) showed the Classic engine's result is dominated by *when* a trend existed, not by entry geometry. A 15m sweep (S5) fades the prevailing move, a Donchian breakout (S14) follows it; each is structurally wrong in the other regime. The filter blocks that mismatch **before** a scenario is evaluated.
 
@@ -2193,7 +2111,7 @@ A 60-day control reproduces the documented baseline (+28.49%, 10 trades, PF 6.19
 | --- | --- |
 | **Module** | `src/engine/quant/adx.ts` — `calculateADX(candles, period = 14): Decimal \| null`, Wilder smoothing (RMA seed = SMA(period), then `prev − prev/period + current`), DX, ADX seed = SMA of the first `period` DX values, then Wilder. |
 | **Minimum history** | `2 × period` candles. Shorter → `null` and the gate **fails open** (the run degrades to the unfiltered baseline, never to a blocked process). |
-| **Classification** | One reading per router pass, on `patternData.candles4h` (closed 4H bars only). `ADX >= REGIME_ADX_THRESHOLD` → **TREND**; otherwise **RANGE**. |
+| **Classification** | One reading per router pass, on `patternData.candles4h` (closed configured-HTF bars; 4H in Subaru). `ADX >= REGIME_ADX_THRESHOLD` → **TREND**; otherwise **RANGE**. |
 | **Gate** | TREND blocks counter-trend sweeps (**S5, S12**). RANGE blocks trend breakouts (**S14**). S1 and S15 carry their own macro conditions and are **never** gated. |
 | **Config** | `ENABLE_REGIME_FILTER` (default `false`), `REGIME_ADX_THRESHOLD` (default `25`, `Decimal`, must be `<= 100`). Both are **optional** on `BotConfig` so hand-built literals keep compiling; absent means disabled. |
 | **Observability** | `ScenarioRouter.getRegimeFilterStats()` → `RegimeFilterStats` with `evaluations`, `trend`, `range`, `insufficientHistory`, `blockedCounterTrend`, `blockedTrendBreakout` and the total `regimeFilter`. Printed in `📊 SCENARIO REJECTION STATS`; when everything is blocked the pass reason becomes `Regime filter (4H ADX …)` instead of the misleading `No scenario matched`. |
@@ -2226,7 +2144,7 @@ Filtered arm: 30.38% WR, $1,653.59 fees, **0/7 symbols cleared the alpha gate** 
 
 **BTC attribution** (filter → control): S14 70 → 38 trades (+$60 → +$94), S5 17 → 10 (−$196 → −$170), S15 71 → 75 (+$293 → +$360). The advantage is fewer, better-aligned S14 entries — not a higher per-trade edge. Over Jun–Sep the control arm beat the filtered arm on BTC (+$369.73 vs +$270.57); the annual advantage comes from the other months. SOL's Jun–Sep window improved with the filter (−$22.06 → −$11.88).
 
-**Disposition**: shipped **enabled only in `.env.subaru`** (BTCUSDT, S14 + S15) — the profile where it was measured. `false` in `.env` / `.env.emilia`, where S12 is the only producer and never consults the gate. Artifacts: `data/Matrix_Report.md`, `data/control_6r/`.
+**Disposition**: shipped **enabled only in `.env.subaru`** (BTCUSDT, S14 + S15) — the profile where it was measured. The Emilia profile disables the gate; enabling it would block S12 in TREND. Artifacts: `data/Matrix_Report.md`, `data/control_6r/`.
 
 ---
 
@@ -2334,17 +2252,72 @@ S14 is the only near-survivor: 29 trades at essentially break-even (−$3.84), c
 
 ---
 
+### 7.26 Core Math Hardening & Multi-Timeframe Unlock (v2026-11-28)
+
+Phases 1–2 changed the inputs the strategies are allowed to act on and removed the 15m/4H assumption from the live and historical paths. The checked-in deployment profiles still select their original intervals.
+
+| Area | Current contract |
+| --- | --- |
+| **ATR and displacement** | `calculateATR()` in `src/smc/patternRecognizer.ts` is shared by the recognizer and S12. It averages true ranges, including gaps to the previous close. Insufficient history returns zero; structure breaks and SMS reject non-finite or non-positive ATR before testing displacement or dividing by ATR. |
+| **Liquidity consumption** | `isTaken` records a strict historical high/low pierce: BSL/SSL after the source swing, EQH/EQL after the last confirming swing, and PDH/PDL or PWH/PWL within the active UTC day or ISO week respectively. The trigger bar is excluded; macro and HTF swing checks exclude the last HTF bar and use prior LTF bars for the safe part of that interval. Classic and structural target resolution use the evaluated pools. `macroContext` keeps its untouched anchors for S12's independent 50-minute sweep search. |
+| **Zone mitigation** | FVGs form on `c3`; OBs form on the confirming break. After formation and before the last bar of the source series, an invalidating close beyond the far edge or a single wick covering both edges marks a zone `mitigated`. Partial touches and the formation/trigger bars do not consume it. This market-data flag is separate from the engine's trade-based mitigation lists. |
+| **Structure extraction** | EQH/EQL cluster confirmed swings within `max(0.1%, 0.5 × ATR / close)` using midpoint-normalized price distance. The first touch sets the level; at least two swings confirm it, independent of the Bollinger squeeze used for trading-range detection. OB origin search is bounded to the 15 bars before the break. Breaker matching requires `swing.index < i`; SMS waits three bars after the failure swing. |
+| **Classic scenarios** | S1/S5/S14/S15 accept configured LTFs of at least 5 minutes in Classic mode. S1's causality window is `max(4h, 4 × LTF)` and FVG completion uses the configured LTF duration. S14 gives `tpResolver` a dynamic floor of `max(DYNAMIC_TP_MIN_RR, 2.5)` and emits only a `BOS` trigger for mitigation. S15 requires the triggering close to clear the upper or lower Bollinger band in the direction of the regression slope; a miss is counted as `noBreakout`. |
+| **Intervals and clocks** | `src/utils/timeframe.ts` supplies interval minutes, labels and close times (monthly bars close at the next UTC month), plus major-target classification at the configured HTF threshold; `D/W/M` are always major. `loadConfig()` normalizes `1440 → D` and `10080 → W`. WebSocket subscriptions use the unique configured LTF/HTF and add `1` in Sniper mode. Recognition tags, target filters, cooldown and limit-expiry durations follow the configured intervals. `PatternData.candles15m`/`candles4h` and `atr15m`/`atr4h` retain historical names for the configured LTF/HTF. |
+| **Calendar and warmup** | `CalendarMacro` advances on closed LTF bars and snapshots against the execution bar's UTC period. PDH/PDL use the preceding trading day with data (Friday for Monday after a weekend gap); PWH/PWL require the immediately preceding ISO week, with Monday 00:00 UTC rollover. DO/WO use the first available open of the new period. Bybit LTF warmup covers the configured history, at least a weekly span plus a bar, and the LTF equivalent of 20 HTF bars; the fetch also reaches the start of the prior ISO week. Pre-window candles supply context only. CSV mode validates history sufficiency against the configured intervals and excludes HTF buckets extending past the source closes. |
+
+**QA.** `tests/patternLifecycle.test.ts` exercises zero/negative ATR, SMS confirmation, first-touch EQH/EQL, post-formation mitigation and immutable macro anchors. `tests/scenarios/scenario1_htf_continuation.test.ts` rejects non-finite displacement. `tests/backtest/calendarMacro.test.ts` covers Friday→Monday, ISO week-year rollover and missing prior weeks; `tests/config/classicTimeframes.test.ts` and `tests/backtestSynchronization.test.ts` cover the configured intervals and closed-bar alignment. Independent numerical check: a Python `Decimal` Wilder ADX(14) implementation at 60-digit working precision matched `calculateADX()` after rounding to **18 significant digits** on three prefixes of the same BTCUSDT 4H series starting 2026-10-01 00:00 UTC. The reference used the engine's SMA seed for TR/DM, then `previous − previous / period + observation`; the check verifies that convention on these inputs.
+
+| Closed bars | Last bar open (UTC) | ADX(14), 18 significant digits |
+| ---: | --- | ---: |
+| 28 | 2026-10-05 12:00 | 51.6955427209401072 |
+| 80 | 2026-10-14 04:00 | 20.4280200972897548 |
+| 200 | 2026-11-03 04:00 | 25.3779175595874401 |
+
+### 7.27 Phase 3 Verification — Multi-TF Crypto & 2-Year COMEX Gold (GC=F)
+
+**Bybit crypto.** Each run starts at $1,000 with dynamic targets, ADX off and killzones bypassed. BTC Classic enables `1,5,14,15`; NEAR uses S12 with 1m execution, 15m/4H context, both intraday sweep sources, and its `1.0` volatility and net-R overrides. All expected closed Bybit bars in the requested windows were present.
+
+| Run | Market / intervals | UTC period | Net PnL | Trades (W/L) | Win rate | PF | Max DD | Fees |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1A | BTCUSDT 15m/4H | 2025-11-28 → 2026-11-28 (365d) | −$255.47 (−25.55%) | 199 (63/136) | 31.66% | 0.86 | 37.56% | $420.77 |
+| 1B | BTCUSDT 1H/4H | 2025-11-28 → 2026-11-28 (365d) | −$162.39 (−16.24%) | 96 (26/70) | 27.08% | 0.85 | 23.98% | $145.38 |
+| 1C | BTCUSDT 4H/1D | 2024-11-28 → 2026-11-28 (730d) | −$202.91 (−20.29%) | 59 (15/44) | 25.42% | 0.65 | 20.87% | $58.40 |
+| 2 | NEARUSDT S12 · 1m | 2026-06-01 → 2026-11-28 (180d) | −$47.19 (−4.72%) | 24 (11/13) | 45.83% | 0.82 | 12.21% | $166.68 |
+
+S5 closed **37 / 38 / 41** BTC trades (−$161.28 / −$76.13 / −$165.65); S14 closed **108 / 48 / 16** (−$146.85 / +$55.84 / −$14.49). S15 counted **278 / 46 / 23** `noBreakout` rejections. On NEAR, of 57,032 passes finding a sweep, 44,598 had `noChoch` and 8,906 failed `insufficientVolatility`; 53 signals produced 24 closed trades. The earlier BTC 15m report with ADX off (`data/control_6r/Backtest_Report_BTCUSDT.txt`, +15.69%, 158 trades) covers **2025-11-08 → 2026-11-08**, 20 days earlier, and logs killzone rejections. NEAR's October endurance result also used a different window and entry configuration. Neither is a controlled before/after comparison of the core changes.
+
+**Dukascopy spot controls.** The attempted three-year XAUUSD download was blocked (HTTP 403/429). The fallback reused the 183-day bid-candle sample from §7.25, **2026-05-20 → 2026-11-18**, aggregated from local 15m bars. ADX was off; both runs used the registered Classic set. Timeframe and killzone settings both differ, so these controls do not isolate either variable.
+
+| Run | Intervals | Killzones | Net PnL | Trades (W/L) | Win rate | PF | Max DD | Fees |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3A-short | 1H/4H | On | +$103.99 (+10.40%) | 20 (7/13) | 35.00% | 1.44 | 8.00% | $49.93 |
+| 3B-short | 4H/1D | Off | +$20.58 (+2.06%) | 8 (3/5) | 37.50% | 1.19 | 6.30% | $15.51 |
+
+**Yahoo Finance COMEX futures.** Requested 725 days of hourly continuous `GC=F`; the report covers **2024-12-03 → 2026-11-27 (724 days)**. Of 14,420 source rows, 11,413 were valid, 3,006 failed timestamp/OHLC validation and one was outside the request. There were **412 zero-volume rows (3.61%)** and no null volume imputation. The loader uses the offline `XAUUSD` instrument spec (`tickSize=0.01`, `qtyStep=0.01`, `minOrderQty=0.01`, `maxOrderQty=1000`) with the simulator's maker/taker fee model; this is a continuous futures dataset, distinct from the Dukascopy spot controls. All arms used 1H/4H, $1,000 starting balance, 2% base risk, 1.5–6.0 configured dynamic R:R bounds, and ADX off.
+
+| Arm | Scenarios | Net PnL | Trades (W/L) | Win rate | PF | Max DD | Fees | Profitable months |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A and B | S14, killzone toggle A/B | +$431.41 (+43.14%) | 74 (36/38) | 48.65% | 1.58 | 21.54% | $180.95 | 13/24 |
+| C | S1/S5/S14/S15, killzones on | +$470.85 (+47.08%) | 86 (40/46) | 46.51% | 1.54 | 22.12% | $245.50 | 13/24 |
+
+A and B produced byte-identical text reports and HTML charts because S14 does not consult `ENFORCE_KILLZONES`. In C the switch applies to S1/S5; S14/S15 are independent of it. C's closed-trade attribution: **S14 68 / +$506.08**, **S5 15 / −$79.35**, **S15 3 / +$44.11**, **S1 0**. By UTC exit month, C lost **$122.40 on 44 trades** through December 2025 (including December 2024), then earned **$377.42 on 21 trades** in January–June 2026 and **$215.82 on 21 trades** in July–November 2026. Monthly figures are rounded; the split describes where the returns occurred, without establishing why the regime changed.
+
+**Evidence:** `data/phase3/metrics-and-funnels.txt` has the exact Bybit candle counts, Dukascopy controls and per-run funnels; `data/yahoo-gold/dataset.log` has the source validation, and `data/yahoo-gold/{A,B,C}/` contains the reports, charts and logs. These are local, ignored artifacts. The Gold runs measure simulated execution with synthetic sizing and fees; they do not establish live profitability.
+
+---
+
 ## 8. THE SCENARIOS (1, 5, 12, 14, 15 REGISTERED) — `src/engine/scenarios/`
 
 **Live registry.** These five IDs are the only scenarios the router can construct and the only IDs accepted by `ACTIVE_SCENARIOS` / `SCENARIOS_<SYMBOL>`. `REGISTERED_SCENARIO_IDS` in `src/engine/scenarioRegistry.ts` is the single source of truth (imported by both the router and `src/config/env.ts`); any other id is a **hard boot error**, never a silent drop. `loadConfig()` additionally aborts when Scenario 12 is requested with `ENABLE_SNIPER_MODE=false`.
 
 | ID     | Name                | Mode          | Core Logic                                                 | Key Filters                                                                   |
 | ------ | ------------------- | ------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| **1**  | HTF Continuation    | 15m Classic   | Tested 4H OB → 15m CHoCH at/after the touch → 15m FVG at/after the CHoCH (both inside the 4h window) | 4H OB direction defines the side; 16-candle causality window; displacement + dynamic TP; `wrongMode` guard |
-| **5**  | HTF Liquidity Sweep | 15m Classic   | PDH/PDL/PWH/PWL/BSL/SSL sweep on the LAST CLOSED 15m candle: wick pierces the pool, close returns inside (SFP), entry at that close | Killzone + deterministic pool priority (`PDH > PDL > PWH > PWL > BSL > SSL`) + volume confirmation (`SMC_SWEEP_VOLUME_MULTIPLIER` × 20-candle SMA baseline) + wick stop with a `0.5 × atr15m` volatility buffer + structural TP (`skipMinorObstacles: true`) + fee-inclusive net R:R ≥ `DYNAMIC_TP_MIN_RR`; `wrongMode` guard |
-| **12** | Sniper Touch        | 1m Sniper     | 1m CHoCH after a PDH/PDL/PWH/PWL sweep, near its OB midpoint | Killzone (London/NY) + per-CHoCH sweep causality + proximity (1 ATR macro / 0.5 ATR intraday / 0.3% floor) + persistent 4H SMA50 trend (fail closed < 20 candles, POI exception) + P0 shields (`MIN_VOLATILITY_FEE_RATIO` ATR-to-fee admission, `MIN_NET_RR` fee-inclusive R:R) + fee-aware target floor (`MIN_TP_DISTANCE_PCT`, 0.35%) + 1m CHoCH + 1m OB entry |
-| **14** | Trend Following Alpha | 15m Classic | 15m Donchian breakout with volume confirmation | Classic mode; structural TP and ATR stop; `wrongMode` guard |
-| **15** | Volatility Compression Squeeze | 15m Classic | BB(20,2) fully inside KC(SMA20 ± 1.5×ATR20); first expansion after ≥5 compressed candles | 15m Classic only; regression-slope direction; KC-midline ±1.5×ATR stop; `tpResolver`; trigger candle burned by timestamp; `wrongMode` guard |
+| **1** | HTF Continuation | Classic | Tested HTF OB → LTF CHoCH → completed LTF FVG | OB direction defines the side; `max(4h, 4 × LTF)` causality window; displacement and dynamic TP |
+| **5** | HTF Liquidity Sweep | Classic | Last closed LTF candle pierces and closes back inside an untaken PDH/PDL/PWH/PWL/BSL/SSL pool | Killzone, pool priority and volume confirmation; ATR-buffered wick stop; structural TP and fee-inclusive net R:R floor |
+| **12** | Sniper Touch | 1m Sniper | 1m CHoCH after a macro or opt-in intraday sweep near its OB midpoint | Killzone, sweep causality and midpoint proximity; persistent HTF trend (20-bar minimum, opposing POI exception); volatility, net-R and TP-distance floors |
+| **14** | Trend Following Alpha | Classic | LTF Donchian breakout with volume confirmation | ATR stop; dynamic target floor `max(DYNAMIC_TP_MIN_RR, 2.5)`; `BOS` trigger |
+| **15** | Volatility Compression Squeeze | Classic | BB(20,2) inside KC(SMA20 ± 1.5×ATR20); first expansion after ≥5 compressed candles | Regression direction and directional Bollinger breakout; ATR stop and structural target |
 
 **Archived — not constructible, not tradeable:** 2 (FVG Fill), 3 (IDM), 4 (Mitigation Chain), 6 (SMS), 7 (AMD), 8 (Range Deviation), 9 (Turtle Soup), 10 (Breaker Block), 11 (Mitigation Block) live under `src/engine/scenarios/archive/legacy_smc/`; 13 (Top-Down Order Flow) lives under `src/engine/scenarios/archive/`; 16 (ATR Exhaustion Reversal) and 17 (Killzone Session Sweep / Judas Swing) also live under `archive/legacy_smc/` (both documented below). Their modules still compile and their suites still run, so the designs remain available for reference and possible revival — but no runtime path can schedule them, and their IDs fail validation.
 
@@ -2356,23 +2329,23 @@ S14 is the only near-survivor: 29 trades at essentially break-even (−$3.84), c
 
 ### 8.1 Scenario Overview
 
-`ScenarioRouter` constructs exactly five scenarios, in registry order: **1, 5, 12, 14, 15**. Scenario 12 is the only 1m producer and requires `ENABLE_SNIPER_MODE=true` — `loadConfig()` aborts the boot when `12` is requested with Sniper Mode off, and the router still rejects it with the `disabled` bucket as a defensive backstop. Scenarios 1, 5, 14 and 15 are Classic 15m entries and reject with the `wrongMode` bucket when Sniper Mode is active or `LTF_TIMEFRAME≠15`, so a stale 15m candle can never be re-scanned on 1m ticks. `ACTIVE_SCENARIOS` narrows the registry and can never add to it. Active implementations expose rejection statistics for observability.
+`ScenarioRouter` constructs exactly five scenarios, in registry order: **1, 5, 12, 14, 15**. Scenario 12 is the only 1m producer and requires `ENABLE_SNIPER_MODE=true`. Scenarios 1, 5, 14 and 15 evaluate confirmed LTF candles and report `wrongMode` in Sniper mode or with an LTF shorter than 5 minutes. S1/S5/S12 honor `ENFORCE_KILLZONES`; S14/S15 do not consult it. `ACTIVE_SCENARIOS` narrows the registry, and active implementations expose rejection statistics.
 
 ### 8.7 Scenario 15 — Volatility Compression Squeeze
 
 **Files**: `src/engine/quant/volatilitySqueeze.ts`, `src/engine/scenarios/Scenario15_VolatilitySqueeze.ts`.
 
-- Classic mode only: `ENABLE_SNIPER_MODE=false` and `LTF_TIMEFRAME=15`; the current closed candle is evaluated once per 15m router pass.
+- Classic mode only: `ENABLE_SNIPER_MODE=false`, LTF ≥ 5m; evaluates the current closed LTF candle.
 - Bollinger Bands use SMA(20) ± 2 population standard deviations. Keltner Channels use SMA(20) ± 1.5 × SMA(True Range, 20), including gaps to the prior close.
 - `isSqueezed` means both BB boundaries are inside the KC boundaries. `isFiring` is the first non-squeezed point after at least five consecutive squeezed evaluations.
-- Direction is the sign of the least-squares regression slope over the current 20 closes; zero slope fails closed. All calculations are causal and use `Decimal` for price-derived values.
+- Direction is the sign of the regression slope over the current 20 closes; zero slope fails closed. The firing close must be above the upper band for a long or below the lower band for a short (`noBreakout` otherwise). Price-derived values use `Decimal`.
 - Stop geometry is anchored to the Keltner midline and offset 1.5 × True Range ATR via `BaseScenario.calculateLevels()`. TP is resolved by `tpResolver` (dynamic structural target when enabled; otherwise the configured fixed-R fallback).
 - The trigger candle timestamp is emitted as `structureDetails` (no synthetic zone) so the live engine and backtester burn the exact consumed breakout and prevent duplicate entries.
 - Dedicated rejection counters are reset and printed per symbol by `src/backtest/reporter.ts`.
 
 ### S1 FVG Completion-Bar Timing
 
-**Scenario 1 uses the FVG completion bar, not the candle timestamp that `detectFVGs()` stamps.** `detectFVGs()` assigns the zone timestamp to `c1` (the first candle), while the three-bar FVG becomes complete only on `c3`. S1 therefore evaluates `timestamp + 2 × LTF spacing` as the completion time (the spacing is measured from the series, never assumed to be 15 minutes — Invariant 12). CHoCH/FVG causality means the completed FVG must exist at or after the CHoCH; the impulse FVG left behind by the CHoCH is valid because the break candle is `c3`, but a later FVG can only be used within the 4H causality window. Comparing raw `c1` timestamps would incorrectly exclude a valid same-CHoCH FVG or admit a gap that is not yet complete.
+**Scenario 1 uses the FVG completion bar.** `detectFVGs()` stamps the first candle (`c1`), but the gap exists after `c3` closes. S1 compares `timestamp + 2 × configured LTF duration` to the CHoCH bar timestamp. The impulse FVG is eligible when the break candle is `c3`; a later FVG must complete within `max(4h, 4 × LTF)`. See §7.26.
 
 > **Scenario 5 no longer uses FVG timing.** The Sweep → CHoCH → FVG chain was replaced by the volume-confirmed SFP (§8.8).
 
@@ -2523,7 +2496,7 @@ MATICUSDT was not evaluated (`insufficient-data` — Bybit retired the MATIC per
 
 - `mitigatedZones[]` in engine memory (max 100).
 - On trade close: `addMitigatedZone(zoneDetails)` → Router filters by `type/timeframe/direction/top/bottom` before `evaluate()`.
-- Scenarios setting `zoneDetails` in the live registry: **1, 14**. Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 5 never emits a zone for the same reason (its trigger is burned as a `SWEEP` structure); Scenario 15 emits `structureDetails` only and burns the trigger candle by timestamp. Archived scenarios (2–4, 6–11, 13, 16, 17) keep their historical tagging inside the archive.
+- Scenario **1** attaches `zoneDetails`. S5 emits a `SWEEP`, S14 emits a `BOS`, and S12/S15 emit their trigger structures without tagging a mitigation zone. Macro liquidity pools are never added to `mitigatedZones` (Invariant 21).
 
 ### 8.3 Contextual Quality Filters (Confluence) — **ARCHIVED SCENARIOS**
 
@@ -2570,7 +2543,7 @@ All three also expose `totalEvals` / `noData` / `killzone`, and report only the 
 **Removed legacy logic (v2026-10-26)**:
 - `validateSmsPattern()` returned a rejection **string** that the caller re-parsed with `includes()` to pick a stats bucket — a bucket could be mis-attributed by wording. The funnel now reports the stage directly.
 - The fixed `calculateLevels(..., rr = 3)` target, which restated the stop distance instead of consulting the market.
-- `!z.mitigated` as the only freshness guard: `Zone.mitigated` is always `false` from the recognizer, so it never filtered anything.
+- `!z.mitigated` as the only freshness guard: at the time the recognizer always returned `false`. The recognizer now computes historical mitigation (§7.26).
 
 **Key Invariants:**
 - `structures` and `zones` arrays are **not** guaranteed chronological for SMS (SMS entries are appended last) — always sort by timestamp before selecting
@@ -2600,7 +2573,7 @@ Inline math for stop-loss or take-profit (e.g., `zone.bottom - offset`) is stric
 #### 3. Mandatory Mitigation Tagging
 Every scenario MUST populate `structureDetails` in its `RouterResult` — the trigger structure (`CHoCH`/`BOS`/`SMS` with `{ type, timestamp, price, direction }`). This allows `burnSetup()` and the live execution engine to instantly burn the trigger structure upon entry or abort, preventing Ghost Signal loops across all 11 classic patterns.
 
-> **Why**: Structures without `structureDetails` are never added to `mitigatedStructures` — the same trigger CHoCH can be re-detected on the next scan, producing infinite ghost re-entries. Zones are additionally tagged via `zoneDetails` (live: Scenarios 1, 5 and 14; historically 1–8, 10, 11 in the archive). Scenario 12 never emits a zone because macro liquidity pools must never be burned (Invariant 21); Scenario 15 emits `structureDetails` only.
+> **Why**: `structureDetails` preserves the trigger timestamp so the next scan can filter it out. See §8.2 for the current zone and structure tags.
 
 ---
 
@@ -2816,7 +2789,7 @@ DYNAMIC_TP_MIN_RR=1.5              # structural target floor (R multiples)
 DYNAMIC_TP_MAX_RR=6.0              # hard cap on structural targets
 DYNAMIC_TP_REQUIRE_TARGET=false    # true = reject the setup when no structural target exists
 
-# Cooldown after SL hit (in LTF candles, default 16 = 4h for 15m timeframe)
+# Cooldown after a net loss (Classic LTF candles or Sniper 1m candles)
 COOLDOWN_CANDLES=16
 
 # SMC parameters
@@ -2882,7 +2855,8 @@ LOG_LEVEL=info                     # debug, info, warn, error
 
 ```bash
 npm run typecheck    # tsc --noEmit  (must pass)
-npm test             # jest (997 tests / 49 suites, all green)
+npm test             # 1,068 tests across 53 Jest suites
+npm run test:ci      # Same 1,068 tests; generates HTML test and coverage reports
 npm run build        # tsc → dist/
 npm run backtest     # Full backtest all symbols
 npm run backtest -- BTCUSDT  # Single symbol
@@ -2891,6 +2865,8 @@ npm run backtest -- BTCUSDT  # Single symbol
 docker build -t smc-bot .
 docker compose up -d
 ```
+
+Verified on Node.js 26: typecheck, build and both Jest runs pass. `tests/config/profiles.test.ts` passes; `isolatedModules: true` is set in `tsconfig.json`, and Jest emits no `TS151002` or ts-jest configuration warnings. `.github/workflows/ci.yml` runs the CI variant and publishes `gh-pages-report/` at the Pages root and `coverage/lcov-report/` under `/coverage/` on successful `main` pushes.
 
 ---
 
@@ -2906,17 +2882,17 @@ docker compose up -d
 | **Execution Physics** (pre-flight → fill → bookkeeping) | 6, 18, 23, 24, 29, 31, 33, 34, 38, 39, 47, 49, 52, 54, 61 |
 | **Exchange Truth & Reconciliation** | 7, 26, 27, 28, 35, 40, 53 |
 | **State Machine & Concurrency** | 6, 16, 23, 36, 37, 47, 49, 60 |
-| **Ghost Signals & Mitigation** | 4, 5, 14, 15, 19, 21, 25, 36, 39 |
-| **SMC Mathematics** | 2, 3, 11, 18, 51, 56, 57 |
+| **Ghost Signals & Mitigation** | 4, 5, 14, 15, 19, 21, 25, 36, 39, 65 |
+| **SMC Mathematics** | 2, 3, 11, 18, 51, 56, 57, 65 |
 | **Adaptive Fractioning** | 26, 41, 53, 55 |
-| **Backtester Fidelity** | 12, 13, 14, 15, 16, 17, 20, 42, 46, 48, 50 |
+| **Backtester Fidelity** | 12, 13, 14, 15, 16, 17, 20, 42, 46, 48, 50, 63, 64, 65 |
 | **Infrastructure & Observability** | 8, 9, 10, 22, 32, 43, 44, 45 |
 | **Regime & Entry Filters** | 22, 59, 62 |
 
 1. **No `number` for money** — only `Decimal` + string serialization.
 2. **Single `PatternRecognizer`** instance shared across all engines.
 3. **Macro context initialized ONCE** at bootstrap (live), **DYNAMICALLY UPDATED** in backtester — never static in hot path.
-4. **Zone and structure mitigation are the ONLY re-entry protection** — `mitigatedZones` burns consumed zones, `mitigatedStructures` burns consumed CHoCH/SMS/BOS triggers (timestamp-only matching). No "freshness" heuristics. Macro liquidity pools (Invariant 21) are the sole exception.
+4. **Trade-based re-entry protection uses zone and structure mitigation** — `mitigatedZones` burns associated zones and `mitigatedStructures` burns triggers by timestamp. Historical market-data eligibility (`isTaken`, `mitigated`) is computed independently under Invariant 65. Macro anchors are never burned (Invariant 21).
 5. **`reconcileWithTrade`** receives `zoneDetails` for mitigation tracking.
 6. **Slippage Guard evaluates at the live tick, in BOTH entry paths** (manual `handleApproval` + auto `executeStagedEntry`), applies to **Market orders only**, and is **directional** (Invariant 52). A signal-time price is never trusted for execution.
 7. **ClosedPnL** fetched after 2.5s delay on every close.
@@ -2925,7 +2901,7 @@ docker compose up -d
 10. **Daily clock sync** at 00:00 UTC + hourly in reconciliation.
 11. **SL calculation** uses `Decimal.min(zone.top, zone.bottom, entry)` for Longs and `Decimal.max(zone.top, zone.bottom, entry)` for Shorts — guarantees correct SL side regardless of zone top/bottom ordering.
 12. **Backtester is fully dynamic** — no hardcoded timeframes or candle counts; all derived from `config.ltfTimeframe` / `config.htfTimeframe`; cache filenames include timeframe.
-13. **Backtester macro context is dynamic** — no lookahead bias; PDH/PDL/PWH/PWL calculated from sliding windows of closed candles only.
+13. **Backtester macro context is dynamic** — derive PDH/PDL/PWH/PWL from chronologically closed bars grouped by UTC trading day and ISO week (Invariant 64).
 14. **Backtester mitigated structures tracked on ALL closes** — `mitigatedStructures` updated on both WIN and LOSS in `checkAndCloseTrade()`, preventing ghost signal re-entries.
 15. **Backtester mitigated zones burned on ENTRY** — zone added to `mitigatedZones` immediately in `openTrade()`, not on close.
 16. **Same-candle SL/TP resolution** — SL checked first; if both hit → `BOTH` = LOSS at SL price (conservative).
@@ -2933,7 +2909,7 @@ docker compose up -d
 18. **Hybrid Smart Entry** — `idealEntry` always from scenario geometry (zone equilibrium), never `candle.close`. Market vs Limit decision uses `SMART_ENTRY_THRESHOLD_PCT` (default 0.15%) against `|idealEntry - currentPrice| / idealEntry`.
 19. **Limit Order Cancellation** — ReconciliationLoop cancels Limit orders older than `resolveLimitExpirationMs(config)`: `LIMIT_EXPIRATION_CANDLES` in **LTF candles** for Classic, `SNIPER_LIMIT_EXPIRATION_CANDLES` in **1m candles** for Sniper (defaults 6 × 15m = 90 min vs 15 × 1m = 15 min). Both live and backtest resolve through the same helper. In the backtester the zone is burned on Limit **placement**, not on fill.
 20. **Backtester Limit Simulation** — State machine: SCANNING → PENDING (limitPrice, placedAt, candlesWaited) → IN_TRADE (on wick touch) OR CANCELLED (after the mode-resolved expiration count). Filled at exact `limitPrice`, not candle close.
-21. **Macro liquidity pools (PDH/PDL/PWH/PWL) are NEVER burned** — they may be swept multiple times. Adding them to `mitigatedZones` is forbidden. Spam protection works exclusively via burning 1m CHoCH structures via `mitigatedStructures`.
+21. **Macro liquidity pools (PDH/PDL/PWH/PWL) are NEVER burned** — adding them to `mitigatedZones` is forbidden. S12 can pair repeated sweeps with distinct 1m CHoCH triggers; Classic may mark a pool taken in its historical evaluation snapshot (Invariant 65).
 
 22. **DB Pool Safety** — All DB calls MUST use `const client = await pool.connect(); try {...} finally { client.release(); }`. Connection leaks are forbidden. Every method in `PostgresDatabase` follows this pattern.
 
@@ -3007,7 +2983,7 @@ docker compose up -d
 
 57. **Bidirectional Construction** — Every scenario MUST evaluate **both directions**. A scenario that only builds a long setup (or infers `side` from a label) is incomplete: the `direction` is derived from structure/geometry, the POI search runs for `BULLISH` and `BEARISH`, and `side = idealEntry.gt(SL) ? 'Buy' : 'Sell'` is decided at the RiskManager boundary (Invariant §16.5.3). Scenario 1 is the live reference implementation (the tested 4H OB decides the direction, then the identical CHoCH → FVG continuation funnel runs for the mirrored case); the archived Scenario 13 follows the same rule, and both suites lock the mirrored side.
 
-58. **Persistent 4H Trend Gate (S12)** — Scenario 12 MUST require the last **closed** 4H close to be aligned with the reversal via a causal SMA50 of `patternData.candles4h`: shorts need `close ≤ sma50 × 1.002`, longs need `close ≥ sma50 × 0.998`, unless price is at the unmitigated opposing 4H POI (`isAtOpposingHtfZone`). With fewer than **20** closed 4H candles the gate fails closed. The SMA is the primary gate; the 4H BOS/CHoCH direction check remains secondary. The SMA is never recomputed from the forming 4H candle.
+58. **Persistent HTF Trend Gate (S12)** — S12 uses a causal SMA50 of closed configured-HTF candles (`patternData.candles4h`). Shorts need `close ≤ sma50 × 1.002`, longs need `close ≥ sma50 × 0.998`, unless price is at the unmitigated opposing HTF POI. Fewer than **20** closed HTF candles fails closed. The HTF BOS/CHoCH check is secondary; the forming candle must never enter the SMA.
 
 59. **Fee-Aware TP Distance Floor (S12)** — After `resolveTakeProfit()` succeeds, Scenario 12 MUST reject any setup whose resolved target sits closer than `MIN_TP_DISTANCE_PCT` (default `0.35%`) from the **execution entry**: `|target − executionEntry| / executionEntry`, where `executionEntry` is the price the entry will actually be booked at (Market → market price, resting Limit → `idealEntry`; Invariant 61). The floor applies to structural and fixed-R targets alike, uses `Decimal`, and rejects with the `insufficientRoom` bucket. `MIN_TP_DISTANCE_PCT` is parsed as `Decimal` and validated in `(0, 0.1)`.
 
@@ -3015,7 +2991,13 @@ docker compose up -d
 
 61. **P0 Shields Price the Execution Entry, Not the Plan** — Scenario 12's `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` gates MUST be evaluated against the price the entry will actually be booked at. `resolveShieldEntry()` delegates the Market/Limit decision to `shouldUseMarketEntry()` (`src/config/fees.ts`): a discount or an at-entry/adverse move inside `SMART_ENTRY_THRESHOLD_PCT` is a Market fill priced at `currentPrice`; an adverse move beyond the threshold rests a Limit priced at `idealEntry`. Both gates share that single entry. Measuring a Market fill from `idealEntry` understates risk and overstates reward, so a nominal 1.5R can be a realised sub-1.0R trade with both gates "passed". Two boundaries are mandatory: the emitted `levels.entry` remains the OB midpoint (the shield re-prices the fill only), and a market price already outside `SL..TP` is left to the pre-flight DEAD-setup guard — pricing it here would move the rejection into the funnel and skip the mitigation burn. See §7.13.5.
 
-62. **Regime Gate is Entry-Only, Fail-Open and Off-By-Default** — When `ENABLE_REGIME_FILTER=true`, `ScenarioRouter` classifies the closed 4H tape once per pass via `calculateADX(candles4h, 14)` and blocks scenario/regime mismatches **before** `scenario.evaluate()`: TREND (`ADX >= REGIME_ADX_THRESHOLD`) blocks counter-trend sweeps (S5, S12); RANGE (`ADX <`) blocks trend breakouts (S14); S1 and S15 are never gated. Three boundaries are mandatory: (a) the gate is **entry-only** — it lives in the router, which `checkAndManagePosition()` never consults, so open trades keep being managed in every regime; (b) it **fails open** — fewer than `2 × period` 4H candles, or an unparseable window, yields `null`, leaves the gate open and increments `insufficientHistory`, because a filter that cannot measure must not stop trading; (c) `ENABLE_REGIME_FILTER=false` (the default, and the meaning of an absent `BotConfig` field) performs no ADX call and skips no scenario, so an unfiltered run stays byte-identical to the pre-filter baseline. `REGIME_ADX_THRESHOLD > 100` is a hard boot error: ADX is bounded 0..100, and a larger value would classify every tape as RANGE forever — protection in appearance, an S14-only off-switch in practice. Every blocked pass is counted in `RegimeFilterStats.regimeFilter`, and the report always prints the block so a filtered run can never be mistaken for a baseline. See §7.24.
+62. **Regime Gate is Entry-Only, Fail-Open and Off-By-Default** — With `ENABLE_REGIME_FILTER=true`, the router reads ADX(14) on the closed configured HTF (`patternData.candles4h`) before scenario evaluation. TREND (`ADX >= REGIME_ADX_THRESHOLD`) blocks S5/S12; RANGE blocks S14. S1/S15 and active trade management are unaffected. Unparseable or insufficient history (fewer than `2 × period` bars) fails open and increments `insufficientHistory`. Off/absent performs no ADX call and skips no scenarios. Thresholds above 100 fail boot. Blocked evaluations are counted and the report always prints filter status (§7.24).
+
+63. **Timeframe Abstraction** — Normalize configured Bybit intervals at load (`1440 → D`, `10080 → W`). Use `src/utils/timeframe.ts` for interval arithmetic and closed-bar checks, and the configured LTF/HTF for feed subscriptions, pattern tags, and higher-timeframe target classification. Derive execution durations from 1m in Sniper and the configured LTF in Classic (§7.26).
+
+64. **Calendar Trading-Day Macro** — Feed `CalendarMacro` chronological LTF bars only once closed. Prior-day levels use the last UTC date with data; prior-week levels require the immediately preceding ISO week, even across a year boundary. DO/WO may use a known open before the first close of a period. Warmup history supplies context without widening the Bybit trading/report window (§§7.10, 7.26).
+
+65. **Fail-Closed ATR & Historical Mitigation** — Displacement and SMS require finite, positive ATR from the shared true-range calculation. Set `isTaken` only from historical evidence after the pool's source event or within the applicable active macro period. Set `Zone.mitigated` only from historical price action after formation. Exclude the trigger bar from both historical checks, and keep the cached S12 macro anchors unchanged (§7.26).
 
 ---
 
@@ -3395,13 +3377,13 @@ if (isZeroSize || isClosedSide) { /* position closed */ }
 
 #### 16.6.1 Macro context is causal
 **Root Cause**: `initializeMacroContext()` ran once before the loop, loading PDH/PDL/PWH/PWL from the **end** of history. Simulating earlier months used future levels, so S5/S7/S8/S9 missed or invented sweeps.
-**Fix**: Dynamic context in `runBacktestForSymbol()`: running ATH/ATL from candles seen so far, daily levels from `slice(0, i)`, weekly levels from the last 7 days of closed candles, atomically applied via `recognizer.setMacroContext()`.
-**Rule**: A backtest may only consume data strictly older than the candle being simulated.
+**Fix**: `CalendarMacro` aggregates chronological closed LTF bars into UTC trading days and ISO weeks. `runBacktestForSymbol()` publishes the applicable snapshot to the recognizer.
+**Rule**: Only information available at the execution bar's close enters a decision. Prior-period extrema exclude the active period; current-period opens are available before the first bar closes (Invariant 64).
 
 #### 16.6.2 Macro context is not recomputed per 1m candle
 **Root Cause**: Rebuilding heavy context on every 1m candle burned CPU and propagated inconsistent state.
-**Fix**: `PatternData` is rebuilt only on LTF close; the 1m loop reuses the cached context.
-**Rule**: Heavy context updates on timeframe boundaries only.
+**Fix**: The 1m loop reuses `PatternData` until an LTF/HTF close or a UTC hour boundary changes candle or session context.
+**Rule**: Rebuild heavy context only when its inputs change.
 
 #### 16.6.3 Copy-on-write for the pattern cache
 **Root Cause**: Filtering in place (`patternData.structures = ...`, `splice`, `sort`) permanently stripped mitigated objects from a `PatternData` reference reused across every 1m iteration. Later candles saw a hollowed-out market, making results iteration-order dependent.
@@ -3484,6 +3466,8 @@ const evaluationData: PatternData = { ...basePd, structures: safeStructures, zon
 
 ---
 
+_Last updated: 2026-11-28. **Core math, multi-timeframe execution, and Phase 3 verification.** §7.26 records causal liquidity and zone eligibility, the shared ATR guard, dynamic interval handling, and UTC trading-day/ISO-week macro levels. §7.27 records three BTC Classic runs, the NEAR Sniper run, two short Dukascopy controls, and the 724-day Yahoo `GC=F` comparison. Added Invariants 63–65. Typecheck, build, `npm test` and `npm run test:ci` passed: **1,068 tests across 53 suites**, including the deployment profiles; no `TS151002`. Wilder ADX matched the independent Python `Decimal` calculation to 18 significant digits on three recorded inputs.
+
 _Last updated: 2026-11-20. **XAUUSD cross-asset stress audit.** The frozen Classic set was measured on 183 days of Dukascopy 15m gold with every archived scenario temporarily registered (`1-11, 14, 15, 17`; reverted immediately afterwards). Result: **−$380.57 (−38.06%)**, 75 trades, 20W/55L, PF 0.50, Max DD 41.87%, $292.57 fees — **gross was only −$88.00, so fees are 77% of the loss**. S14 was the only near-survivor (−$3.84 / 29 trades); S15 −$61.02 / 12; S17 carried the loss (−$315.70 / 34, 17.65% WR); S1–S11 filled **zero** trades (S4 produced one unfilled Limit). The binding gates were killzones (75% of the tape) and, for S5, the fee-inclusive target floor (254/254 volume-confirmed SFPs died at `tpInvalid`). XAUUSD was **not** added to `SYMBOLS` and the production registry is unchanged. Recorded in §7.25; artifacts in `data/xauusd_stress_run/`, `data/Backtest_Report_XAUUSD.txt`, `data/backtest_logs/XAUUSD_stress.log`. Toolchain: typecheck clean, **997 tests / 49 suites green**.
 
 _Last updated: 2026-11-09. **V5.1 Final Code Freeze — ADX regime filter shipped, S16/S17 archived, production profiles frozen.** Two working institutional combinations were selected after the 365-day matrix: **S12 Sniper on NEARUSDT (1m)** and **S14 + S15 Classic on BTCUSDT (15m) with the 4H ADX gate enabled**. `.env` is now the primary deployment profile and mirrors `.env.emilia` for every non-secret strategy value (NEARUSDT, `ACTIVE_SCENARIOS=12`, `ENABLE_SNIPER_MODE=true`, `LTF_TIMEFRAME=15`, `HTF_TIMEFRAME=240`, `BACKTEST_DAYS=60`, `USE_LOCAL_CACHE_ONLY=true`, `ENFORCE_KILLZONES=true`, `ENABLE_DYNAMIC_TP=true`, `DYNAMIC_TP_MIN_RR=1.5`, `DYNAMIC_TP_MAX_RR=6.0`, `ENABLE_REGIME_FILTER=false`, audited NEAR P0 overrides at `1.0`). `.env.subaru` is BTCUSDT / `ACTIVE_SCENARIOS=14,15` / `ENABLE_REGIME_FILTER=true` / `REGIME_ADX_THRESHOLD=25` / `BACKTEST_DAYS=365` / `MAX_WORKING_CAPITAL=3000`. APTUSDT was removed from both `SYMBOLS` lists; its calibration survives as a commented future-pair note. **§7.24.1** records the controlled 365-day A/B: BTC **+28.40% / 123 trades / PF 1.20 / Max DD 28.25%** with the gate vs **+15.69% / 158 / 1.09 / 28.71%** without (+12.71 pp); portfolio **−$1,560.46 (−22.29%)** vs **−$1,958.31 (−27.98%)**, 5 of 7 symbols improved, **0/7 cleared the alpha gate** — the filter is a risk-shaping gate, not an alpha source. `.env.example` preset-divergence table, README preset sections and §11 were rewritten to match. Toolchain: typecheck clean, **969 tests / 48 suites green**, build passing.
@@ -3499,4 +3483,3 @@ _Last updated: 2026-11-01. **Scenario 5 geometry unlock.** Three refinements, al
 _Last updated: 2026-11-01. **S12 shield execution-price fix.** `MIN_NET_RR` and `MIN_TP_DISTANCE_PCT` are no longer measured against `idealEntry`; `resolveShieldEntry()` prices the entry the trade will actually be booked at — the market price for a Market fill (discount or within `SMART_ENTRY_THRESHOLD_PCT`), `idealEntry` for a resting Limit — delegating the routing decision to `shouldUseMarketEntry()` so the gate and the executor cannot disagree (§7.13.5, Invariant 61, §16.1.8). A market price already outside `SL..TP` stays with the pre-flight DEAD-setup guard so its mitigation burn is preserved. Measured on the identical NEARUSDT 60-day window with a pinned clock: **+$252.24 / 9 trades / PF 5.64 / DD 2.22%** vs **+$284.94 / 10 trades / PF 6.19 / DD 2.22%** — nine signals unchanged, the single removed trade realised net R 0.973 (below the 1.0 floor) and was a winner, so the gate costs profit to enforce correctness. Test suite: **866 tests / 43 suites green**, typecheck clean.
 
 _Last updated: 2026-10-28. **Endurance freeze release.** Two long-horizon audits are now recorded in §7.23: S14 Tank on BTCUSDT over **365 days** (+19.94%, PF 1.20, Max DD 19.82%, MAR 1.01 — 160.4 days underwater, fees eating 49.7% of gross) and S12 Sniper on NEARUSDT over **180 days** (+22.40%, PF 3.24, Max DD 4.74% at the audited calibration; the global `1.5` volatility shield starved the same window to +3.46%). The audit produced exactly one configuration change — `MIN_VOLATILITY_FEE_RATIO_NEARUSDT=1.0` in `.env` and `.env.emilia`, with the global shield left untouched for every other pair. Harness fix: `src/backtest/run.ts` appends the 1m history in a loop instead of `push(...fetched1m)`, which had thrown `Maximum call stack size exceeded` on any Sniper window beyond ~100k candles (§16.6.8). Also carried over from v2026-10-26: the V4 Classic scenario refactor (batches 1–4), Invariants 1–60, anti-patterns consolidated into §16.1–§16.8, and the live hotfix that stopped `processClosedPosition()` from resetting the state machine during the entry-bookkeeping window (§16.3.9, Invariant 60). Toolchain: typecheck clean, **853 tests / 43 suites green**, build passing.
-

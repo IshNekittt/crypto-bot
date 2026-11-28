@@ -1,4 +1,5 @@
 import { Decimal } from 'decimal.js';
+import { isMajorTimeframe } from '../utils/timeframe';
 import type {
   LiquidityPool,
   MacroContext,
@@ -69,8 +70,8 @@ export interface TpCandidate {
   /**
    * Macro barrier vs. internal noise.
    *
-   * Major: PDH/PDL, PWH/PWL, EQH/EQL, DO/WO, unmitigated HTF (>= 4H) zones and
-   * any caller-forced target. Minor: individual 4H swing BSL/SSL, 15m zones,
+     * Major: PDH/PDL, PWH/PWL, EQH/EQL, DO/WO, unmitigated zones at or above the
+     * configured HTF, calendar zones and caller-forced targets. Minor: BSL/SSL, LTF zones,
    * range equilibrium and session extremes.
    *
    * Only meaningful when `skipMinorObstacles` is enabled — the legacy
@@ -80,11 +81,14 @@ export interface TpCandidate {
 }
 
 export interface TpResolveInput {
+  readonly htfTimeframe?: string;
   readonly direction: 'BULLISH' | 'BEARISH';
   readonly entry: Decimal;
   readonly stopLoss: Decimal;
   readonly zones: readonly Zone[];
   readonly liquidityPools: readonly LiquidityPool[];
+  /** The liquidity event that triggered this setup cannot also be its target. */
+  readonly sweptLevelPrice?: Decimal;
   readonly tradingRange: TradingRange | null;
   readonly macroContext: MacroContext | null;
   readonly sessionRanges: readonly SessionRange[];
@@ -144,9 +148,6 @@ const SOURCE_PRIORITY: Record<TpSource, number> = {
   FIXED_FALLBACK: 5,
 };
 
-/** Higher timeframes. `detectFVGs`/`detectOrderBlocks` emit 15m and 4H only today. */
-const HTF_TIMEFRAMES = new Set<string>(['240', '360', '720', 'D', 'W', 'M']);
-
 /**
  * Pool types that represent genuine macro liquidity rather than an internal
  * swing. PDH/PDL/PWH/PWL are previous-session extremes, EQH/EQL are equal
@@ -204,9 +205,13 @@ function collectCandidates(
   // `buildPatternData` already merges macro pools into `liquidityPools`, so the
   // macro levels below are only a fallback for callers that pass a bare array;
   // price-level deduplication prevents double counting.
+  const takenPrices = new Set<string>();
   for (const pool of input.liquidityPools ?? []) {
-    if (pool.isTaken) continue;
     if (!isUsablePrice(pool.priceLevel)) continue;
+    if (pool.isTaken) {
+      takenPrices.add(pool.priceLevel.toString());
+      continue;
+    }
     if (!beyond(pool.priceLevel)) continue;
     const sourceMajor = MAJOR_POOL_TYPES.has(pool.type);
     raw.push({
@@ -234,7 +239,7 @@ function collectCandidates(
 
     if (!beyond(nearEdge)) continue;
 
-    const isHtf = HTF_TIMEFRAMES.has(String(zone.timeframe));
+    const isHtf = isMajorTimeframe(zone.timeframe, input.htfTimeframe);
     raw.push({
       price: nearEdge,
       source: isHtf ? 'HTF_ZONE' : 'LTF_ZONE',
@@ -280,6 +285,7 @@ function collectCandidates(
     ];
     for (const [label, price] of levels) {
       if (!isUsablePrice(price)) continue;
+      if (takenPrices.has(price.toString())) continue;
       if (!beyond(price)) continue;
       raw.push({
         price,
@@ -295,6 +301,7 @@ function collectCandidates(
   // pool must never downgrade a real macro level sitting at the same price.
   const byPrice = new Map<string, RawCandidate>();
   for (const candidate of raw) {
+    if (input.sweptLevelPrice?.eq(candidate.price)) continue;
     const key = candidate.price.toFixed(8);
     const existing = byPrice.get(key);
     const priority = SOURCE_PRIORITY[candidate.source];

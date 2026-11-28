@@ -255,6 +255,29 @@ describe('Scenario12: Sniper Touch (1m Macro)', () => {
     expect(scenario.getReason()).toMatch(/No CHoCH after sweep of PDL/);
   });
 
+  it('uses the recognizer ATR period for 1m displacement', () => {
+    const candles = buildCandles();
+    // A wide bar outside the final ten candles has no effect at period 10,
+    // but makes the CHoCH body insufficient at period 14.
+    candles[46] = candle(46, { high: '104' });
+    const data = buildPatternData(candles);
+    data.atrPeriod = 10;
+    expect(scenario.evaluate(data)).toBe(true);
+    data.atrPeriod = 14;
+    expect(scenario.evaluate(data)).toBe(false);
+    expect(scenario.getReason()).toMatch(/No fresh CHoCH/);
+  });
+
+  it('does not target the swept PDL when the OB midpoint is below it', () => {
+    const candles = buildCandles();
+    candles[OB_INDEX] = candle(OB_INDEX, { open: '100.1', high: '100.2', low: '99.6', close: '99.8' });
+    const data = buildPatternData(candles);
+    const sut = new Scenario12_SniperTouch({ ...mockConfig, enableDynamicTp: true });
+    expect(sut.evaluate(data)).toBe(true);
+    expect(sut.getLevels().entry.lt(PDL)).toBe(true);
+    expect(sut.getLevels().takeProfit.gt(PDL)).toBe(true);
+  });
+
   it('rejects a setup whose CHoCH/OB is far from the swept level (proximity)', () => {
     const candles = buildCandles();
     // atr15m 0.1 → tolerance = max(0.1, 100 * 0.003) = 0.3; OB distance is 0.7.
@@ -385,6 +408,20 @@ describe('Scenario12: Sniper sweep sources', () => {
     expect(s.evaluate(patternData)).toBe(true);
     expect(s.getReason()).toContain('EQL');
     expect(s.getReason()).toContain('EQH_EQL');
+  });
+
+  it('rejects a taken EQL or a sweep before its last touch, while retaining the macro lookback', () => {
+    const data = buildPatternData(buildCandles(), { atr15m: new Decimal(2) });
+    data.macroContext.dailyLevels.pdl = new Decimal(90);
+    const sut = new Scenario12_SniperTouch({ ...mockConfig, s12EqhEqlSweeps: true });
+    data.liquidityPools = [{ ...poolAt('100'), isTaken: true }];
+    expect(sut.evaluate(data)).toBe(false);
+    data.liquidityPools = [{ ...poolAt('100'), timestamp: data.candles1m[SWEEP_INDEX + 1].timestamp }];
+    expect(sut.evaluate(data)).toBe(false);
+    data.liquidityPools = [{ ...poolAt('100'), type: 'PDL', isTaken: true }];
+    data.macroContext.dailyLevels.pdl = PDL;
+    expect(sut.evaluate(data)).toBe(true);
+    expect(sut.getReason()).toContain('PDL');
   });
 
   it('dedupes equal-priced sources with macro priority (PDH > Session > EQH/EQL)', () => {
@@ -780,6 +817,17 @@ describe('Scenario12: Orthodox hardening', () => {
     patternData.zones = [htfZone('BULLISH', '101', '100')];
 
     expect(s.evaluate(patternData)).toBe(true);
+  });
+
+  it('requires the counter-trend POI to meet the configured daily HTF', () => {
+    const sut = new Scenario12_SniperTouch({ ...mockConfig, htfTimeframe: 'D' });
+    const data = buildPatternData(buildCandles());
+    data.structures = [{ ...htfBreak('BEARISH'), timeframe: 'D' }];
+    data.zones = [htfZone('BULLISH', '101', '100')];
+    expect(sut.evaluate(data)).toBe(false);
+    expect(sut.getReason()).toBe('HTF trend contradicts reversal direction');
+    data.zones[0].timeframe = 'D';
+    expect(sut.evaluate(data)).toBe(true);
   });
 
   it('rejects a counter-HTF long when the 4H zone is mitigated', () => {

@@ -2,9 +2,10 @@ import { BaseScenario } from '../baseScenario';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../../config/env';
 import { ROUND_TRIP_TAKER_FEE, shouldUseMarketEntry } from '../../config/fees';
-import { PatternData, MacroContext, Structure } from '../../smc/patternRecognizer';
+import { calculateATR, PatternData, MacroContext, Structure } from '../../smc/patternRecognizer';
 import { resolveTakeProfit } from '../tpResolver';
 import { logger } from '../../utils/logger';
+import { isMajorTimeframe } from '../../utils/timeframe';
 
 /**
  * Asset admission floor: the 1m ATR must clear the round-trip taker cost by this
@@ -34,8 +35,6 @@ const INTRADAY_PROXIMITY_ATR = new Decimal('0.5');
 const SWEEP_LOOKBACK_1M = 50;
 /** 15m candles used to derive the dealing range when `tradingRange` is absent. */
 const DEALING_RANGE_LOOKBACK = 50;
-/** Higher-timeframe tags produced by `buildPatternData`. */
-const HTF_TIMEFRAMES = new Set<string>(['240', '360', '720', 'D', 'W', 'M']);
 /** 4H SMA period for Scenario 12's persistent trend gate. */
 const HTF_TREND_SMA_PERIOD = 50;
 /**
@@ -63,6 +62,7 @@ const SWEEP_SOURCE_PRIORITY: Record<SweepSourceKind, number> = {
 };
 
 interface SweepLevel {
+  readonly lastTouch?: number;
   readonly price: Decimal;
   readonly name: string;
   readonly direction: 'BULLISH' | 'BEARISH';
@@ -263,8 +263,8 @@ export class Scenario12_SniperTouch extends BaseScenario {
 
     // === FILTER 3: VALID CHoCH + ORDER BLOCK ENTRY ===
     // Calculate ATR for 1m candles
-    const atr1m = this.calculateATR(candles1m, 14);
-    if (atr1m.lte(0)) {
+    const atr1m = calculateATR(candles1m, patternData.atrPeriod);
+    if (!atr1m.isFinite() || atr1m.lte(0)) {
       return this.reject('invalidAtr', 'Invalid ATR');
     }
 
@@ -488,6 +488,8 @@ export class Scenario12_SniperTouch extends BaseScenario {
     // `f = c / s`, so a tight stop turns a nominal 3R win into a net loss.
     // See `src/engine/tpResolver.ts` for the derivation and the wall filter.
     const resolution = resolveTakeProfit({
+      htfTimeframe: this.config.htfTimeframe,
+      sweptLevelPrice: sweptLevel.price,
       direction,
       entry: baseLevels.entry,
       stopLoss: baseLevels.stopLoss,
@@ -643,10 +645,11 @@ export class Scenario12_SniperTouch extends BaseScenario {
       price: unknown,
       name: string,
       direction: 'BULLISH' | 'BEARISH',
-      kind: SweepSourceKind
+      kind: SweepSourceKind,
+      lastTouch?: number
     ) => {
       if (!(price instanceof Decimal) || !price.gt(0)) return;
-      levels.push({ price, name, direction, kind });
+      levels.push({ price, name, direction, kind, lastTouch });
     };
 
     // --- Macro liquidity (always armed) ---
@@ -670,10 +673,11 @@ export class Scenario12_SniperTouch extends BaseScenario {
     // --- Equal highs / equal lows (opt-in) ---
     if (this.config.s12EqhEqlSweeps === true) {
       for (const pool of patternData.liquidityPools ?? []) {
+        if (pool.isTaken) continue;
         if (pool.type === 'EQH') {
-          push(pool.priceLevel, 'EQH', 'BEARISH', 'EQH_EQL');
+          push(pool.priceLevel, 'EQH', 'BEARISH', 'EQH_EQL', pool.timestamp);
         } else if (pool.type === 'EQL') {
-          push(pool.priceLevel, 'EQL', 'BULLISH', 'EQH_EQL');
+          push(pool.priceLevel, 'EQL', 'BULLISH', 'EQH_EQL', pool.timestamp);
         }
       }
     }
@@ -725,6 +729,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
 
       for (let i = lookbackCandles.length - 1; i >= 0; i--) {
         const candle = lookbackCandles[i];
+        if (level.lastTouch !== undefined && candle.timestamp <= level.lastTouch) break;
         const high = new Decimal(candle.high);
         const low = new Decimal(candle.low);
         const open = new Decimal(candle.open);
@@ -830,7 +835,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
    * Resolve the 15m ATR used for the proximity tolerance.
    *
    * patternData.atr15m is the canonical, router-computed value and MUST be preferred.
-   * A local ATR(14) recomputation is only a defensive fallback — it is explicitly
+   * Recomputing the shared ATR is only a defensive fallback — it is explicitly
    * logged as such so a missing ATR never silently masquerades as the canonical one.
    */
   private resolveAtr15m(patternData: PatternData): Decimal {
@@ -845,18 +850,18 @@ export class Scenario12_SniperTouch extends BaseScenario {
     );
 
     const candles15m = patternData.candles15m;
-    if (Array.isArray(candles15m) && candles15m.length >= 15) {
-      const atr = this.calculateATR(candles15m, 14);
+    if (Array.isArray(candles15m)) {
+      const atr = calculateATR(candles15m, patternData.atrPeriod);
       if (atr.gt(0)) {
-        logger.warn(`[Scenario 12] FALLBACK LTF ATR(14) = ${atr.toString()} used for proximity tolerance.`);
+        logger.warn(`[Scenario 12] FALLBACK LTF ATR = ${atr.toString()} used for proximity tolerance.`);
         return atr;
       }
       logger.error(
-        `[Scenario 12] FALLBACK ATR(14) computed to ${atr.toString()} from ${candles15m.length} candles — unusable.`,
+        `[Scenario 12] FALLBACK ATR computed to ${atr.toString()} from ${candles15m.length} candles — unusable.`,
       );
     } else {
       logger.error(
-        `[Scenario 12] FALLBACK ATR unavailable: candles15m has ${Array.isArray(candles15m) ? candles15m.length : 0} candles (need >= 15).`,
+        '[Scenario 12] FALLBACK ATR unavailable: missing candles15m.',
       );
     }
 
@@ -864,22 +869,6 @@ export class Scenario12_SniperTouch extends BaseScenario {
       '[Scenario 12] No usable ATR — proximity tolerance collapses to the 0.3% percentage floor only.',
     );
     return new Decimal(0);
-  }
-
-  // Helper: Calculate ATR
-  private calculateATR(candles: any[], period: number = 14): Decimal {
-    if (candles.length < period + 1) return new Decimal(0);
-    let trSum = new Decimal(0);
-    for (let i = candles.length - period; i < candles.length; i++) {
-      const current = candles[i];
-      const prev = candles[i - 1];
-      const high = new Decimal(current.high);
-      const low = new Decimal(current.low);
-      const prevClose = new Decimal(prev.close);
-      const tr = Decimal.max(high.minus(low), high.minus(prevClose).abs(), low.minus(prevClose).abs());
-      trSum = trSum.plus(tr);
-    }
-    return trSum.dividedBy(period);
   }
 
   // ---------------------------------------------------------------------------
@@ -944,7 +933,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
     // === GATE 2: STRUCTURE CONFIRMATION ===
     const htfStructures = (patternData.structures ?? []).filter(
       (s) =>
-        HTF_TIMEFRAMES.has(String(s.timeframe)) &&
+        isMajorTimeframe(s.timeframe, this.config.htfTimeframe) &&
         (s.type === 'BOS' || s.type === 'CHOCH')
     );
 
@@ -971,7 +960,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
     const tolerance = price.mul(new Decimal('0.001'));
 
     return (patternData.zones ?? []).some((zone) => {
-      if (!HTF_TIMEFRAMES.has(String(zone.timeframe))) return false;
+      if (!isMajorTimeframe(zone.timeframe, this.config.htfTimeframe)) return false;
       if (zone.mitigated) return false;
       if (zone.direction !== direction) return false;
 
@@ -1104,6 +1093,7 @@ export class Scenario12_SniperTouch extends BaseScenario {
    * a bare `PatternData` (backtest stubs, unit fixtures).
    */
   private detectStructureBreaks(candles: any[], atr: Decimal): Structure[] {
+    if (!atr.isFinite() || atr.lte(0)) return [];
     const structures: Structure[] = [];
     const swingLookback = 3;
     const minBody = atr.mul(this.resolveDisplacementMultiplier());

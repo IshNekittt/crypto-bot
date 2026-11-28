@@ -1,4 +1,6 @@
 import "dotenv/config";
+import type { Timeframe } from "../types";
+import { isTimeframe, timeframeToMinutes } from "../utils/timeframe";
 import { Decimal } from "decimal.js";
 import {
   ARCHIVED_SCENARIO_IDS_LABEL,
@@ -56,8 +58,8 @@ export interface BotConfig {
   readonly leverage: string;
   readonly dataDir: string;
   readonly historyCandles: number;
-  readonly ltfTimeframe: string;
-  readonly htfTimeframe: string;
+  readonly ltfTimeframe: Timeframe;
+  readonly htfTimeframe: Timeframe;
   readonly macroCandles: number;
   readonly telegramBotToken: string | null;
   readonly telegramChatId: string | null;
@@ -429,7 +431,7 @@ export function resolveLimitExpirationMs(config: {
 }): number {
   const executionTfMinutes = config.enableSniperMode
     ? 1
-    : Number(config.ltfTimeframe);
+    : timeframeToMinutes(config.ltfTimeframe);
   return (
     resolveLimitExpirationCandles(config) * executionTfMinutes * 60 * 1000
   );
@@ -624,51 +626,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BotConfig {
     throw new Error("HISTORY_CANDLES must be <= 1000 (Bybit kline limit)");
   }
 
-  const ltfTimeframe = optionalEnv(env, "LTF_TIMEFRAME") ?? "15";
-  if (
-    ![
-      "1",
-      "3",
-      "5",
-      "15",
-      "30",
-      "60",
-      "120",
-      "240",
-      "360",
-      "720",
-      "D",
-      "W",
-      "M",
-    ].includes(ltfTimeframe)
-  ) {
-    throw new Error(
-      `LTF_TIMEFRAME must be a valid Bybit interval, got: ${ltfTimeframe}`,
-    );
+  function parseTimeframe(key: string, fallback: Timeframe): Timeframe {
+    const raw = optionalEnv(env, key) ?? fallback;
+    if (raw === "1440") return "D";
+    if (raw === "10080") return "W";
+    if (!isTimeframe(raw)) throw new Error(`${key} must be a valid Bybit interval, got: ${raw}`);
+    return raw;
   }
-
-  const htfTimeframe = optionalEnv(env, "HTF_TIMEFRAME") ?? "240";
-  if (
-    ![
-      "1",
-      "3",
-      "5",
-      "15",
-      "30",
-      "60",
-      "120",
-      "240",
-      "360",
-      "720",
-      "D",
-      "W",
-      "M",
-    ].includes(htfTimeframe)
-  ) {
-    throw new Error(
-      `HTF_TIMEFRAME must be a valid Bybit interval, got: ${htfTimeframe}`,
-    );
-  }
+  const ltfTimeframe = parseTimeframe("LTF_TIMEFRAME", "15");
+  const htfTimeframe = parseTimeframe("HTF_TIMEFRAME", "240");
 
   const macroCandles = parsePositiveNumber(
     optionalEnv(env, "MACRO_CANDLES") ?? "1000",

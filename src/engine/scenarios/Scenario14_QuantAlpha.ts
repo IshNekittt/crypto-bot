@@ -9,6 +9,7 @@ export interface Scenario14RejectionStats {
   wrongMode: number;
   insufficientCandles: number;
   insideChannel: number;
+  consumedBreakout: number;
   lowVolumeBreakout: number;
   insufficientRr: number;
   tpInvalid: number;
@@ -20,6 +21,7 @@ const EMPTY_STATS: Scenario14RejectionStats = {
   wrongMode: 0,
   insufficientCandles: 0,
   insideChannel: 0,
+  consumedBreakout: 0,
   lowVolumeBreakout: 0,
   insufficientRr: 0,
   tpInvalid: 0,
@@ -53,12 +55,8 @@ export class Scenario14_QuantAlpha extends BaseScenario {
     const stats = Scenario14_QuantAlpha.stats;
     stats.totalEvals++;
 
-    // Mode guard (audit F-03): Scenario 14 is a 15m Classic breakout. In Sniper
-    // Mode the engine closes on 1m candles, so without this gate the identical
-    // 15m candle would be re-scanned on every tick (15x per candle) and could fill
-    // from a close up to 14 minutes stale. Mirrors Scenario 15's `wrongMode` gate.
-    if (this.config.enableSniperMode || this.config.ltfTimeframe !== '15') {
-      return this.reject('wrongMode', 'Scenario 14 is Classic 15m-only');
+    if (!this.isClassicMode()) {
+      return this.reject('wrongMode', 'Scenario 14 requires Classic mode with LTF of at least 5 minutes');
     }
 
     const candles15m = patternData.candles15m ?? [];
@@ -72,16 +70,19 @@ export class Scenario14_QuantAlpha extends BaseScenario {
     ) {
       return this.reject(
         'insufficientCandles',
-        `Requires ${VOLUME_SMA_CANDLES + 1} confirmed 15m and ${CHANNEL_CANDLES + 1} confirmed 4H candles`,
+        `Requires ${VOLUME_SMA_CANDLES + 1} confirmed LTF and ${CHANNEL_CANDLES + 1} confirmed HTF candles`,
       );
     }
 
     const current = candles15m[candles15m.length - 1];
+    if (patternData.mitigatedStructures?.some(s => s.timestamp === current.timestamp)) {
+      return this.reject('consumedBreakout', 'Breakout candle already consumed');
+    }
     const entry = new Decimal(current.close);
     const atr15m = patternData.atr15m;
 
     if (!entry.isFinite() || entry.lte(0) || !atr15m || !atr15m.isFinite() || atr15m.lte(0)) {
-      return this.reject('insufficientCandles', 'Entry or ATR15m is unavailable');
+      return this.reject('insufficientCandles', 'Entry or LTF ATR is unavailable');
     }
 
     const closed4h = candles4h.slice(-(CHANNEL_CANDLES + 1), -1);
@@ -134,6 +135,7 @@ export class Scenario14_QuantAlpha extends BaseScenario {
     );
 
     const resolution = resolveTakeProfit({
+      htfTimeframe: this.config.htfTimeframe,
       direction,
       entry,
       stopLoss: baseLevels.stopLoss,
@@ -142,7 +144,7 @@ export class Scenario14_QuantAlpha extends BaseScenario {
       tradingRange: patternData.tradingRange ?? null,
       macroContext: patternData.macroContext ?? null,
       sessionRanges: patternData.sessionRanges ?? [],
-      minRr: this.config.dynamicTpMinRr,
+      minRr: Decimal.max(this.config.dynamicTpMinRr, MIN_ACCEPTED_RR),
       maxRr: Decimal.min(this.config.dynamicTpMaxRr, TARGET_RR),
       fixedRr: TARGET_RR,
       enableDynamicTp: this.config.enableDynamicTp,
@@ -169,14 +171,6 @@ export class Scenario14_QuantAlpha extends BaseScenario {
       entry,
       stopLoss: baseLevels.stopLoss,
       takeProfit: resolution.takeProfit,
-    });
-    this.setZoneDetails({
-      type: 'MITIGATION',
-      top: isLong ? channelHigh : entry,
-      bottom: isLong ? entry : channelLow,
-      timeframe: '15',
-      direction,
-      timestamp: current.timestamp,
     });
     this.setStructureDetails({
       type: 'BOS',

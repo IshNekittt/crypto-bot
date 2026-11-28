@@ -16,6 +16,19 @@ function env(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return { ...BASE_ENV, ...overrides };
 }
 
+describe('loadConfig — timeframes', () => {
+  it('normalizes daily and weekly minute aliases before exposing the config', () => {
+    const config = loadConfig(env({ LTF_TIMEFRAME: '1440', HTF_TIMEFRAME: '10080', ACTIVE_SCENARIOS: '1' }));
+    expect([config.ltfTimeframe, config.htfTimeframe]).toEqual(['D', 'W']);
+    expect(resolveLimitExpirationMs(config)).toBe(config.limitExpirationCandles * 86_400_000);
+  });
+
+  it.each(['0', '999', 'invalid'])('rejects unknown Bybit intervals: %s', tf => {
+    expect(() => loadConfig(env({ LTF_TIMEFRAME: tf }))).toThrow(/LTF_TIMEFRAME must be a valid Bybit interval/);
+    expect(() => loadConfig(env({ HTF_TIMEFRAME: tf }))).toThrow(/HTF_TIMEFRAME must be a valid Bybit interval/);
+  });
+});
+
 describe('loadConfig — Dynamic Take-Profit', () => {
   it('defaults to the legacy fixed-R behaviour', () => {
     const config = loadConfig(env());

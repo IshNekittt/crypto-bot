@@ -212,18 +212,48 @@ describe('Scenario1: HTF Continuation', () => {
       const sniper = new Scenario1_HTFContinuation({ ...mockConfig, enableSniperMode: true });
 
       expect(sniper.evaluate(buildPatternData({ direction: 'BULLISH' }))).toBe(false);
-      expect(sniper.getReason()).toMatch(/Classic 15m-only/);
+      expect(sniper.getReason()).toMatch(/requires Classic mode/);
       expect(Scenario1_HTFContinuation.getRejectionStats().wrongMode).toBe(1);
     });
 
-    it('fails closed on a non-15m execution timeframe', () => {
+    it('fails closed below the 5-minute Classic minimum', () => {
       Scenario1_HTFContinuation.resetStats();
-      const fiveMin = new Scenario1_HTFContinuation({ ...mockConfig, ltfTimeframe: '5' });
+      const threeMin = new Scenario1_HTFContinuation({ ...mockConfig, ltfTimeframe: '3' });
 
-      expect(fiveMin.evaluate(buildPatternData({ direction: 'BULLISH' }))).toBe(false);
+      expect(threeMin.evaluate(buildPatternData({ direction: 'BULLISH' }))).toBe(false);
       expect(Scenario1_HTFContinuation.getRejectionStats().wrongMode).toBe(1);
     });
   });
+
+  it.each([['60', '240', 1, 4], ['240', 'D', 4, 24]] as const)(
+    'uses four LTF bars and waits for the configured HTF close (%s/%s)',
+    (ltfTimeframe, htfTimeframe, ltfHours, htfHours) => {
+      const sut = new Scenario1_HTFContinuation({ ...mockConfig, ltfTimeframe, htfTimeframe });
+      const data = buildPatternData({ touchIndex: 26, chochIndex: 28, fvgIndex: 26 });
+      const barMs = ltfHours * 3600_000;
+      data.candles15m = data.candles15m.map((c: ReturnType<typeof candle>, i: number) => ({
+        ...c, timestamp: BASE_TS + i * barMs,
+      }));
+      const touchTime = data.candles15m[26].timestamp;
+      data.structures[0].timeframe = ltfTimeframe;
+      data.structures[0].timestamp = data.candles15m[28].timestamp;
+      data.zones[1].timeframe = ltfTimeframe;
+      data.zones[1].timestamp = touchTime;
+      data.zones[0].timeframe = htfTimeframe;
+      data.zones[0].timestamp = touchTime - htfHours * 3600_000;
+      expect(sut.evaluate(data)).toBe(true);
+      expect(sut.getZoneDetails()?.timeframe).toBe(ltfTimeframe);
+
+      data.zones[0].timestamp += barMs; // HTF is still open at the only touch.
+      expect(sut.evaluate(data)).toBe(false);
+      expect(sut.getReason()).toMatch(/has not touched/);
+      data.zones[0].timestamp -= barMs;
+
+      data.candles15m.push({ ...data.candles15m.at(-1), timestamp: BASE_TS + 30 * barMs });
+      expect(sut.evaluate(data)).toBe(false); // Touch is now five LTF bars back.
+      expect(sut.getReason()).toMatch(/has not touched/);
+    },
+  );
 
   describe('bidirectional evaluation', () => {
     it('triggers a Long from a bullish 4H demand touch + BULLISH CHoCH + FVG', () => {
@@ -356,6 +386,18 @@ describe('Scenario1: HTF Continuation', () => {
 
       expect(result).toBe(false);
       expect(scenario.getReason()).toContain('displacement < 1.5 ATR');
+    });
+
+    it('rejects an infinite displacement factor', () => {
+      expect(scenario.evaluate(buildPatternData({ displacement: 'Infinity' }))).toBe(false);
+      expect(scenario.getReason()).toContain('displacement');
+    });
+
+    it('cannot use a mitigated FVG for its entry', () => {
+      const data = buildPatternData({});
+      data.zones.find((z: { type: string }) => z.type === 'FVG').mitigated = true;
+      expect(scenario.evaluate(data)).toBe(false);
+      expect(scenario.getReason()).toContain('No 15m FVG');
     });
 
     it('rejects a 4H CHoCH as the confirming trigger (15m filter)', () => {

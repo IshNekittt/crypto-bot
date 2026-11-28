@@ -709,6 +709,25 @@ describe('buildHtfRoadmap — 4H equal highs/lows', () => {
     expect(result.primaryTarget?.price.toString()).toBe('112');
     expect(result.primaryTarget?.label).toBe('PDH');
   });
+
+  it('uses only daily structures and zones when the HTF is D', () => {
+    const result = buildHtfRoadmap(input({
+      htfTimeframe: 'D',
+      candles4h: discountCandles(),
+      structures4h: [
+        ...bullishBos().map(s => ({ ...s, timeframe: 'D' })),
+        structure('CHOCH', 'BEARISH', discountCandles().at(-1)!.timestamp, '240'),
+      ],
+      zones4h: [
+        zone({ top: '106', bottom: '105', direction: 'BEARISH', timeframe: '240' }),
+        zone({ top: '110', bottom: '109', direction: 'BEARISH', timeframe: 'D' }),
+      ],
+      macroContext: macroWithLevels({ pdh: '112' }),
+    }));
+    expect(result.bias).toBe('BULLISH');
+    expect(result.primaryTarget?.price.toString()).toBe('109');
+    expect(result.primaryTarget?.label).toBe('1D OB');
+  });
 });
 
 // ---------------------------------------------------------------------------

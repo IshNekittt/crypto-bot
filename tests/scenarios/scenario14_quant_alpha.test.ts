@@ -79,12 +79,12 @@ describe('Scenario14_QuantAlpha — Donchian / volume breakout', () => {
       const sut = scenario({ enableSniperMode: true });
 
       expect(sut.evaluate(pattern(candles15m('long')))).toBe(false);
-      expect(sut.getReason()).toMatch(/Classic 15m-only/);
+      expect(sut.getReason()).toMatch(/requires Classic mode/);
       expect(Scenario14_QuantAlpha.getRejectionStats().wrongMode).toBe(1);
     });
 
-    it('fails closed on a non-15m execution timeframe', () => {
-      const sut = scenario({ ltfTimeframe: '5' });
+    it('fails closed below the 5-minute Classic minimum', () => {
+      const sut = scenario({ ltfTimeframe: '3' });
 
       expect(sut.evaluate(pattern(candles15m('long')))).toBe(false);
       expect(Scenario14_QuantAlpha.getRejectionStats().wrongMode).toBe(1);
@@ -98,7 +98,8 @@ describe('Scenario14_QuantAlpha — Donchian / volume breakout', () => {
     expect(levels.entry.minus(levels.stopLoss)).toEqual(new Decimal('4'));
     expect(levels.takeProfit.minus(levels.entry).gte(new Decimal('10'))).toBe(true);
     expect(sut.getStructureDetails()?.type).toBe('BOS');
-    expect(sut.getZoneDetails()?.timeframe).toBe('15');
+    expect(sut.getZoneDetails()).toBeNull();
+    expect(sut.getStructureDetails()?.timestamp).toBe(BASE + 20 * MIN15);
   });
 
   it('triggers bearish channel breakout', () => {
@@ -134,6 +135,20 @@ describe('Scenario14_QuantAlpha — Donchian / volume breakout', () => {
     const sut = scenario({ dynamicTpMinRr: new Decimal('5') });
     expect(sut.evaluate(pattern(candles15m('long')))).toBe(false);
     expect(Scenario14_QuantAlpha.getRejectionStats().tpInvalid).toBe(1);
+  });
+
+  it('skips a 1.6R minor pool and targets the next valid barrier at exactly 2.5R', () => {
+    const sut = scenario({ dynamicTpMinRr: new Decimal('1.5') });
+    const data = pattern(candles15m('long')); // entry 105, risk 4
+    data.liquidityPools = [
+      { type: 'BSL', priceLevel: new Decimal('111.4'), isTaken: false },
+      { type: 'EQH', priceLevel: new Decimal(115), isTaken: false },
+    ];
+    expect(sut.evaluate(data)).toBe(true);
+    expect(sut.getLevels().takeProfit.eq(115)).toBe(true);
+    data.mitigatedStructures = [sut.getStructureDetails()];
+    expect(sut.evaluate(data)).toBe(false);
+    expect(Scenario14_QuantAlpha.getRejectionStats().consumedBreakout).toBe(1);
   });
 
   it('uses fixed 2ATR stop despite a different SMC offset', () => {

@@ -171,18 +171,31 @@ describe('Scenario5: HTF Liquidity Sweep (volume-confirmed SFP)', () => {
       });
 
       expect(sniper.evaluate(buildPatternData())).toBe(false);
-      expect(sniper.getReason()).toMatch(/Classic 15m-only/);
+      expect(sniper.getReason()).toMatch(/requires Classic mode/);
       expect(Scenario5_HTFLiquiditySweep.getRejectionStats().wrongMode).toBe(1);
     });
 
-    it('fails closed on a non-15m execution timeframe', () => {
-      const fiveMin = new Scenario5_HTFLiquiditySweep({
+    it('fails closed below the 5-minute Classic minimum', () => {
+      const oneMin = new Scenario5_HTFLiquiditySweep({
         ...mockConfig,
-        ltfTimeframe: '5',
+        ltfTimeframe: '1',
       });
 
-      expect(fiveMin.evaluate(buildPatternData())).toBe(false);
+      expect(oneMin.evaluate(buildPatternData())).toBe(false);
       expect(Scenario5_HTFLiquiditySweep.getRejectionStats().wrongMode).toBe(1);
+    });
+
+    it('matches tagged consumed sweeps to the configured LTF, preserving untagged records', () => {
+      const hourly = new Scenario5_HTFLiquiditySweep({ ...mockConfig, ltfTimeframe: '60' });
+      const data = buildPatternData();
+      const timestamp = data.candles15m.at(-1)!.timestamp;
+      const consumed = { type: 'SWEEP', timestamp, direction: 'BULLISH', price: '100' };
+      data.mitigatedStructures = [{ ...consumed, timeframe: '15' }];
+      expect(hourly.evaluate(data)).toBe(true);
+      data.mitigatedStructures = [{ ...consumed, timeframe: '60' }];
+      expect(hourly.evaluate(data)).toBe(false);
+      data.mitigatedStructures = [consumed];
+      expect(hourly.evaluate(data)).toBe(false);
     });
   });
 

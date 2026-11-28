@@ -8,6 +8,7 @@ import { ScenarioRouter } from './scenarioRouter';
 import { TelegramNotifier } from '../telegram/notifier';
 import { PendingTradeManager } from './pendingTradeManager';
 import { NewsService } from '../services/newsService';
+import { timeframeToMinutes } from '../utils/timeframe';
 import { InstrumentInfo, StrategyState, Timeframe, BotConfig, MitigatedZone, MitigatedStructure } from '../types';
 import { logger } from '../utils/logger';
 import { Decimal } from 'decimal.js';
@@ -248,14 +249,15 @@ export class StrategyEngine {
     }
 
     if (!update.confirmed) return;
-    const htfInterval = this.deps.config.htfTimeframe;
-    
-    // Handle 1m candles for Sniper Mode
-    if (update.interval === '1') {
+    const isLtfUpdate = update.interval === this.feedLtf.interval;
+    const previousTimestamp = this.feedLtf.getLastClosed()?.timestamp;
+    if (update.interval === this.feedHtf.interval) this.feedHtf.applyKline(update);
+    if (isLtfUpdate) this.feedLtf.applyKline(update);
+
+    if (update.interval === '1' && this.deps.config.enableSniperMode) {
       this.feed1m.applyKline(update);
 
-      // CRITICAL: If Sniper Mode enabled and we're scanning, evaluate on every 1m close
-      if (this.deps.config.enableSniperMode && this.state === StrategyState.SCANNING) {
+      if (this.state === StrategyState.SCANNING) {
         try {
           await this.process('1' as Timeframe);
         } catch (error) {
@@ -265,10 +267,8 @@ export class StrategyEngine {
       return;
     }
 
-    const feed = update.interval === htfInterval ? this.feedHtf : this.feedLtf;
-    const previousTimestamp = feed.getLastClosed()?.timestamp;
-    feed.applyKline(update);
-    if (feed.getLastClosed()?.timestamp === previousTimestamp) return;
+    if (this.deps.config.enableSniperMode || !isLtfUpdate ||
+        this.feedLtf.getLastClosed()?.timestamp === previousTimestamp) return;
     if (this.processing) {
       logger.debug(`${this.symbol}: kline skipped, previous cycle still running`);
       return;
@@ -757,7 +757,7 @@ export class StrategyEngine {
 
       // Set cooldown ONLY after stop-loss (negative PnL)
       if (pnlValue.lt(0)) {
-        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
+        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : timeframeToMinutes(this.deps.config.ltfTimeframe);
         const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
         this.cooldownUntil = Date.now() + cooldownMs;
         const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
@@ -1495,7 +1495,7 @@ export class StrategyEngine {
 
       // Cooldown after SL hit via reconciliation (uses execution timeframe: 1m for Sniper, LTF for Classic)
       if (new Decimal(pnlString).lt(0)) {
-        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
+        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : timeframeToMinutes(this.deps.config.ltfTimeframe);
         const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
         this.cooldownUntil = Date.now() + cooldownMs;
         const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);
@@ -1649,7 +1649,7 @@ export class StrategyEngine {
 
       // Cooldown after SL hit via reconciliation (uses execution timeframe: 1m for Sniper, LTF for Classic)
       if (finalPnlString !== null && new Decimal(finalPnlString).lt(0)) {
-        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : Number(this.deps.config.ltfTimeframe);
+        const tradeTfMinutes = this.deps.config.enableSniperMode ? 1 : timeframeToMinutes(this.deps.config.ltfTimeframe);
         const cooldownMs = this.deps.config.cooldownCandles * tradeTfMinutes * 60 * 1000;
         this.cooldownUntil = Date.now() + cooldownMs;
         const cooldownHours = (cooldownMs / (60 * 60 * 1000)).toFixed(2);

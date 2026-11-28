@@ -1,4 +1,5 @@
 import { Decimal } from "decimal.js";
+import { timeframeToMinutes } from "../utils/timeframe";
 import { Candle, SniperZone, StructureType } from "../types";
 import { logger } from "../utils/logger";
 import { evaluateTradeManagement, initializeTradeManagement, TradeContext } from "../risk/tradeManager";
@@ -1046,7 +1047,7 @@ export function checkAndCloseTrade(
     cooldownUntil: isLoss
       ? candle.timestamp +
         config.cooldownCandles *
-          (config.enableSniperMode ? 1 : Number(config.ltfTimeframe)) *
+          (config.enableSniperMode ? 1 : timeframeToMinutes(config.ltfTimeframe)) *
           60 *
           1000
       : 0,

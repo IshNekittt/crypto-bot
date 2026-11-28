@@ -252,7 +252,7 @@ describe('PatternRecognizer', () => {
         ] as any;
       });
 
-      (jest.spyOn(recognizer, 'detectFVGs') as jest.SpyInstance).mockImplementation((candles: any[]) => [
+      (jest.spyOn(recognizer, 'detectFVGs') as jest.SpyInstance).mockImplementation((candles: any[], timeframe: string) => [
         {
           type: 'FVG',
           direction: 'BULLISH',
@@ -260,11 +260,11 @@ describe('PatternRecognizer', () => {
           bottom: new Decimal(99),
           timestamp: candles[candles.length - 1].timestamp,
           mitigated: false,
-          timeframe: '15',
+          timeframe,
         },
       ] as any);
 
-      (jest.spyOn(recognizer, 'detectOrderBlocks') as jest.SpyInstance).mockImplementation((candles: any[]) => [
+      (jest.spyOn(recognizer, 'detectOrderBlocks') as jest.SpyInstance).mockImplementation((candles: any[], _breaks: any[], timeframe: string) => [
         {
           type: 'OB',
           direction: 'BULLISH',
@@ -272,7 +272,7 @@ describe('PatternRecognizer', () => {
           bottom: new Decimal(99),
           timestamp: candles[0].timestamp,
           mitigated: false,
-          timeframe: '15',
+          timeframe,
         },
       ] as any);
 

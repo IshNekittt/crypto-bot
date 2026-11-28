@@ -1,7 +1,6 @@
 import "dotenv/config";
 
 import { DateTime } from "luxon";
-import { Decimal } from "decimal.js";
 
 import { BybitClient } from "./api/bybitClient";
 import { BybitWebsocket } from "./api/wsClient";
@@ -16,7 +15,7 @@ import { RiskManager } from "./risk/riskManager";
 import { StrategyState } from "./types";
 import { notifier } from "./telegram/notifier";
 import { logger, setLoggerTelegramHook } from "./utils/logger";
-import { PatternRecognizer } from "./smc/patternRecognizer";
+import { PatternRecognizer, createPatternConfigFromBotConfig } from "./smc/patternRecognizer";
 import { PendingTradeManager } from "./engine/pendingTradeManager";
 import { BackupService } from "./services/backupService";
 import { NewsService } from "./services/newsService";
@@ -319,9 +318,7 @@ async function main(): Promise<void> {
   const engines: StrategyEngine[] = [];
 
   // Create shared PatternRecognizer instance with SMC config
-  const patternRecognizer = new PatternRecognizer(client, {
-    displacementMultiplier: new Decimal(config.smcDisplacementMultiplier),
-  });
+  const patternRecognizer = new PatternRecognizer(client, createPatternConfigFromBotConfig(config));
 
   // Initialize macro context for all symbols at startup (bootstrap phase)
   logger.info("Initializing macro context for all symbols...");
@@ -442,11 +439,9 @@ async function main(): Promise<void> {
     }
   });
 
-  // Subscribe to klines: 1m for Sniper Mode, 15m and 240m for regular scenarios
-  const klineIntervals = config.enableSniperMode
-    ? (["1", "15", "240"] as const)
-    : (["15", "240"] as const);
-  await ws.subscribeKlines(config.symbols, klineIntervals);
+  const klineIntervals = new Set([config.ltfTimeframe, config.htfTimeframe]);
+  if (config.enableSniperMode) klineIntervals.add("1");
+  await ws.subscribeKlines(config.symbols, [...klineIntervals]);
   await ws.subscribePrivate();
 
   const reconciliation = new ReconciliationLoop(client, db, engines, config);

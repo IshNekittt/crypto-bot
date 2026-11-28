@@ -437,6 +437,21 @@ describe('StrategyEngine', () => {
     });
   });
 
+  it('updates the configured daily feed and scans only on the configured 4H close', async () => {
+    const deps = (engine as any).deps;
+    const classic = new StrategyEngine({
+      ...deps, config: { ...deps.config, ltfTimeframe: '240', htfTimeframe: 'D', enableSniperMode: false },
+    });
+    const process = jest.spyOn(classic as any, 'process').mockResolvedValue(undefined);
+    const candle = mockCandles4h[0];
+    await classic.handleKline({ symbol: 'BTCUSDT', interval: 'D', confirmed: true, candle });
+    expect((classic as any).feedHtf.getLastClosed()).toEqual(candle);
+    expect(process).not.toHaveBeenCalled();
+    await classic.handleKline({ symbol: 'BTCUSDT', interval: '240', confirmed: true, candle });
+    expect(classic.getLastClosedCandle()?.timestamp).toBe(candle.timestamp);
+    expect(process).toHaveBeenCalledWith('240');
+  });
+
   describe('Lazy API Evaluation (per-tick management)', () => {
     const tradeAtEntry = () => ({
       id: 'trade-lazy-1',

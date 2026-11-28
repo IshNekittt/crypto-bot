@@ -1,5 +1,6 @@
 import { Decimal } from 'decimal.js';
 import { DateTime } from 'luxon';
+import { timeframeToMinutes } from '../utils/timeframe';
 import { BybitClient } from '../api/bybitClient';
 import { Candle, Direction, Timeframe, MitigatedZone, MitigatedStructure } from '../types';
 import { logger } from '../utils/logger';
@@ -11,6 +12,8 @@ export interface SwingPoint {
   readonly index: number;
   readonly isSwept: boolean;
 }
+
+const SWING_CONFIRMATION_BARS = 3;
 
 export interface LiquidityPool {
   readonly type: 'BSL' | 'SSL' | 'EQH' | 'EQL' | 'PDH' | 'PDL' | 'PWH' | 'PWL' | 'DO' | 'WO';
@@ -85,6 +88,8 @@ export interface SessionConfig {
 }
 
 export interface PatternConfig {
+  readonly ltfTimeframe: Timeframe;
+  readonly htfTimeframe: Timeframe;
   readonly atrPeriod: number;
   readonly displacementMultiplier: Decimal;
   readonly sweepThreshold: Decimal;
@@ -113,6 +118,7 @@ export interface PatternData {
   zones: Zone[];
   readonly swingPoints: SwingPoint[];
   readonly atr15m: Decimal;
+  readonly atrPeriod?: number;
   readonly atr4h: Decimal;
   readonly patternRecognizer: 'PatternRecognizer';
   candles1m?: Candle[];
@@ -121,6 +127,8 @@ export interface PatternData {
 }
 
 export const DEFAULT_PATTERN_CONFIG: PatternConfig = {
+  ltfTimeframe: '15',
+  htfTimeframe: '240',
   atrPeriod: 10,
   displacementMultiplier: new Decimal(1.5),
   sweepThreshold: new Decimal('0.0005'),
@@ -141,10 +149,114 @@ export const DEFAULT_PATTERN_CONFIG: PatternConfig = {
   wickRatioThreshold: new Decimal('0.4'), // 40% wick requirement
 };
 
-export function createPatternConfigFromBotConfig(botConfig: { smcDisplacementMultiplier: string; smcSlAtrOffset: string }): Partial<PatternConfig> {
+export function createPatternConfigFromBotConfig(botConfig: { smcDisplacementMultiplier: string; ltfTimeframe: Timeframe; htfTimeframe: Timeframe }): Partial<PatternConfig> {
   return {
+    ltfTimeframe: botConfig.ltfTimeframe,
+    htfTimeframe: botConfig.htfTimeframe,
     displacementMultiplier: new Decimal(botConfig.smcDisplacementMultiplier),
   };
+}
+
+/** Simple mean of true ranges, including gaps to the preceding close. */
+export function calculateATR(candles: Candle[], period = DEFAULT_PATTERN_CONFIG.atrPeriod): Decimal {
+  if (candles.length <= period || !Number.isInteger(period) || period <= 0) return new Decimal(0);
+  let sum = new Decimal(0);
+  for (let i = candles.length - period; i < candles.length; i++) {
+    const high = new Decimal(candles[i].high);
+    const low = new Decimal(candles[i].low);
+    const prevClose = candles[i - 1].close;
+    sum = sum.plus(Decimal.max(high.minus(low), high.minus(prevClose).abs(), low.minus(prevClose).abs()));
+  }
+  return sum.div(period);
+}
+
+/** For each index, extremes strictly after it and before the trigger bar. */
+function followingExtremes(candles: Candle[]) {
+  const highs: Decimal[] = [];
+  const lows: Decimal[] = [];
+  let high = new Decimal('-Infinity');
+  let low = new Decimal('Infinity');
+  for (let i = candles.length - 2; i >= 0; i--) {
+    highs[i] = high;
+    lows[i] = low;
+    high = Decimal.max(high, candles[i].high);
+    low = Decimal.min(low, candles[i].low);
+  }
+  return { highs, lows };
+}
+
+/** The cached macro anchors remain reusable by Sniper. Only the evaluation
+ * snapshot marks previous-day/week liquidity crossed during the current period. */
+function evaluatedMacroPools(pools: LiquidityPool[], ltf: Candle[], htf: Candle[]): LiquidityPool[] {
+  if (!pools.length || !ltf.length) return pools;
+  const period = DateTime.fromMillis(ltf[ltf.length - 1].timestamp, { zone: 'utc' });
+  const dayStart = period.startOf('day').toMillis();
+  const weekStart = period.startOf('week').toMillis();
+  let dayHigh = new Decimal('-Infinity');
+  let weekHigh = dayHigh;
+  let dayLow = new Decimal('Infinity');
+  let weekLow = dayLow;
+  // The HTF window covers days outside the shorter LTF history. Exclude its
+  // final bar too; the LTF history supplies the safe part of that interval.
+  for (const candles of [htf, ltf]) {
+    for (let i = candles.length - 2; i >= 0; i--) {
+      const candle = candles[i];
+      if (candle.timestamp < weekStart) break;
+      weekHigh = Decimal.max(weekHigh, candle.high);
+      weekLow = Decimal.min(weekLow, candle.low);
+      if (candle.timestamp >= dayStart) {
+        dayHigh = Decimal.max(dayHigh, candle.high);
+        dayLow = Decimal.min(dayLow, candle.low);
+      }
+    }
+  }
+  return pools.map(pool => {
+    let pierced: boolean;
+    switch (pool.type) {
+      case 'PDH': pierced = dayHigh.gt(pool.priceLevel); break;
+      case 'PDL': pierced = dayLow.lt(pool.priceLevel); break;
+      case 'PWH': pierced = weekHigh.gt(pool.priceLevel); break;
+      case 'PWL': pierced = weekLow.lt(pool.priceLevel); break;
+      default: return pool;
+    }
+    return pierced && !pool.isTaken ? { ...pool, isTaken: true } : pool;
+  });
+}
+
+interface FormedZone extends Zone {
+  formedAt: number;
+  mitigated: boolean;
+}
+
+/** Walk backward so each query sees only bars after formation, excluding the trigger. */
+function markMitigatedZones(candles: Candle[], formations: FormedZone[]): Zone[] {
+  if (formations.length === 0) return [];
+  const prices = new Set(candles.map(c => new Decimal(c.high).toString()));
+  for (const zone of formations) prices.add(zone.top.toString());
+  const highs = [...prices].map(price => new Decimal(price)).sort((a, b) => b.cmp(a));
+  const rank = new Map(highs.map((price, i) => [price.toString(), i + 1]));
+  // Fenwick prefix minimum on descending highs: among candles reaching the
+  // zone top, did ANY SINGLE wick also reach the bottom?
+  const minLows = Array<Decimal>(highs.length + 1).fill(new Decimal('Infinity'));
+  let minClose = new Decimal('Infinity');
+  let maxClose = new Decimal('-Infinity');
+  let bar = candles.length - 2;
+  for (const zone of [...formations].sort((a, b) => b.formedAt - a.formedAt)) {
+    while (bar > zone.formedAt) {
+      const candle = candles[bar--];
+      minClose = Decimal.min(minClose, candle.close);
+      maxClose = Decimal.max(maxClose, candle.close);
+      const low = new Decimal(candle.low);
+      for (let i = rank.get(new Decimal(candle.high).toString())!; i <= highs.length; i += i & -i) {
+        minLows[i] = Decimal.min(minLows[i], low);
+      }
+    }
+    zone.mitigated = zone.direction === 'BULLISH' ? minClose.lt(zone.bottom) : maxClose.gt(zone.top);
+    for (let i = rank.get(zone.top.toString())!; i > 0 && !zone.mitigated; i -= i & -i) {
+      zone.mitigated = minLows[i].lte(zone.bottom);
+    }
+  }
+  return formations.map(({ formedAt: _index, ...zone }) => zone);
 }
 
 export class PatternRecognizer {
@@ -222,14 +334,13 @@ export class PatternRecognizer {
    * Asian: 20:00-24:00 NY time (Accumulation phase)
    * London: 02:00-05:00 NY time (Manipulation phase)
    * NY: 07:00-10:00 NY time (Distribution phase)
-   * OPTIMIZED: Only processes last 192 candles (2 days of 15m) for performance
+   * Only processes two days of LTF bars.
    */
   detectSessionRanges(candles: Candle[]): SessionRange[] {
     const ranges: SessionRange[] = [];
     
-    // OPTIMIZATION: Only process last 192 candles (2 days of 15m candles)
-    // Asian session is 4 hours = 16 candles per day, so 2 days = ~32 Asian session candles
-    const relevantCandles = candles.slice(-192);
+    const barsPerDay = Math.ceil(1440 / timeframeToMinutes(this.config.ltfTimeframe));
+    const relevantCandles = candles.slice(-2 * barsPerDay);
     
     // Group candles by session day (NY time)
     const sessionDays = new Map<string, { high: Decimal; low: Decimal; start: number; end: number }>();
@@ -284,28 +395,8 @@ export class PatternRecognizer {
   /**
    * Calculate ATR using decimal.js
    */
-  calculateATR(candles: Candle[], period: number = 14): Decimal {
-    if (candles.length < period + 1) {
-      return new Decimal(0);
-    }
-
-    let trSum = new Decimal(0);
-    for (let i = candles.length - period; i < candles.length; i++) {
-      const current = candles[i];
-      const prev = candles[i - 1];
-      const high = new Decimal(current.high);
-      const low = new Decimal(current.low);
-      const prevClose = new Decimal(prev.close);
-
-      const tr1 = high.minus(low);
-      const tr2 = high.minus(prevClose).abs();
-      const tr3 = low.minus(prevClose).abs();
-
-      const tr = Decimal.max(tr1, tr2, tr3);
-      trSum = trSum.plus(tr);
-    }
-
-    return trSum.dividedBy(period);
+  calculateATR(candles: Candle[], period = this.config.atrPeriod): Decimal {
+    return calculateATR(candles, period);
   }
 
   /**
@@ -475,7 +566,7 @@ export class PatternRecognizer {
   /**
    * Find swing points (highs and lows) using 3-candle confirmation
    */
-  findSwingPoints(candles: Candle[], lookback: number = 3): SwingPoint[] {
+  findSwingPoints(candles: Candle[], lookback = SWING_CONFIRMATION_BARS): SwingPoint[] {
     const swings: SwingPoint[] = [];
 
     for (let i = lookback; i < candles.length - lookback; i++) {
@@ -528,7 +619,8 @@ export class PatternRecognizer {
    * Optimized: compute swing points ONCE, then iterate with simple for loops
    * @param customDisplacementMultiplier - optional override for displacement threshold (e.g., for 1m timeframe)
    */
-  detectStructureBreaks(candles: Candle[], atr: Decimal, customDisplacementMultiplier?: Decimal): Structure[] {
+  detectStructureBreaks(candles: Candle[], atr: Decimal, customDisplacementMultiplier?: Decimal, timeframe = this.config.ltfTimeframe): Structure[] {
+    if (!atr.isFinite() || atr.lte(0)) return [];
     const structures: Structure[] = [];
     let lastValidSwing: SwingPoint | null = null;
     let trend: Direction | null = null;
@@ -547,8 +639,8 @@ export class PatternRecognizer {
 
     for (let i = 0; i < candles.length; i++) {
       // Update last valid swing (confirmed 3 candles ago)
-      if (i >= 3) {
-        const checkIndex = i - 3;
+      if (i >= SWING_CONFIRMATION_BARS) {
+        const checkIndex = i - SWING_CONFIRMATION_BARS;
 
         // Advance highSwingIdx to include swings up to checkIndex
         for (let h = highSwingIdx + 1; h < highSwingsAll.length; h++) {
@@ -614,14 +706,14 @@ export class PatternRecognizer {
     const smsStructures = this.detectSMS(candles, atr);
     structures.push(...smsStructures);
 
-    return structures;
+    return structures.map(s => ({ ...s, timeframe }));
   }
 
   /**
    * Detect FVGs (Fair Value Gaps)
    */
-  detectFVGs(candles: Candle[]): Zone[] {
-    const fvgs: Zone[] = [];
+  detectFVGs(candles: Candle[], timeframe = this.config.ltfTimeframe): Zone[] {
+    const fvgs: FormedZone[] = [];
 
     for (let i = 2; i < candles.length; i++) {
       const c1 = candles[i - 2];
@@ -633,13 +725,14 @@ export class PatternRecognizer {
       const refPrice = new Decimal(c2.close);
       if (bullGap.gt(0) && bullGap.div(refPrice).mul(100).gte(this.config.fvgMinGapPercent)) {
         fvgs.push({
+          formedAt: i,
           type: 'FVG',
           direction: 'BULLISH',
           top: new Decimal(c3.low),
           bottom: new Decimal(c1.high),
           timestamp: c1.timestamp,
           mitigated: false,
-          timeframe: '15', // will be set by caller
+          timeframe,
         });
       }
 
@@ -647,35 +740,37 @@ export class PatternRecognizer {
       const bearGap = new Decimal(c1.low).minus(c3.high);
       if (bearGap.gt(0) && bearGap.div(refPrice).mul(100).gte(this.config.fvgMinGapPercent)) {
         fvgs.push({
+          formedAt: i,
           type: 'FVG',
           direction: 'BEARISH',
           top: new Decimal(c1.low),
           bottom: new Decimal(c3.high),
           timestamp: c1.timestamp,
           mitigated: false,
-          timeframe: '15',
+          timeframe,
         });
       }
     }
 
-    return fvgs;
+    return markMitigatedZones(candles, fvgs);
   }
 
   /**
    * Detect Order Blocks
    */
-  detectOrderBlocks(candles: Candle[], breaks: Structure[]): Zone[] {
-    const obs: Zone[] = [];
+  detectOrderBlocks(candles: Candle[], breaks: Structure[], timeframe = this.config.ltfTimeframe): Zone[] {
+    const obs: FormedZone[] = [];
+    const indexByTime = new Map(candles.map((c, i) => [c.timestamp, i]));
 
     for (const br of breaks) {
       // Find the index of the break candle
-      const breakIdx = candles.findIndex(c => c.timestamp === br.timestamp);
+      const breakIdx = indexByTime.get(br.timestamp) ?? -1;
       if (breakIdx <= 0) continue; // No candle before the break
 
       let obIndex = -1;
 
       // Go BACKWARDS from the candle BEFORE the break, using array indices (not timestamps!)
-      for (let i = breakIdx - 1; i >= 0; i--) {
+      for (let i = breakIdx - 1; i >= Math.max(0, breakIdx - 15); i--) {
         const isBullishCandle = new Decimal(candles[i].close).gt(candles[i].open);
         const targetBullish = br.direction === 'BEARISH';
 
@@ -688,18 +783,19 @@ export class PatternRecognizer {
       if (obIndex >= 0) {
         const direction: Direction = br.direction === 'BULLISH' ? 'BULLISH' : 'BEARISH';
         obs.push({
+          formedAt: breakIdx,
           type: 'OB',
           direction,
           top: new Decimal(candles[obIndex].high),
           bottom: new Decimal(candles[obIndex].low),
           timestamp: candles[obIndex].timestamp,
           mitigated: false,
-          timeframe: '15',
+          timeframe,
         });
       }
     }
 
-    return obs;
+    return markMitigatedZones(candles, obs);
   }
 
   /**
@@ -741,41 +837,45 @@ export class PatternRecognizer {
    * Uses tolerance of max(0.1%, 0.5 * ATR) for better noise filtering
    */
   detectEqualLevels(candles: Candle[], atr?: Decimal): { eqh: Decimal[]; eql: Decimal[] } {
-    const highs: { price: Decimal; index: number }[] = [];
-    const lows: { price: Decimal; index: number }[] = [];
+    const pools = this.equalLevelPools(candles, this.findSwingPoints(candles), atr);
+    return {
+      eqh: pools.filter(p => p.type === 'EQH').map(p => p.priceLevel),
+      eql: pools.filter(p => p.type === 'EQL').map(p => p.priceLevel),
+    };
+  }
 
-    for (let i = 0; i < candles.length; i++) {
-      highs.push({ price: new Decimal(candles[i].high), index: i });
-      lows.push({ price: new Decimal(candles[i].low), index: i });
-    }
-
-    // Dynamic tolerance: max(0.1%, 0.5 * ATR)
-    const atrTolerance = atr ? atr.mul(new Decimal('0.5')).div(candles[candles.length - 1].close) : new Decimal('0');
-    const baseThreshold = new Decimal('0.001'); // 0.1%
-    const threshold = Decimal.max(baseThreshold, atrTolerance);
-
-    const eqh: Decimal[] = [];
-    const eql: Decimal[] = [];
-
-    for (let i = 0; i < highs.length; i++) {
-      for (let j = i + 1; j < highs.length; j++) {
-        const diff = highs[i].price.minus(highs[j].price).abs().div(highs[i].price);
-        if (diff.lte(threshold)) {
-          eqh.push(highs[i].price);
+  private equalLevelPools(candles: Candle[], swings: SwingPoint[], atr?: Decimal): LiquidityPool[] {
+    if (!swings.length) return [];
+    const close = new Decimal(candles[candles.length - 1].close);
+    const threshold = Decimal.max('0.001', atr && close.gt(0) ? atr.mul('0.5').div(close) : 0);
+    const extremes = followingExtremes(candles);
+    const pools: LiquidityPool[] = [];
+    for (const side of ['HIGH', 'LOW'] as const) {
+      const sorted = swings.filter(s => s.type === side && s.price.gt(0))
+        .sort((a, b) => a.price.cmp(b.price));
+      // Compare each cluster to its first price so adjacent near-equalities
+      // cannot chain together two distant extremes. Emit one pool per cluster.
+      for (let i = 0; i < sorted.length;) {
+        const first = sorted[i++];
+        const points = [first];
+        while (i < sorted.length) {
+          const price = sorted[i].price;
+          const midpoint = first.price.plus(price).div(2);
+          if (price.minus(first.price).div(midpoint).gt(threshold)) break;
+          points.push(sorted[i++]);
         }
+        if (points.length < 2) continue;
+        points.sort((a, b) => a.index - b.index);
+        const priceLevel = points[0].price; // First touch sets the level; later touches confirm it.
+        const last = points[points.length - 1];
+        pools.push({
+          type: side === 'HIGH' ? 'EQH' : 'EQL',
+          priceLevel, points, timestamp: last.timestamp,
+          isTaken: side === 'HIGH' ? extremes.highs[last.index].gt(priceLevel) : extremes.lows[last.index].lt(priceLevel),
+        });
       }
     }
-
-    for (let i = 0; i < lows.length; i++) {
-      for (let j = i + 1; j < lows.length; j++) {
-        const diff = lows[i].price.minus(lows[j].price).abs().div(lows[i].price);
-        if (diff.lte(threshold)) {
-          eql.push(lows[i].price);
-        }
-      }
-    }
-
-    return { eqh, eql };
+    return pools;
   }
 
   /**
@@ -812,6 +912,7 @@ export class PatternRecognizer {
       const close = new Decimal(candle.close);
 
       for (const swing of swings) {
+        if (swing.index >= i) break; // Swing points are chronological.
         if (swing.type === 'HIGH' && high.gt(swing.price) && close.lt(swing.price)) {
           sweeps.push({ price: swing.price, direction: 'BEARISH', timestamp: candles[i].timestamp });
         } else if (swing.type === 'LOW' && low.lt(swing.price) && close.gt(swing.price)) {
@@ -830,11 +931,12 @@ export class PatternRecognizer {
    * Tolerance: max(0.5%, 0.5*ATR/price) for realistic crypto equal highs/lows
    */
   detectSMS(candles: Candle[], atr: Decimal): Structure[] {
+    if (!candles.length || !atr.isFinite() || atr.lte(0)) return [];
     const smsStructures: Structure[] = [];
     
     // Use more candles for better SMS detection (last 100 candles)
     const relevantCandles = candles.slice(-100);
-    const swings = this.findSwingPoints(relevantCandles, 2); // More sensitive swing detection
+    const swings = this.findSwingPoints(relevantCandles);
     const highs = swings.filter(s => s.type === 'HIGH');
     const lows = swings.filter(s => s.type === 'LOW');
     const minBody = atr.mul(this.config.displacementMultiplier);
@@ -856,7 +958,7 @@ export class PatternRecognizer {
       if (highDiff.lte(equalTolerance)) {
         // Look for bearish CHoCH after the failure swing
         // The CHoCH must occur AFTER the lastHigh index
-        for (let i = lastHigh.index + 1; i < relevantCandles.length; i++) {
+        for (let i = lastHigh.index + SWING_CONFIRMATION_BARS; i < relevantCandles.length; i++) {
           const candle = relevantCandles[i];
           const close = new Decimal(candle.close);
           
@@ -896,7 +998,7 @@ export class PatternRecognizer {
       const lowDiff = lastLow.price.minus(prevLow.price).abs().div(prevLow.price);
       if (lowDiff.lte(equalTolerance)) {
         // Look for bullish CHoCH after the failure swing
-        for (let i = lastLow.index + 1; i < relevantCandles.length; i++) {
+        for (let i = lastLow.index + SWING_CONFIRMATION_BARS; i < relevantCandles.length; i++) {
           const candle = relevantCandles[i];
           const close = new Decimal(candle.close);
           const body = new Decimal(candle.close).minus(candle.open).abs();
@@ -1005,7 +1107,7 @@ export class PatternRecognizer {
 
       // === Recent FVGs: only last 20 daily candles (not 1000!) ===
       const recentDaily = dailyCandles.slice(-20);
-      const htfFvgs = this.detectFVGs(recentDaily);
+      const htfFvgs = this.detectFVGs(recentDaily, 'D');
 
       // === Simple levels only - NO heavy SMC on macro timeframes! ===
       const weeklyLevels = { 
@@ -1035,7 +1137,7 @@ export class PatternRecognizer {
       const macro: MacroContext = {
         ath,
         atl,
-        htfFvgs: htfFvgs.map(f => ({ ...f, timeframe: 'D' as Timeframe })),
+        htfFvgs,
         htfObs: [],
         weeklyLevels,
         dailyLevels,
@@ -1125,14 +1227,9 @@ export class PatternRecognizer {
     // Tag each structure with its origin timeframe BEFORE merging: detection is
     // timeframe-agnostic, and scenarios filter on `timeframe` to distinguish
     // 15m structure from 4H structure (Scenarios 2 & 4 HTF trend filters).
-    const structures15m = this.detectStructureBreaks(ltfCandles, atr15m).map(s => ({
-      ...s,
-      timeframe: '15',
-    }));
-    const structures4h = this.detectStructureBreaks(htfCandles, atr4h).map(s => ({
-      ...s,
-      timeframe: '240',
-    }));
+    const { ltfTimeframe, htfTimeframe } = this.config;
+    const structures15m = this.detectStructureBreaks(ltfCandles, atr15m, undefined, ltfTimeframe);
+    const structures4h = this.detectStructureBreaks(htfCandles, atr4h, undefined, htfTimeframe);
 
     // Detect Trading Range on 15m with Bollinger Bands squeeze filter
     const tradingRange = this.detectTradingRange(
@@ -1147,72 +1244,34 @@ export class PatternRecognizer {
     // === Add BSL/SSL from 4H swing points ===
     // BSL = Buy Side Liquidity = Swing Highs (where buy stops are placed above)
     // SSL = Sell Side Liquidity = Swing Lows (where sell stops are placed below)
-    const bslPools: LiquidityPool[] = swingPoints4h
-      .filter(sp => sp.type === 'HIGH')
-      .map(sp => ({
-        type: 'BSL' as const,
+    const htfExtremes = followingExtremes(htfCandles);
+    // A prior 15m candle may have pierced a 4H level since the last HTF
+    // close. Include that evidence, still reserving the signal candle for S5.
+    let ltfIndex = ltfCandles.length - 2;
+    let ltfHigh = new Decimal('-Infinity');
+    let ltfLow = new Decimal('Infinity');
+    const swingPools: LiquidityPool[] = [];
+    for (let i = swingPoints4h.length - 1; i >= 0; i--) {
+      const sp = swingPoints4h[i];
+      while (ltfIndex >= 0 && ltfCandles[ltfIndex].timestamp > sp.timestamp) {
+        ltfHigh = Decimal.max(ltfHigh, ltfCandles[ltfIndex].high);
+        ltfLow = Decimal.min(ltfLow, ltfCandles[ltfIndex].low);
+        ltfIndex--;
+      }
+      swingPools.push({
+        type: sp.type === 'HIGH' ? 'BSL' : 'SSL',
         priceLevel: sp.price,
         timestamp: sp.timestamp,
-        isTaken: false,
-        points: [],
-      }));
-    const sslPools: LiquidityPool[] = swingPoints4h
-      .filter(sp => sp.type === 'LOW')
-      .map(sp => ({
-        type: 'SSL' as const,
-        priceLevel: sp.price,
-        timestamp: sp.timestamp,
-        isTaken: false,
-        points: [],
-      }));
-
-    // === Add EQH/EQL from Trading Range (with tolerance) ===
-    const eqhPools: LiquidityPool[] = [];
-    const eqlPools: LiquidityPool[] = [];
-    if (tradingRange) {
-      const eqLevels = this.detectEqualLevels(ltfCandles, atr15m);
-      // Add EQH if near range high
-      if (tradingRange.high && eqLevels.eqh.length > 0) {
-        eqLevels.eqh.forEach(eqh => {
-          const diff = eqh.minus(tradingRange.high).abs().div(tradingRange.high);
-          const atrTolerance = atr15m.mul(new Decimal('0.5')).div(ltfCandles[ltfCandles.length - 1].close);
-          const threshold = Decimal.max(new Decimal('0.001'), atrTolerance);
-          if (diff.lte(threshold)) {
-            eqhPools.push({
-              type: 'EQH',
-              priceLevel: eqh,
-              timestamp: ltfCandles[ltfCandles.length - 1].timestamp,
-              isTaken: false,
-              points: [],
-            });
-          }
-        });
-      }
-      // Add EQL if near range low
-      if (tradingRange.low && eqLevels.eql.length > 0) {
-        eqLevels.eql.forEach(eql => {
-          const diff = eql.minus(tradingRange.low).abs().div(tradingRange.low);
-          const atrTolerance = atr15m.mul(new Decimal('0.5')).div(ltfCandles[ltfCandles.length - 1].close);
-          const threshold = Decimal.max(new Decimal('0.001'), atrTolerance);
-          if (diff.lte(threshold)) {
-            eqlPools.push({
-              type: 'EQL',
-              priceLevel: eql,
-              timestamp: ltfCandles[ltfCandles.length - 1].timestamp,
-              isTaken: false,
-              points: [],
-            });
-          }
-        });
-      }
+        points: [sp],
+        isTaken: sp.type === 'HIGH'
+          ? Decimal.max(htfExtremes.highs[sp.index], ltfHigh).gt(sp.price)
+          : Decimal.min(htfExtremes.lows[sp.index], ltfLow).lt(sp.price),
+      });
     }
-
     const allLiquidityPools = [
-      ...macroContext.liquidityPools,
-      ...bslPools,
-      ...sslPools,
-      ...eqhPools,
-      ...eqlPools,
+      ...evaluatedMacroPools(macroContext.liquidityPools, ltfCandles, htfCandles),
+      ...swingPools.reverse(),
+      ...this.equalLevelPools(ltfCandles, swingPoints15m, atr15m),
     ];
 
     const ms = Date.now() - startMs;
@@ -1228,10 +1287,10 @@ export class PatternRecognizer {
     );
 
     const combinedZones: Zone[] = [
-      ...this.detectFVGs(ltfCandles).map(f => ({ ...f, timeframe: '15' as Timeframe })),
-      ...this.detectFVGs(htfCandles).map(f => ({ ...f, timeframe: '240' as Timeframe })),
-      ...this.detectOrderBlocks(ltfCandles, structures15m).map(o => ({ ...o, timeframe: '15' as Timeframe })),
-      ...this.detectOrderBlocks(htfCandles, structures4h).map(o => ({ ...o, timeframe: '240' as Timeframe })),
+      ...this.detectFVGs(ltfCandles, ltfTimeframe),
+      ...this.detectFVGs(htfCandles, htfTimeframe),
+      ...this.detectOrderBlocks(ltfCandles, structures15m, ltfTimeframe),
+      ...this.detectOrderBlocks(htfCandles, structures4h, htfTimeframe),
     ].sort((a, b) => a.timestamp - b.timestamp);
 
     return {
@@ -1246,6 +1305,7 @@ export class PatternRecognizer {
       structures: combinedStructures,
       zones: combinedZones,
       swingPoints: [...swingPoints15m, ...swingPoints4h],
+      atrPeriod: this.config.atrPeriod,
       atr15m,
       atr4h,
       patternRecognizer: this as any,

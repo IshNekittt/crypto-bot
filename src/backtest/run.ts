@@ -1,11 +1,14 @@
 import "dotenv/config";
+import { DateTime } from "luxon";
 import { BybitClient } from "../api/bybitClient";
-import { PatternRecognizer } from "../smc/patternRecognizer";
+import { PatternRecognizer, createPatternConfigFromBotConfig } from "../smc/patternRecognizer";
+import type { PatternData } from "../smc/patternRecognizer";
 import { ScenarioRouter } from "../engine/scenarioRouter";
 import type { RouterResult } from "../engine/scenarioRouter";
 import { loadConfig, resolveLimitExpirationCandles, resolveSymbolConfig } from "../config/env";
 import { logger } from "../utils/logger";
-import { Candle, Timeframe } from "../types";
+import { Candle } from "../types";
+import { candleCloseTime, timeframeLabel, timeframeToMinutes } from "../utils/timeframe";
 import { InstrumentInfo } from "./executionSimulator";
 import { Decimal } from "decimal.js";
 import { formatPrice } from "../utils/precision";
@@ -25,6 +28,7 @@ import {
 } from "./executionSimulator";
 import type { BacktestState } from "./executionSimulator";
 import { printReport, writeBacktestArtifacts, resetScenarioRejectionStats } from "./reporter";
+import { CalendarMacro } from "./calendarMacro";
 
 /**
  * Live `CandleFeed` capacities — the backtester MUST feed `buildPatternData()`
@@ -71,48 +75,9 @@ function cleanupMemory(
   if (global.gc) global.gc();
 }
 
-function calculateDailyLevels(
-  candles: Candle[],
-  ltfMinutes: number,
-): { pdh: Decimal; pdl: Decimal; doPrice: Decimal } | null {
-  const candlesPerDay = Math.floor(1440 / ltfMinutes);
-  if (candles.length < candlesPerDay) return null;
-
-  const yesterdayCandles = candles.slice(-candlesPerDay);
-  let pdh = new Decimal(0);
-  let pdl = new Decimal("Infinity");
-
-  for (const c of yesterdayCandles) {
-    const high = new Decimal(c.high);
-    const low = new Decimal(c.low);
-    if (high.gt(pdh)) pdh = high;
-    if (low.lt(pdl)) pdl = low;
-  }
-
-  const doPrice = new Decimal(candles[candles.length - 1].open);
-  return { pdh, pdl, doPrice };
-}
-
-function calculateWeeklyLevels(
-  candles: Candle[],
-  ltfMinutes: number,
-): { pwh: Decimal; pwl: Decimal; woPrice: Decimal } | null {
-  const candlesPerWeek = Math.floor((1440 * 7) / ltfMinutes);
-  if (candles.length < candlesPerWeek) return null;
-
-  const lastWeekCandles = candles.slice(-candlesPerWeek);
-  let pwh = new Decimal(0);
-  let pwl = new Decimal("Infinity");
-
-  for (const c of lastWeekCandles) {
-    const high = new Decimal(c.high);
-    const low = new Decimal(c.low);
-    if (high.gt(pwh)) pwh = high;
-    if (low.lt(pwl)) pwl = low;
-  }
-
-  const woPrice = new Decimal(candles[candles.length - 1].open);
-  return { pwh, pwl, woPrice };
+function requiredLtfWarmup(historyCandles: number, ltfMinutes: number, htfMinutes: number): number {
+  const candlesPerWeek = Math.ceil(timeframeToMinutes("W") / ltfMinutes);
+  return Math.max(historyCandles, candlesPerWeek + 1, Math.ceil(MIN_PATTERN_CANDLES * htfMinutes / ltfMinutes));
 }
 
 /**
@@ -167,7 +132,6 @@ async function runBacktestForSymbol(
   candlesLtf: Candle[],
   candlesHtf: Candle[],
   candles1m: Candle[],
-  ltfMinutes: number,
   config: ReturnType<typeof loadConfig> & {
     enableSniperMode?: boolean;
   },
@@ -182,14 +146,6 @@ async function runBacktestForSymbol(
   const state = getInitialState();
   const results: TradeResult[] = [];
   let preflightSkipped = 0;
-
-  const htfMap = new Map<number, Candle>();
-  for (const c of candlesHtf) {
-    htfMap.set(c.timestamp, c);
-  }
-  const htfTimestamps = candlesHtf
-    .map((c) => c.timestamp)
-    .sort((a, b) => a - b);
 
   const symbolScenarios =
     config.symbolScenarios?.get(symbol) ?? config.activeScenarios;
@@ -210,18 +166,12 @@ async function runBacktestForSymbol(
     config: symbolConfig as any,
   });
 
-  // --- Кэширование PatternData (только 15m контекст) ---
-  let cachedPatternData: any = null;
-  let cachedRouterResult: any = null;
-  let lastCachedMitigatedZonesLength = 0;
-  let lastCachedMitigatedStructuresLength = 0;
-  let currentHtfCandles: Candle[] = [];
-  let currentLtfCandles: Candle[] = [];
-
-  let currentDayUtc = -1;
-  let currentWeekUtc = -1;
-  let runningAth = new Decimal(0);
-  let runningAtl = new Decimal("Infinity");
+  let cachedPatternData: PatternData | null = null;
+  let ltfEnd = 0;
+  let htfEnd = 0;
+  let utcDay: number | undefined;
+  let utcHour: number | undefined;
+  const macro = new CalendarMacro();
 
   logger.level = "warn";
 
@@ -231,13 +181,11 @@ async function runBacktestForSymbol(
   // === PATTERN WINDOW PARITY (live CandleFeed capacities) ===
   // Live feeds buildPatternData() the last `historyCandles` CLOSED candles for
   // BOTH LTF and HTF — `CandleFeed.getCandles()` never exposes the forming
-  // candle. The backtester MUST use the identical window, otherwise scenarios
-  // 1/5/9 evaluate different 4H structures than the deployed engine.
+  // candle. This keeps the market structure window aligned with live.
   const historyWindow = config.historyCandles ?? 200;
-  const ltfMs = ltfMinutes * 60 * 1000;
-  const htfMs = Number(config.htfTimeframe) * 60 * 1000;
+  const { ltfTimeframe, htfTimeframe } = config;
+  const dayMs = timeframeToMinutes("D") * 60_000;
 
-  let index15m = 0;
   const mainCandles = useSniperMode ? candles1m : candlesLtf;
 
   // Warmup candles exist only as pattern context: the simulated/report period
@@ -248,7 +196,7 @@ async function runBacktestForSymbol(
     : Math.max(0, Math.min(ltfWarmupCount, mainCandles.length));
 
   logger.warn(
-    `[${symbol}] Starting backtest loop over ${mainCandles.length - loopStart} candles (Sniper Mode: ${useSniperMode ? "ON (1m)" : "OFF (15m)"})...`,
+    `[${symbol}] Starting backtest loop over ${mainCandles.length - loopStart} ${timeframeLabel(useSniperMode ? "1" : ltfTimeframe)} candles...`,
   );
 
   for (let i = loopStart; i < mainCandles.length; i++) {
@@ -261,113 +209,36 @@ async function runBacktestForSymbol(
     const currentCandle = mainCandles[i];
     const candleTime = currentCandle.timestamp;
 
-    // === СИНХРОНИЗАЦИЯ ТАЙМФРЕЙМОВ ===
-    let isNew15mClose = false;
-    let lastClosed15m: Candle | null = null;
-
-    if (useSniperMode) {
-      while (
-        index15m + 1 < candlesLtf.length &&
-        candlesLtf[index15m + 1].timestamp <= candleTime
-      ) {
-        index15m++;
-        isNew15mClose = true;
-      }
-      lastClosed15m = index15m > 0 ? candlesLtf[index15m - 1] : null;
-    } else {
-      index15m = i;
-      lastClosed15m = currentCandle;
-      isNew15mClose = true;
+    // Consume warmup and trading history alike. A source timestamp denotes the
+    // OPEN of its bar; an extreme is visible only once that bar has closed.
+    const evalCloseTime = candleCloseTime(candleTime, useSniperMode ? "1" : ltfTimeframe);
+    const previousLtfEnd = ltfEnd;
+    const previousHtfEnd = htfEnd;
+    while (ltfEnd < candlesLtf.length && candleCloseTime(candlesLtf[ltfEnd].timestamp, ltfTimeframe) <= evalCloseTime) {
+      macro.addClosed(candlesLtf[ltfEnd++]);
+    }
+    while (htfEnd < candlesHtf.length && candleCloseTime(candlesHtf[htfEnd].timestamp, htfTimeframe) <= evalCloseTime) {
+      htfEnd++;
     }
 
-    // === МАКРО-КОНТЕКСТ (Обновляется по 15m свечам) ===
-    if (lastClosed15m) {
-      const candleDate = new Date(lastClosed15m.timestamp);
-      const candleDay = candleDate.getUTCDate();
-      const candleWeek = Math.floor(
-        lastClosed15m.timestamp / (7 * 24 * 60 * 60 * 1000),
-      );
-
-      const candleHigh = new Decimal(lastClosed15m.high);
-      const candleLow = new Decimal(lastClosed15m.low);
-      if (candleHigh.gt(runningAth)) runningAth = candleHigh;
-      if (candleLow.lt(runningAtl)) runningAtl = candleLow;
-
-      if (candleDay !== currentDayUtc) {
-        currentDayUtc = candleDay;
-        const dailyLevels = calculateDailyLevels(
-          candlesLtf.slice(0, index15m),
-          ltfMinutes,
-        );
-
-        let pwh = new Decimal(0);
-        let pwl = new Decimal(0);
-        let wo = new Decimal(0);
-
-        if (candleWeek !== currentWeekUtc) {
-          currentWeekUtc = candleWeek;
-          const weeklyLevels = calculateWeeklyLevels(
-            candlesLtf.slice(0, index15m),
-            ltfMinutes,
-          );
-          if (weeklyLevels) {
-            pwh = weeklyLevels.pwh;
-            pwl = weeklyLevels.pwl;
-            wo = weeklyLevels.woPrice;
-          }
-        } else {
-          const existing = recognizer.getMacroContext(symbol);
-          pwh = existing?.weeklyLevels.pwh ?? new Decimal(0);
-          pwl = existing?.weeklyLevels.pwl ?? new Decimal(0);
-          wo = existing?.weeklyLevels.wo ?? new Decimal(0);
-        }
-
-        if (dailyLevels) {
-          recognizer.setMacroContext(symbol, {
-            ath: runningAth,
-            atl: runningAtl,
-            htfFvgs: [],
-            htfObs: [],
-            weeklyLevels: { pwh, pwl, wo },
-            dailyLevels: {
-              pdh: dailyLevels.pdh,
-              pdl: dailyLevels.pdl,
-              do: dailyLevels.doPrice,
-            },
-            liquidityPools: [
-              {
-                type: "PDH",
-                priceLevel: dailyLevels.pdh,
-                points: [],
-                isTaken: false,
-                timestamp: lastClosed15m.timestamp,
-              },
-              {
-                type: "PDL",
-                priceLevel: dailyLevels.pdl,
-                points: [],
-                isTaken: false,
-                timestamp: lastClosed15m.timestamp,
-              },
-              {
-                type: "PWH",
-                priceLevel: pwh,
-                points: [],
-                isTaken: false,
-                timestamp: lastClosed15m.timestamp,
-              },
-              {
-                type: "PWL",
-                priceLevel: pwl,
-                points: [],
-                isTaken: false,
-                timestamp: lastClosed15m.timestamp,
-              },
-            ],
-          });
-        }
-      }
+    const day = Math.floor(candleTime / dayMs);
+    if (day !== utcDay) {
+      utcDay = day;
+      // The open of an in-progress LTF bar is visible; its high/low are not.
+      const nextLtf = candlesLtf[ltfEnd];
+      const firstOpen = nextLtf && nextLtf.timestamp <= candleTime &&
+        Math.floor(nextLtf.timestamp / dayMs) === day ? nextLtf : currentCandle;
+      recognizer.setMacroContext(symbol, macro.snapshot(firstOpen));
+      cachedPatternData = null;
     }
+    // London/NY/Asian killzones change on whole hours, including when the
+    // last available LTF candle predates the session transition.
+    const hour = Math.floor(candleTime / 3600_000);
+    if (hour !== utcHour) {
+      utcHour = hour;
+      cachedPatternData = null;
+    }
+    if (ltfEnd !== previousLtfEnd || htfEnd !== previousHtfEnd) cachedPatternData = null;
 
     // === ЖЕСТКАЯ ПРОВЕРКА ОТКРЫТОЙ СДЕЛКИ ===
     if (state.openTrade || state.pendingLimitOrder) {
@@ -400,118 +271,31 @@ async function runBacktestForSymbol(
       if (state.openTrade || state.pendingLimitOrder) continue;
     }
 
-    // === СИГНАЛЬНЫЙ ДВИЖОК (Единый вызов Router) ===
-    // В Sniper Mode: вызываем на каждой 1m свече, передаем свежие 1m свечи
-    // В обычном режиме: только на закрытии 15m свечи
-    const shouldEvaluateRouter = useSniperMode ? true : isNew15mClose;
-
-    // Evaluation timestamp: live passes the timestamp of the candle that just
-    // closed — the 1m candle in Sniper Mode, the 15m candle in Classic mode
-    // (StrategyEngine.process). Session and killzone are derived from it, so a
-    // 15m anchor would mis-gate the first 15 minutes of every hour in Sniper Mode.
-    const evalTimestamp = useSniperMode
-      ? candleTime
-      : lastClosed15m?.timestamp ?? candleTime;
-
-    // Пересчитываем 15m/4H окна и PatternData ТОЛЬКО при новой 15m свече
-    if (isNew15mClose && lastClosed15m) {
-      // Evaluation instant = the moment the trigger candle closed (live evaluates
-      // on confirmed klines, milliseconds after that instant).
-      const evalCloseTimeMs = useSniperMode
-        ? candleTime + 60 * 1000
-        : candleTime + ltfMs;
-
-      // HTF window: only 4H candles fully CLOSED by the evaluation instant. The
-      // old `ts <= lastClosed15m.timestamp` filter leaked the still-forming 4H
-      // candle — up to 4 hours of future price action (lookahead).
-      const validHtfTimestamps = htfTimestamps.filter(
-        (ts) => ts + htfMs <= evalCloseTimeMs,
-      );
-      currentHtfCandles = validHtfTimestamps
-        .map((ts) => htfMap.get(ts)!)
-        .filter(Boolean);
-
-      // LTF window: drop the 15m candle still forming at the evaluation instant.
-      // Classic mode keeps the current candle (it has just closed:
-      // `timestamp + ltfMs === evalCloseTimeMs`); Sniper mode drops the candle
-      // containing the current 1m tick. Guard also handles data gaps correctly.
-      let ltfEndExclusive = index15m + 1;
-      const lastLtf = candlesLtf[ltfEndExclusive - 1];
-      if (lastLtf && lastLtf.timestamp + ltfMs > evalCloseTimeMs) {
-        ltfEndExclusive -= 1;
-      }
-      const ltfStart = Math.max(0, ltfEndExclusive - historyWindow);
-      currentLtfCandles = candlesLtf.slice(ltfStart, ltfEndExclusive);
-
-      if (
-        currentLtfCandles.length >= MIN_PATTERN_CANDLES &&
-        currentHtfCandles.length >= MIN_PATTERN_CANDLES
-      ) {
-        const htfEndIdx = currentHtfCandles.length - 1;
-        const htfStartIdx = Math.max(0, htfEndIdx - historyWindow + 1);
-        const currentHtfWindow = currentHtfCandles.slice(
-          htfStartIdx,
-          htfEndIdx + 1,
-        );
-
-        // Условие пересчета паттернов: только на новой 15m свече или при изменении митигированных зон/структур
-        const shouldRebuildCache =
-          cachedPatternData === null ||
-          state.mitigatedZones.length !== lastCachedMitigatedZonesLength ||
-          state.mitigatedStructures.length !== lastCachedMitigatedStructuresLength ||
-          isNew15mClose; // Пересчитываем ТОЛЬКО на закрытии 15m или при сделке
-
-        if (shouldRebuildCache) {
-          cachedPatternData = await recognizer.buildPatternData(
-            symbol,
-            currentLtfCandles,
-            currentHtfWindow,
-            evalTimestamp,
-          );
-          lastCachedMitigatedZonesLength = state.mitigatedZones.length;
-          lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
-        }
-      }
-    }
-
-    // Вызываем Router на каждой итерации (1m свече в Sniper Mode, или 15m в обычном)
-    // Gate mirrors the live StrategyEngine.process() guard (>= 20 candles per side).
+    // The router applies mitigation to copies. Rebuild the base pattern only
+    // when closed history or the calendar context changes.
     if (
-      shouldEvaluateRouter &&
-      lastClosed15m &&
-      // Live parity: StrategyEngine.process() returns early while the post-SL
-      // cooldown is active, so no scenario is evaluated. Without this the
-      // backtester re-fires the same setup every minute for the whole cooldown
-      // window (observed: 5 phantom SOL triggers after one stop-out), inflating
-      // the trigger funnel with signals that can never become trades.
-      !(state.cooldownUntil > 0 && state.cooldownUntil > candleTime) &&
-      currentLtfCandles.length >= MIN_PATTERN_CANDLES &&
-      currentHtfCandles.length >= MIN_PATTERN_CANDLES
+      state.cooldownUntil <= candleTime &&
+      Math.min(ltfEnd, historyWindow) >= MIN_PATTERN_CANDLES &&
+      Math.min(htfEnd, historyWindow) >= MIN_PATTERN_CANDLES
     ) {
-      // Подготовка 1m свечей для Снайперских сценариев
-      let candles1mForRouter: Candle[] = [];
-      if (useSniperMode) {
-        // Live feed1m capacity is 300 candles (5h) — StrategyEngine constructor.
-        // Only candles already closed (timestamp <= candleTime) are visible.
-        const endIdx = candles1m.findIndex(c => c.timestamp > candleTime);
-        const sliceEnd = endIdx > 0 ? endIdx : candles1m.length;
-        const sliceStart = Math.max(0, sliceEnd - SNIPER_1M_WINDOW);
-        candles1mForRouter = candles1m.slice(sliceStart, sliceEnd);
-      }
-
-      cachedRouterResult = await router.evaluate(
-        currentLtfCandles,
-        currentHtfCandles,
-        evalTimestamp,
+      cachedPatternData ??= await recognizer.buildPatternData(
+        symbol,
+        candlesLtf.slice(Math.max(0, ltfEnd - historyWindow), ltfEnd),
+        candlesHtf.slice(Math.max(0, htfEnd - historyWindow), htfEnd),
+        candleTime,
+      );
+      const candles1mForRouter = useSniperMode
+        ? candles1m.slice(Math.max(0, i + 1 - SNIPER_1M_WINDOW), i + 1)
+        : [];
+      const routerResult = await router.evaluate(
+        cachedPatternData.candles15m,
+        cachedPatternData.candles4h,
+        candleTime,
         state.mitigatedZones,
         state.mitigatedStructures,
         candles1mForRouter,
         cachedPatternData,
       );
-      lastCachedMitigatedZonesLength = state.mitigatedZones.length;
-      lastCachedMitigatedStructuresLength = state.mitigatedStructures.length;
-
-      const routerResult = cachedRouterResult;
 
         try {
           if (
@@ -528,10 +312,7 @@ async function runBacktestForSymbol(
             const side = idealEntry.gt(slDecimal) ? "Buy" : "Sell";
             const isLong = side === "Buy";
 
-            // The candle whose close is used as the Market fill:
-            // Sniper -> current 1m candle, Classic -> current (closed) 15m candle.
-            const entryCandle = useSniperMode ? currentCandle : lastClosed15m;
-            const currentPrice = new Decimal(entryCandle.close);
+            const currentPrice = new Decimal(currentCandle.close);
 
             // === PRE-FLIGHT GUARDS (live parity: executeStagedEntry / handleTradeApproval) ===
             // The setup is evaluated at the candle close and a Market order fills at
@@ -596,7 +377,7 @@ async function runBacktestForSymbol(
 
             const { state: newState } = openTrade(
               state,
-              entryCandle,
+              currentCandle,
               entryPriceDecimal,
               slDecimal,
               tpDecimal,
@@ -618,7 +399,7 @@ async function runBacktestForSymbol(
             );
 
             logger.warn(
-              `[${symbol}] Scenario ${routerResult.scenario!.id} signal at ${new Date(entryCandle.timestamp).toISOString()} | ${orderType} entry=${entryPriceDecimal.toString()} live=${currentPrice.toString()} SL=${slDecimal.toString()} TP=${tpDecimal.toString()} | filled=${!!newState.openTrade}`,
+              `[${symbol}] Scenario ${routerResult.scenario!.id} signal at ${new Date(candleTime).toISOString()} | ${orderType} entry=${entryPriceDecimal.toString()} live=${currentPrice.toString()} SL=${slDecimal.toString()} TP=${tpDecimal.toString()} | filled=${!!newState.openTrade}`,
             );
 
             // Commit the state even when tradeOpened === false: the Limit branch
@@ -704,8 +485,8 @@ async function runCsvBacktest(
   }
 
   const intervalMinutes = detectCsvIntervalMinutes(rawCandles);
-  const ltfMinutes = Number(config.ltfTimeframe);
-  const htfMinutes = Number(config.htfTimeframe);
+  const ltfMinutes = timeframeToMinutes(config.ltfTimeframe);
+  const htfMinutes = timeframeToMinutes(config.htfTimeframe);
   const sniperMode = config.enableSniperMode === true;
 
   if (sniperMode && intervalMinutes !== 1) {
@@ -727,20 +508,19 @@ async function runCsvBacktest(
   );
 
   const candles1m = sniperMode ? rawCandles : [];
+  const sourceEnd = candleCloseTime(rawCandles[rawCandles.length - 1].timestamp, sniperMode ? "1" : config.ltfTimeframe);
   const candlesLtf = sniperMode
-    ? aggregateCandles(rawCandles, ltfMinutes)
+    ? aggregateCandles(rawCandles, config.ltfTimeframe)
+        .filter(c => candleCloseTime(c.timestamp, config.ltfTimeframe) <= sourceEnd)
     : rawCandles;
-  const candlesHtf = aggregateCandles(candlesLtf, htfMinutes);
+  const candlesHtf = aggregateCandles(candlesLtf, config.htfTimeframe)
+    .filter(c => candleCloseTime(c.timestamp, config.htfTimeframe) <= sourceEnd);
 
-  // Weekly macro levels need a full 7-day window; the extra candle absorbs a
-  // file that starts mid-bucket. 673 is the 15m baseline (672 + 1), and the
-  // larger of the two keeps smaller LTF intervals equally warm.
-  const candlesPerWeek = Math.floor((1440 * 7) / ltfMinutes);
-  const requiredLtfWarmup = Math.max(673, candlesPerWeek + 1);
-  if (candlesLtf.length < requiredLtfWarmup) {
+  const ltfWarmup = requiredLtfWarmup(config.historyCandles, ltfMinutes, htfMinutes);
+  if (candlesLtf.length < ltfWarmup) {
     throw new Error(
       `[CSV MODE] Insufficient warmup: ${candlesLtf.length} ${ltfMinutes}m candles, ` +
-        `but at least ${requiredLtfWarmup} are required (one week of history for PDH/PDL/PWH/PWL and the 4H SMA50 window).`,
+        `but at least ${ltfWarmup} are required for the configured history, weekly levels and HTF warmup.`,
     );
   }
 
@@ -752,11 +532,7 @@ async function runCsvBacktest(
   }
 
   const instrument = resolveOfflineInstrument(symbol);
-  const recognizer = new PatternRecognizer(createOfflineBybitClient(), {
-    displacementMultiplier: new Decimal(
-      config.smcDisplacementMultiplier || 1.5,
-    ),
-  });
+  const recognizer = new PatternRecognizer(createOfflineBybitClient(), createPatternConfigFromBotConfig(config));
 
   logger.warn(
     `[CSV MODE] Offline instrument for ${symbol}: tickSize=${instrument.tickSize}, qtyStep=${instrument.qtyStep}, ` +
@@ -777,7 +553,6 @@ async function runCsvBacktest(
     candlesLtf,
     candlesHtf,
     candles1m,
-    ltfMinutes,
     config,
     0,
   );
@@ -850,11 +625,7 @@ async function main(): Promise<void> {
     process.exit(0);
   } else {
     client = BybitClient.create(config as any);
-    recognizer = new PatternRecognizer(client, {
-      displacementMultiplier: new Decimal(
-        config.smcDisplacementMultiplier || 1.5,
-      ),
-    });
+    recognizer = new PatternRecognizer(client, createPatternConfigFromBotConfig(config));
 
     for (const symbol of symbolsToTest) {
       const info = await client.getInstrumentInfo(symbol);
@@ -880,34 +651,28 @@ async function main(): Promise<void> {
       // of a 60-day backtest). LTF warmup additionally guarantees a full 7-day
       // history for weekly macro levels. Warmup candles are CONTEXT ONLY:
       // `ltfWarmupCount` marks where the simulated/report period begins.
-      const historyWindow = config.historyCandles ?? 200;
-      const ltfMinutesConfig = Number(config.ltfTimeframe);
+      const historyWindow = config.historyCandles;
+      const ltfMinutes = timeframeToMinutes(config.ltfTimeframe);
+      const htfMinutes = timeframeToMinutes(config.htfTimeframe);
+      const ltfWarmupCandles = requiredLtfWarmup(historyWindow, ltfMinutes, htfMinutes);
+      const ltfWarmupMs = ltfWarmupCandles * ltfMinutes * 60_000;
+      const htfWarmupMs = Math.max(historyWindow, MIN_PATTERN_CANDLES) * htfMinutes * 60_000;
+      // A rolling seven days may start halfway through the previous ISO week.
+      const priorMonday = DateTime.fromMillis(fromMs, { zone: "utc" }).startOf("week").minus({ weeks: 1 }).toMillis();
 
-      // Weekly macro context (PWH/PWL/WO) is derived from a full 7-day window of
-      // LTF candles (`calculateWeeklyLevels`). Preloading fewer than that leaves
-      // weekly levels at zero for the opening days of the run. The warmup must
-      // therefore cover at least one week; the extra candle absorbs a `fromMs`
-      // anchored mid-candle (`getTimeRangeForDays` uses `Date.now()`), so a full
-      // week always sits strictly before the first simulated candle. Warmup is
-      // closed history only — strictly causal, never future data.
-      const candlesPerWeek = Math.floor((1440 * 7) / ltfMinutesConfig);
-      const ltfWarmupCandles = Math.max(historyWindow, candlesPerWeek + 1);
-      const ltfWarmupMs = ltfWarmupCandles * ltfMinutesConfig * 60 * 1000;
-      const htfWarmupMs = historyWindow * Number(config.htfTimeframe) * 60 * 1000;
-
-      const [candlesLtfWithWarmup, candlesHtf] = await Promise.all([
+      const [loadedLtf, candlesHtf] = await Promise.all([
         loadCachedOrFetch(
           client,
           symbol,
-          config.ltfTimeframe as Timeframe,
-          fromMs - ltfWarmupMs,
+          config.ltfTimeframe,
+          Math.min(fromMs - ltfWarmupMs, priorMonday),
           toMs,
           config.useLocalCacheOnly
         ),
         loadCachedOrFetch(
           client,
           symbol,
-          config.htfTimeframe as Timeframe,
+          config.htfTimeframe,
           fromMs - htfWarmupMs,
           toMs,
           config.useLocalCacheOnly
@@ -915,22 +680,18 @@ async function main(): Promise<void> {
       ]);
 
       // The simulated/report period starts at `fromMs`; everything before is warmup.
-      const ltfWarmupCount = Math.max(
-        0,
-        candlesLtfWithWarmup.findIndex((c) => c.timestamp >= fromMs),
-      );
+      const candlesLtfWithWarmup = loadedLtf.filter(c => candleCloseTime(c.timestamp, config.ltfTimeframe) <= toMs);
+      const firstTradingBar = candlesLtfWithWarmup.findIndex(c => c.timestamp >= fromMs);
+      const ltfWarmupCount = firstTradingBar === -1 ? candlesLtfWithWarmup.length : firstTradingBar;
       const candlesLtf = candlesLtfWithWarmup.slice(ltfWarmupCount);
       if (ltfWarmupCount > 0) {
         logger.info(
-          `[${symbol}] Pattern warmup preloaded: ${ltfWarmupCount} extra ${config.ltfTimeframe}m candles (weekly window ${candlesPerWeek} candles; HTF fetch extended by ${historyWindow} × ${config.htfTimeframe}m).`,
+          `[${symbol}] Pattern warmup preloaded: ${ltfWarmupCount} ${timeframeLabel(config.ltfTimeframe)} candles.`,
         );
       }
-      if (ltfWarmupCount > 0 && ltfWarmupCount < candlesPerWeek) {
-        // Only reachable with a truncated source (e.g. `USE_LOCAL_CACHE_ONLY=true`
-        // against a cache that does not reach back a full week). Never silent:
-        // weekly macro levels stay zero until enough context exists.
+      if (ltfWarmupCount < ltfWarmupCandles) {
         logger.warn(
-          `[${symbol}] LTF warmup covers only ${ltfWarmupCount}/${candlesPerWeek} candles — PWH/PWL/WO will remain zero until a full week of history is available. Extend the cache or run online.`,
+          `[${symbol}] LTF warmup covers only ${ltfWarmupCount}/${ltfWarmupCandles} candles; calendar levels may have incomplete history.`,
         );
       }
 
@@ -950,7 +711,9 @@ async function main(): Promise<void> {
         // Memory-safe copy: spreading a long Sniper history (>~100k 1m candles)
         // into push() exceeds V8's argument stack and throws
         // "Maximum call stack size exceeded" AFTER the data was fetched.
-        for (const candle of fetched1m) candles1m.push(candle);
+        for (const candle of fetched1m) {
+          if (candleCloseTime(candle.timestamp, "1") <= toMs) candles1m.push(candle);
+        }
       }
 
       if (
@@ -973,7 +736,6 @@ async function main(): Promise<void> {
         candlesLtfWithWarmup,
         candlesHtf,
         candles1m,
-        Number(config.ltfTimeframe),
         config,
         ltfWarmupCount,
       );

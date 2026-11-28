@@ -4,9 +4,6 @@ import { BotConfig } from '../../config/env';
 import { ROUND_TRIP_TAKER_FEE } from '../../config/fees';
 import { resolveTakeProfit } from '../tpResolver';
 
-/** 15m entry timeframe of this scenario. */
-const ENTRY_TIMEFRAME = '15';
-
 /**
  * Volume baseline window: the 20 CONFIRMED candles immediately BEFORE the sweep
  * candle.
@@ -107,7 +104,7 @@ const EMPTY_STATS: Scenario5RejectionStats = {
  *
  * Causal contract
  * ---------------
- *  1. The sweep candle is the LAST CLOSED 15m candle. There is no lookback: the
+ *  1. The sweep candle is the LAST CLOSED LTF candle. There is no lookback: the
  *     entry is placed at that candle's close, so an older wick would enter at a
  *     price totally disconnected from the liquidity event being traded.
  *  2. The stop is the sweep candle's pierced extreme (high for a short, low for
@@ -140,16 +137,10 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     const stats = Scenario5_HTFLiquiditySweep.rejectionStats;
     stats.totalEvals++;
 
-    // Mode guard (audit F-03): Scenario 5 is a 15m Classic pattern. In Sniper
-    // Mode the router is driven by 1m closes, so the same stale 15m candle would
-    // be re-evaluated on every tick. Fail closed rather than stage a stale entry.
-    if (
-      this.config.enableSniperMode ||
-      this.config.ltfTimeframe !== ENTRY_TIMEFRAME
-    ) {
+    if (!this.isClassicMode()) {
       return this.reject(
         'wrongMode',
-        'Scenario 5 is Classic 15m-only (Sniper Mode or non-15m LTF active)',
+        'Scenario 5 requires Classic mode with LTF of at least 5 minutes',
       );
     }
 
@@ -196,12 +187,20 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     }
 
     const sweepCandle = candles15m[candles15m.length - 1];
+    // The sweep itself is the structure; there is no separate CHoCH/BOS filter.
+    // Legacy mitigation records have no timeframe and match by timestamp.
+    if (patternData.mitigatedStructures?.some((structure: { timestamp: number; timeframe?: string }) =>
+      structure.timestamp === sweepCandle.timestamp &&
+      (structure.timeframe === undefined || structure.timeframe === this.config.ltfTimeframe)
+    )) {
+      return this.reject('noSweep', 'Sweep candle already consumed');
+    }
     const sfp = this.detectSfp(sweepCandle, htfPools);
 
     if (!sfp) {
       return this.reject(
         'noSweep',
-        'No SFP on the last closed 15m candle: no HTF pool pierced and rejected by the close',
+        'No SFP on the last closed LTF candle: no HTF pool pierced and rejected by the close',
       );
     }
 
@@ -301,6 +300,8 @@ export class Scenario5_HTFLiquiditySweep extends BaseScenario {
     );
 
     const resolution = resolveTakeProfit({
+      htfTimeframe: this.config.htfTimeframe,
+      sweptLevelPrice: sfp.level,
       direction,
       entry: baseLevels.entry,
       stopLoss: baseLevels.stopLoss,

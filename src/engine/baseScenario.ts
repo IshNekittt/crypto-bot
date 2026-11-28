@@ -3,6 +3,7 @@ import { ScenarioLevels } from '../types';
 import { ZoneDetails } from '../types';
 import { Decimal } from 'decimal.js';
 import { BotConfig } from '../config/env';
+import { timeframeToMinutes } from '../utils/timeframe';
 
 export interface Zone {
   type: string;
@@ -105,8 +106,13 @@ export abstract class BaseScenario implements IScenario {
     return patternData.currentKillzone !== 'NONE';
   }
 
+  protected isClassicMode(): boolean {
+    return !this.config.enableSniperMode && timeframeToMinutes(this.config.ltfTimeframe) >= 5;
+  }
+
   protected isValidDisplacement(structure: any, minMultiplier: number = 1.5): boolean {
-    return structure.impulseFactor?.gte(minMultiplier) ?? false;
+    const factor = structure.impulseFactor;
+    return Decimal.isDecimal(factor) && factor.isFinite() && factor.gte(minMultiplier);
   }
 
   protected isValidBodyClose(structure: any): boolean {

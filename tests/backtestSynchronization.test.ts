@@ -164,6 +164,20 @@ describe('Backtest synchronization - Patch 3: Adaptive Fractioning & burn-on-ent
 });
 
 describe('Backtest synchronization - Patch 4: PnL-sign loss & partial-close fees', () => {
+  it.each([['15', 15], ['60', 60], ['240', 240], ['D', 1440]])(
+    'applies the Classic post-loss cooldown in %s candles',
+    (ltfTimeframe, minutes) => {
+      const opened = openLongMarket(getInitialState());
+      const close = { ...baseCandle, timestamp: 1000900, low: '49890' };
+      const { state, tradeResult } = checkAndCloseTrade(
+        opened.state, close, { cooldownCandles: 16, ltfTimeframe, limitExpirationCandles: 6 },
+        mockInstrument, 'BTCUSDT',
+      );
+      expect(tradeResult?.closedBy).toBe('SL');
+      expect(state.cooldownUntil - close.timestamp).toBe(16 * minutes * 60_000);
+    },
+  );
+
   it('treats a TP close with negative net PnL as a loss (cooldown + Drawdown Guard)', () => {
     const { state: openedState } = openLongMarket(getInitialState(), {
       entry: '50000',

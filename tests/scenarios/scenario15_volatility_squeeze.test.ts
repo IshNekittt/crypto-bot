@@ -81,13 +81,24 @@ describe('Scenario15_VolatilitySqueeze', () => {
     expect(sut.getStructureDetails()?.direction).toBe('BEARISH');
   });
 
-  it('fails closed outside Classic 15m mode', () => {
+  it('fails closed in Sniper mode', () => {
     const candles = [...Array.from({ length: 25 }, (_, index) => candle(index, 100)), candle(25, 120)];
     const sut = new Scenario15_VolatilitySqueeze({ ...config, enableSniperMode: true });
 
     expect(sut.evaluate(pattern(candles))).toBe(false);
-    expect(sut.getReason()).toMatch(/Classic Mode on 15m/);
+    expect(sut.getReason()).toMatch(/requires Classic mode/);
     expect(Scenario15_VolatilitySqueeze.getRejectionStats().wrongMode).toBe(1);
+  });
+
+  it.each([1, -1])('rejects KC contraction without a directional close outside BB (slope %i)', slope => {
+    // A wide wick rolls out of the ATR window on the final candle. BB leaves
+    // KC, but the last close is still inside BB on this linear trend.
+    const candles = Array.from({ length: 26 }, (_, i) => candle(i, 100 + slope * i, i === 5 ? 90 : 0.1));
+    const sut = new Scenario15_VolatilitySqueeze(config);
+    expect(sut.evaluate(pattern(candles))).toBe(false);
+    expect(Scenario15_VolatilitySqueeze.getRejectionStats()).toMatchObject({
+      noBreakout: 1, noSqueezeFiring: 0, triggered: 0,
+    });
   });
 
   it('rejects candles without a qualifying squeeze firing', () => {

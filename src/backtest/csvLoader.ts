@@ -1,6 +1,8 @@
 import { readFileSync } from 'fs';
 import { Decimal } from 'decimal.js';
+import { DateTime } from 'luxon';
 import { Candle } from '../types';
+import { timeframeToMinutes } from '../utils/timeframe';
 
 /**
  * Volume is a hard requirement for every CSV row. The old loader silently
@@ -259,18 +261,19 @@ export function detectCsvIntervalMinutes(candles: Candle[]): number {
 }
 
 /**
- * Aggregate candles into fixed UTC-epoch buckets (e.g. 15m → 4H).
+ * Aggregate candles into UTC buckets (e.g. 15m → 4H).
  *
  * Each output candle opens at the first source candle, closes at the last,
  * takes the max high / min low and sums volume. Bucket alignment is strictly
- * `floor(timestamp / bucketMs) * bucketMs` so sessions never drift with local
- * time. Empty input yields an empty output; a non-positive target is an error
+ * `floor(timestamp / bucketMs) * bucketMs` for fixed intervals; `W` and `M`
+ * align to the ISO week and calendar month. Empty input yields an empty output; a non-positive target is an error
  * (it would divide by zero) rather than a silent no-op.
  */
 export function aggregateCandles(
   candles: Candle[],
-  targetMinutes: number,
+  target: number | string,
 ): Candle[] {
+  const targetMinutes = typeof target === 'string' ? timeframeToMinutes(target) : target;
   if (!Number.isFinite(targetMinutes) || targetMinutes <= 0) {
     throw new Error(
       `aggregateCandles requires a positive finite targetMinutes, got: ${targetMinutes}`,
@@ -315,7 +318,9 @@ export function aggregateCandles(
       );
     }
 
-    const bucket = Math.floor(candle.timestamp / bucketMs) * bucketMs;
+    const bucket = target === 'W' || target === 'M'
+      ? DateTime.fromMillis(candle.timestamp, { zone: 'utc' }).startOf(target === 'W' ? 'week' : 'month').toMillis()
+      : Math.floor(candle.timestamp / bucketMs) * bucketMs;
 
     if (bucketStart === null || bucket !== bucketStart) {
       flush();

@@ -1,5 +1,6 @@
 import { Candle, Timeframe } from '../types';
 import { KlineUpdate } from '../api/wsClient';
+import { candleCloseTime } from '../utils/timeframe';
 
 export interface HistorySource {
   getKlines(symbol: string, interval: Timeframe, limit: number): Promise<readonly Candle[]>;
@@ -42,8 +43,10 @@ export class CandleFeed {
   }
 
   async loadHistory(source: HistorySource): Promise<void> {
-    const candles = await source.getKlines(this.symbol, this.interval, this.capacity);
-    this.buffer = [...candles];
+    const requestedAt = Date.now();
+    const candles = await source.getKlines(this.symbol, this.interval, Math.min(this.capacity + 1, 1000));
+    this.buffer = candles.filter(c => candleCloseTime(c.timestamp, this.interval) <= requestedAt)
+      .slice(-this.capacity);
     // Initialize live price from last closed candle
     if (this.buffer.length > 0) {
       this.currentLivePrice = this.buffer[this.buffer.length - 1].close;

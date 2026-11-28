@@ -61,6 +61,22 @@ describe('CandleFeed', () => {
     expect(f.getLastClosed()?.timestamp).toBe(300);
   });
 
+  it('does not preload the forming daily bar as a confirmed HTF close', async () => {
+    const midnight = Date.UTC(2026, 10, 23);
+    const now = jest.spyOn(Date, 'now').mockReturnValue(midnight + 4 * 3600_000);
+    try {
+      const f = new CandleFeed('SOLUSDT', 'D', 1);
+      const source = { getKlines: jest.fn().mockResolvedValue([candle(midnight - 86_400_000), candle(midnight)]) };
+      await f.loadHistory(source);
+      expect(source.getKlines).toHaveBeenCalledWith('SOLUSDT', 'D', 2);
+      expect(f.getCandles()).toEqual([candle(midnight - 86_400_000)]);
+      f.applyKline(update('SOLUSDT', 'D', true, midnight));
+      expect(f.getCandles()).toEqual([candle(midnight)]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('applies only confirmed klines of its own symbol and interval', async () => {
     const f = feed();
     await f.loadHistory(historySource);
